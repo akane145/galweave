@@ -1,0 +1,45 @@
+# 依赖与构建产物
+node_modules/
+dist/
+dist-single/
+
+# Tauri / Rust
+src-tauri/target/
+src-tauri/gen/
+
+# 运行时数据(术语表/设置/进度备份目录,不入库)
+glossary.json
+settings.json
+.galweave/
+
+# 打包产物与发布目录
+发布包/
+git上传/
+release-v*/
+.release-restore/
+.release-verify/
+.zcode/
+.mimosa/
+
+# 第三方参考源码(LunaTranslator,仅本地对照,不入库)
+LunaTranslator-main/
+
+# 本地真实词典/样例游戏脚本(可能受版权保护,不入库)
+JPdict/
+*.mdx
+*.mdd
+*.ks.txt
+magaru_*.txt
+旮旯给木翻译工具.html
+翻译工具说明.md
+
+# 一次性恢复/调试脚本
+scripts/_dbg_*.ps1
+scripts/leveldb_*.ps1
+scripts/recover_*.ps1
+scripts/snappy_*.ps1
+
+# 临时
+*.bak
+.DS_Store
+*.log

@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Galweave</title>
+<link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+
+<!-- 背景图片层(自定义背景用,默认隐藏) -->
+<div id="bgLayer" class="hidden"></div>
+
+<div id="topbar">
+  <header class="menu-bar">
+    <div class="app-title">Galweave</div>
+    <div class="file-meta">
+      <span id="fname"></span>
+      <span id="progress"></span>
+      <span id="stats"></span>
+    </div>
+  </header>
+
+  <div id="controls" class="command-bar" aria-label="文件与工具操作">
+    <div class="tool-group primary-group">
+      <button id="btnImport">导入文本</button>
+      <input type="file" id="fileInput" accept=".txt,.ks,.ks.txt,text/plain" hidden>
+      <button id="btnSaveFile" title="直接写回导入的原文件">保存原文件</button>
+      <button id="btnSave" title="下载一份译文副本">导出译文</button>
+    </div>
+    <div class="tool-group">
+      <button id="btnRestore" class="secondary">恢复进度</button>
+      <button id="btnClear" class="danger">清空翻译</button>
+      <button id="btnClearProgress" class="secondary" title="删除当前文件的已保存翻译进度,重新导入不再恢复">清除进度</button>
+    </div>
+    <div class="tool-group">
+      <button id="btnParseSet" class="secondary" title="格式识别 + 解析规则(标记/正则/规范化/还原)">格式/规则</button>
+      <button id="btnProof" class="secondary" title="开启/关闭校对模式(状态管理/批注/修改记录)">📋 校对</button>
+      <button id="btnThemeModal" class="secondary" title="主题/背景/字体设置">主题</button>
+      <button id="btnTheme" class="secondary icon-only" title="切换深色/浅色/黑白主题">🌓</button>
+      <button id="btnSidebar" class="secondary" title="打开/关闭侧边栏(文件夹/术语表)">侧边栏</button>
+    </div>
+    <div class="tool-group mt-group">
+      <select id="mtProvider" title="机器翻译服务">
+        <option value="">Sakura 本地（未配置）</option>
+      </select>
+      <button class="toolbtn secondary" id="btnMTSettings" title="配置机器翻译服务">机翻配置</button>
+      <button class="toolbtn secondary" id="btnMT" title="翻译当前行(机器翻译)">翻译当前行</button>
+      <button class="toolbtn secondary" id="btnMTBatch" title="批量翻译未翻译的行">批量翻译</button>
+    </div>
+  </div>
+
+  <div id="searchbar" class="search-bar" aria-label="搜索替换与导航">
+    <div class="tool-group search-group">
+      <input type="text" id="q" placeholder="搜索...（Enter 下一个）">
+      <input type="text" id="r" placeholder="替换为...（Enter 替换当前）">
+      <select id="scope">
+        <option value="all">原文+译文</option>
+        <option value="orig">仅原文</option>
+        <option value="trans">仅译文</option>
+        <option value="name">仅名字</option>
+      </select>
+      <label class="check-label" title="替换只作用于译文/名字,原文保持锁定"><input type="checkbox" id="mcase"> 区分大小写</label>
+      <button class="toolbtn secondary" id="btnPrev" title="Shift+F3">上一个</button>
+      <button class="toolbtn secondary" id="btnNext" title="F3">下一个</button>
+      <button class="toolbtn" id="btnReplace" title="Ctrl+Enter">替换</button>
+      <button class="toolbtn warn" id="btnReplaceAll">全部替换</button>
+      <span id="mcount"></span>
+    </div>
+    <div class="tool-group nav-group">
+      <input type="text" id="jumpInput" placeholder="跳转行号/编号..." title="输入原文/译文前的编号(如 3、TEXT|0、NAME|11),回车跳转">
+      <button class="toolbtn secondary" id="btnJump" title="跳转到该行">跳转</button>
+      <button class="toolbtn secondary" id="btnNextTodo" title="跳到下一个未翻译的行(F2)">下一未翻译</button>
+      <button class="toolbtn secondary icon-only" id="btnUndo" title="撤销 Ctrl+Z">↩</button>
+      <button class="toolbtn secondary icon-only" id="btnRedo" title="重做 Ctrl+Y">↪</button>
+    </div>
+  </div>
+
+  <!-- 校对模式工具栏(开启后显示) -->
+  <div id="proofbar" class="proof-bar hidden">
+    <div class="tool-group">
+      <span class="proof-title">📋 校对</span>
+      <button class="toolbtn secondary proof-filter active" data-pf="all">全部 <em id="pfAll">0</em></button>
+      <button class="toolbtn secondary proof-filter" data-pf="pending">待校对 <em id="pfPending">0</em></button>
+      <button class="toolbtn secondary proof-filter" data-pf="issue">有问题 <em id="pfIssue">0</em></button>
+      <button class="toolbtn secondary proof-filter" data-pf="approved">已通过 <em id="pfApproved">0</em></button>
+      <button class="toolbtn secondary" id="btnNextIssue" title="跳到下一处有问题(含未解决批注)">下一问题 ⤳</button>
+    </div>
+    <div class="tool-group">
+      <span id="proofCount" class="proof-count"></span>
+      <button class="toolbtn secondary" id="btnProofKeys" title="自定义校对快捷键">⌨ 快捷键</button>
+    </div>
+  </div>
+</div>
+
+<div id="main">
+  <div id="list">
+    <div id="empty">
+      <b>Galweave</b><br>
+      点击「导入文本」选择要翻译的 .txt 文件<br>
+      或将文件直接拖入本窗口<br>
+      或点「侧边栏」浏览目录文件、管理术语表<br>
+      <br>
+      <span>原文只读锁定 · 自动聚焦待翻译行 · Tab 切换 · Ctrl+F 搜索替换 · Ctrl+Z 撤销 · 📋 校对</span>
+    </div>
+  </div>
+
+  <aside id="sidebar" class="hidden">
+    <div id="sbResize" title="拖动调整侧边栏宽度（双击复位）"></div>
+    <div class="side-head">
+      <span id="sideTitle">侧边栏</span>
+      <div class="side-tabs">
+        <button class="side-tab active" data-tab="files" title="文件夹浏览器">文件</button>
+        <button class="side-tab" data-tab="glossary" title="术语表(人名/词条)">术语</button>
+        <button class="side-tab" data-tab="dict" title="词典查询 / 词典源 / 快捷片段">词典</button>
+        <button class="side-tab" data-tab="proof" title="校对批注与修改记录">校对</button>
+        <button id="btnSidebarClose" title="关闭面板">✕</button>
+      </div>
+    </div>
+
+    <!-- 文件树面板 -->
+    <div class="side-panel" id="panel-files">
+      <div class="side-body">
+        <button id="btnPickFolder" class="secondary toolbtn">选择文件夹...</button>
+        <div id="folderName" class="folder-name"></div>
+        <div id="fileTree" class="file-tree"></div>
+        <div id="sideHint" class="side-hint">选择文件夹后显示文件列表<br>点击 .txt 文件即可打开</div>
+      </div>
+    </div>
+
+    <!-- 术语表面板 -->
+    <div class="side-panel hidden" id="panel-glossary">
+      <div class="side-body">
+        <div id="glossProjectLabel" class="folder-name" title="术语表保存位置"></div>
+        <div class="gloss-toolbar">
+          <button id="btnGlossImport" class="secondary toolbtn" title="从 JSON / CSV 文件导入术语表">导入</button>
+          <button id="btnGlossExport" class="secondary toolbtn" title="导出术语表为 JSON 备份">导出</button>
+          <button id="btnGlossExportCsv" class="secondary toolbtn" title="导出为 CSV(Excel 可直接打开)">CSV</button>
+          <button id="btnGlossApply" class="toolbtn" title="把术语表应用到已翻译的译文">应用</button>
+        </div>
+        <div class="gloss-sec-title">人名表（日文原名 → 中文译名，自动应用）</div>
+        <div class="gloss-add-row">
+          <input type="text" id="nameAddSrc" placeholder="日文原名">
+          <input type="text" id="nameAddDst" placeholder="中文译名">
+          <button id="btnNameAdd" class="toolbtn">＋</button>
+        </div>
+        <div id="nameTable" class="gloss-table"></div>
+        <div class="gloss-sec-title">词条表（原文命中高亮，点击插入译文）</div>
+        <div class="gloss-add-row">
+          <input type="text" id="termAddSrc" placeholder="原文词条">
+          <input type="text" id="termAddDst" placeholder="译文">
+          <button id="btnTermAdd" class="toolbtn">＋</button>
+        </div>
+        <div id="termTable" class="gloss-table"></div>
+      </div>
+    </div>
+
+    <!-- 词典面板: 查询 / 词典源 / 快捷片段 -->
+    <div class="side-panel hidden" id="panel-dict">
+      <div class="side-body">
+        <div class="proof-view-tabs">
+          <button class="proof-view-tab active" data-dv="lookup">🔍 查询</button>
+          <button class="proof-view-tab" data-dv="sources">📚 词典源</button>
+          <button class="proof-view-tab" data-dv="snippets">⌨ 片段</button>
+        </div>
+
+        <!-- 词典查询 -->
+        <div class="proof-view" id="dv-lookup">
+          <div class="dict-lookup-row">
+            <input type="text" id="dictInput" placeholder="输入日语词查询…" autocomplete="off">
+            <button id="btnDictLookup" class="toolbtn">查询</button>
+          </div>
+          <div id="dictResults" class="dict-results"></div>
+          <div class="side-hint">在原文或译文里选中词，点弹出的「📖 查词」也能查询；查询会并发所有已启用的词典源。</div>
+        </div>
+
+        <!-- 词典源管理 -->
+        <div class="proof-view hidden" id="dv-sources">
+          <div class="gloss-toolbar">
+            <button id="btnDictAddJson" class="secondary toolbtn" title="从 galtrans-dict-v1 JSON 文件添加">＋ JSON 词典</button>
+            <button id="btnDictAddMdx" class="secondary toolbtn" title="加载 MDX 词典文件(会话内有效,可多选)">＋ MDX 词典</button>
+            <button id="btnDictAddHttp" class="secondary toolbtn" title="配置 HTTP 在线词典(URL 模板+字段映射)">＋ HTTP 词典</button>
+          </div>
+          <div id="dictSourceList"></div>
+          <div class="side-hint">JSON 词典格式与 HTTP 字段映射说明见 docs/dictionary-plugins.md；桌面版记住文件路径，浏览器版为本次会话加载。</div>
+        </div>
+
+        <!-- 快捷片段 -->
+        <div class="proof-view hidden" id="dv-snippets">
+          <div id="snipLocation" class="folder-name" title="片段保存位置"></div>
+          <div class="gloss-sec-title">快捷片段（译文中输入缩写，浮层提示后 Tab 采纳）</div>
+          <div id="snipTable" class="gloss-table"></div>
+          <div class="gloss-add-row">
+            <input type="text" id="snipAddSrc" placeholder="缩写(如 ys)">
+            <input type="text" id="snipAddDst" placeholder="展开文本">
+            <button id="btnSnipAdd" class="toolbtn">＋</button>
+          </div>
+          <div class="side-hint">未打开文件时保存到全局 snippets.json；打开文件后随项目目录保存；查询时项目片段覆盖同名全局片段。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 校对面板 -->
+    <div class="side-panel hidden" id="panel-proof">
+      <div class="side-body">
+        <div class="proof-view-tabs">
+          <button class="proof-view-tab active" data-pv="anno">📌 批注总览</button>
+          <button class="proof-view-tab" data-pv="log">📋 修改记录</button>
+        </div>
+
+        <!-- 批注总览 -->
+        <div class="proof-view" id="pv-anno">
+          <div class="gloss-sec-title">未解决（<span id="annoOpenCount">0</span>）</div>
+          <div id="annoOpenList" class="proof-list"></div>
+          <div class="gloss-sec-title">已解决（<span id="annoDoneCount">0</span>）</div>
+          <div id="annoDoneList" class="proof-list"></div>
+          <div class="side-hint">批注会随翻译进度保存；行内 📝 按钮可快速添加。新增未解决的「问题/疑问」批注会把该行自动标为有问题。</div>
+        </div>
+
+        <!-- 修改记录 -->
+        <div class="proof-view hidden" id="pv-log">
+          <div class="proof-log-toolbar">
+            <button id="btnLogRefresh" class="secondary toolbtn" title="重新读取修改记录">刷新</button>
+            <span class="side-hint">校对模式下记录译文/译名改动（最多 500 条，显示最新 50 条）</span>
+          </div>
+          <div id="proofLogList" class="proof-list"></div>
+        </div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<footer>
+  <span>Galweave</span>
+  <span id="statusText">快捷键：</span>
+  <kbd>Tab</kbd><span>下一行</span>
+  <kbd>Shift+Tab</kbd><span>上一行</span>
+  <kbd>Enter</kbd><span>下一行</span>
+  <kbd>F2</kbd><span>下一未翻译</span>
+  <kbd>Ctrl+S</kbd><span>保存</span>
+  <kbd>Ctrl+F</kbd><span>搜索</span>
+  <kbd>F3</kbd><span>下个匹配</span>
+</footer>
+
+<!-- 格式识别 + 解析规则设置模态(合并) -->
+<div id="setModal" class="modal-mask">
+  <div class="modal recog-modal">
+    <h3>格式识别 + 解析规则</h3>
+
+    <!-- 一、自动识别 -->
+    <div class="field">
+      <label>① 自动识别格式</label>
+      <div class="row">
+        <label class="check-label modal-check"><input type="radio" name="recogSrc" id="recogSrcFile" checked> 当前已打开文件（原始文本）</label>
+        <label class="check-label modal-check"><input type="radio" name="recogSrc" id="recogSrcPaste"> 粘贴 / 选择文本</label>
+      </div>
+      <textarea id="recogText" rows="4" placeholder="粘贴需要识别的文本（原格式，如 ○0001○… / ☆0001☆…）…" hidden></textarea>
+      <div class="row" id="recogFileRow" hidden>
+        <button id="btnRecogPick" class="toolbtn secondary nowrap">选择文本文件…</button>
+        <input type="file" id="recogFile" accept=".txt,.ks,.ks.txt,text/plain" hidden>
+        <span class="hint-inline" id="recogFileHint"></span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="btnRecogRun" class="toolbtn">识别</button>
+        <button id="btnRecogApply" class="toolbtn secondary" hidden>应用为解析规则</button>
+        <button id="btnRecogLoad" class="toolbtn secondary" hidden>规范化并载入编辑器</button>
+        <button id="btnRecogProfile" class="toolbtn secondary" hidden>下载 profile JSON</button>
+        <button id="btnRecogCanon" class="toolbtn secondary" hidden>下载规范化文本</button>
+      </div>
+      <pre class="recog-report" id="recogOut"></pre>
+      <div class="hint">
+        识别：自动探测标记/编号/说话人（前缀段 / [[名]] / 【名】）/ 行类型与问题清单，并模拟编辑器对比导入效果。<br>
+        「应用为解析规则」= 把识别结果保存到下面的标记/正则（重新导入原文件生效）；「规范化并载入编辑器」= 转成 ☆/★ 直接开翻（翻译完可用脚本 --restore 还原）。
+      </div>
+    </div>
+
+    <div class="field">
+      <label>② 手动规则</label>
+      <div class="row">
+        <div class="field"><label>原文标记字符</label><input type="text" id="setOpen" maxlength="2"></div>
+        <div class="field"><label>译文标记字符</label><input type="text" id="setClose" maxlength="2"></div>
+      </div>
+      <div class="field">
+        <label>自定义前缀正则（留空 = 按标记自动生成标准结构）</label>
+        <input type="text" id="setRegex" placeholder="^([@#][^@#]*[@#](?:[^@#]*[@#])?)([\s\S]*)$">
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>注释行前缀（空格分隔，行首命中即整行跳过，如 #NOTTRANS 的 #）</label>
+          <input type="text" id="setComments" placeholder="# ; // %">
+        </div>
+        <div class="field">
+          <label>名字行编号正则（空格分隔，编号命中即按名字行处理，如 ^NAME ^[0-9A-Fa-f]+N$）</label>
+          <input type="text" id="setNameIds" placeholder="^NAME ^[0-9A-Fa-f]+N$">
+        </div>
+      </div>
+      <div class="field">
+        <label>测试行（输入一行,点「测试」看拆分结果,Enter 也可）</label>
+        <input type="text" id="setTestIn" placeholder="例如: @0003@桐吾@「こんにちは」">
+        <div class="test-out" id="setTestOut"></div>
+      </div>
+    </div>
+
+    <div class="hint">
+      正则约定：第 1 个捕获组 = 前缀（标记+编号+说话人），第 2 个捕获组 = 正文；<br>
+      或使用命名捕获组 (?&lt;id&gt;…)(?&lt;name&gt;…)?(?&lt;content&gt;…) 直接指定编号/说话人/正文。<br>
+      注释行前缀与名字行正则默认内置（# ; // % / ^NAME / N 后缀编号），可被「应用为解析规则」自动填入，<br>
+      保存后立即生效，重新导入文件后应用。术语表、进度等数据保存在程序目录。
+    </div>
+    <div class="actions">
+      <button id="btnSetCancel" class="secondary">取消</button>
+      <button id="btnTestParse" class="toolbtn secondary">测试</button>
+      <button id="btnSetSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 机器翻译配置模态 -->
+<div id="mtModal" class="modal-mask">
+  <div class="modal">
+    <h3>机器翻译配置</h3>
+    <div class="field">
+      <label>翻译引擎</label>
+      <select id="mtProviderSel">
+        <option value="llm">通用大模型（OpenAI 兼容）</option>
+        <option value="sakura">Sakura 本地（离线专用模型）</option>
+      </select>
+    </div>
+    <div id="mtForm"></div>
+    <div class="field">
+      <label>测试翻译（输入一句日文,验证连接与效果）</label>
+      <input type="text" id="mtTestIn" placeholder="例えば: こんにちは、今日はいい天気ですね。">
+      <div class="test-out" id="mtTestOut"></div>
+    </div>
+    <div id="mtHint" class="hint"></div>
+    <div class="actions">
+      <button id="btnMtCancel" class="secondary">取消</button>
+      <button id="btnMtTest" class="toolbtn secondary">测试翻译</button>
+      <button id="btnMtSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- HTTP 词典配置模态 -->
+<div id="dictHttpModal" class="modal-mask">
+  <div class="modal">
+    <h3>HTTP 词典配置</h3>
+    <div class="field">
+      <label>名称</label>
+      <input type="text" id="dhName" placeholder="如：我的在线词典">
+    </div>
+    <div class="field">
+      <label>URL 模板（{word} 为查询词占位，会自动 URL 编码）</label>
+      <input type="text" id="dhUrl" placeholder="https://api.example.com/dict?q={'{word}'}">
+    </div>
+    <div class="field">
+      <label>请求头 JSON（可选；API Key 放这里）</label>
+      <input type="text" id="dhHeaders" placeholder='{"Authorization": "Bearer …"}' autocomplete="off">
+    </div>
+    <div class="field">
+      <label>响应字段映射（$.a.b 点路径；条目根/词条/读音可留空）</label>
+      <div class="dh-map-grid">
+        <span>条目根</span><input type="text" id="dhRoot" placeholder="$.data.list">
+        <span>词条</span><input type="text" id="dhHeadword" placeholder="$.word">
+        <span>读音</span><input type="text" id="dhReading" placeholder="$.kana">
+        <span>释义</span><input type="text" id="dhGloss" placeholder="$.means">
+      </div>
+    </div>
+    <div id="dhHint" class="hint">
+      释义路径可指向：字符串 / 字符串数组 / 含 pos+gloss(或 translation) 的对象数组。条目根指向数组时逐条解析，留空则整个响应作为单条。示例见 docs/dictionary-plugins.md。
+    </div>
+    <div class="field">
+      <label>测试查询（保存前验证连接与映射）</label>
+      <div class="row">
+        <input type="text" id="dhTestIn" placeholder="例：食べる">
+        <button id="btnDhTest" class="toolbtn secondary nowrap">测试</button>
+      </div>
+      <div class="test-out" id="dhTestOut"></div>
+    </div>
+    <div class="actions">
+      <button id="btnDhCancel" class="secondary">取消</button>
+      <button id="btnDhSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 主题设置模态(主题模式 + 背景 + 原文/译文字体) -->
+<div id="themeModal" class="modal-mask">
+  <div class="modal">
+    <h3>主题设置</h3>
+    <div class="field">
+      <label>主题模式</label>
+      <label class="check-label modal-check"><input type="radio" name="thMode" value="dark" checked> 深色</label>
+      <label class="check-label modal-check"><input type="radio" name="thMode" value="light"> 浅色</label>
+      <label class="check-label modal-check"><input type="radio" name="thMode" value="bw"> 黑白</label>
+    </div>
+    <div class="field">
+      <label>选择背景图片（jpg / png / webp，建议 2MB 以内）</label>
+      <input type="file" id="bgFile" accept="image/jpeg,image/png,image/webp,image/gif">
+    </div>
+    <div class="field">
+      <label>遮罩不透明度（越低背景越明显，文字越淡）</label>
+      <input type="range" id="bgOpacity" min="0.5" max="0.98" step="0.01">
+      <span id="bgOpacityVal"></span>
+    </div>
+    <div class="field">
+      <label>填充方式</label>
+      <select id="bgFit">
+        <option value="cover">铺满裁剪（默认）</option>
+        <option value="contain">完整显示</option>
+        <option value="stretch">拉伸铺满</option>
+        <option value="tile">平铺</option>
+        <option value="auto">原始大小居中</option>
+      </select>
+    </div>
+    <div class="preview" id="bgPreview">未设置背景</div>
+    <div class="field">
+      <label>原文字体（留空=跟随主题；可输入系统任意已安装字体，多个用英文逗号分隔）</label>
+      <input type="text" id="foFamily" list="fontPresets" placeholder="如：微软雅黑 或 自定义字体名">
+    </div>
+    <div class="field">
+      <label>原文字号 / 颜色</label>
+      <div class="row">
+        <input type="number" id="foSize" min="8" max="72" step="1" value="17">
+        <input type="color" id="foColor" value="#aeb9c9" title="原文颜色">
+        <button id="foReset" class="toolbtn secondary nowrap" title="恢复默认">恢复默认</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>译文字体（留空=跟随主题；可输入系统任意已安装字体，多个用英文逗号分隔）</label>
+      <input type="text" id="ftFamily" list="fontPresets" placeholder="如：微软雅黑 或 自定义字体名">
+    </div>
+    <div class="field">
+      <label>译文字号 / 颜色</label>
+      <div class="row">
+        <input type="number" id="ftSize" min="8" max="72" step="1" value="17">
+        <input type="color" id="ftColor" value="#e6edf7" title="译文颜色">
+        <button id="ftReset" class="toolbtn secondary nowrap" title="恢复默认">恢复默认</button>
+      </div>
+    </div>
+    <datalist id="fontPresets">
+      <option value="微软雅黑"><option value="微软雅黑 UI"><option value="宋体"><option value="新宋体">
+      <option value="黑体"><option value="楷体"><option value="仿宋"><option value="隶书"><option value="幼圆">
+      <option value="思源黑体"><option value="思源宋体"><option value="思源柔黑">
+      <option value="华文黑体"><option value="华文宋体"><option value="华文楷体"><option value="华文细黑">
+      <option value="方正书宋"><option value="方正兰亭黑"><option value="方正中雅宋">
+      <option value="等线"><option value="微软雅黑 Mono"><option value="Cascadia Mono"><option value="Consolas">
+      <option value="Sarasa Gothic SC"><option value="Sarasa Mono SC">
+      <option value="Noto Sans CJK SC"><option value="Noto Serif CJK SC">
+    </datalist>
+    <div id="bgHint" class="hint">背景图片会内嵌保存到本机设置（桌面版 settings.json / 浏览器 localStorage），不随文件分发。字体与颜色同样保存在主题设置中。</div>
+    <div class="actions">
+      <button id="btnBgClear" class="secondary push-left">清除背景</button>
+      <button id="btnBgCancel" class="secondary">取消</button>
+      <button id="btnBgSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 校对快捷键设置模态 -->
+<div id="keysModal" class="modal-mask">
+  <div class="modal">
+    <h3>校对快捷键</h3>
+    <div id="keysList"></div>
+    <div class="hint">
+      点击按键框后按下新键（可带 Ctrl/Shift/Alt 组合）；组合键可在任意位置触发，单键只在
+      校对模式开启且焦点位于译文/译名框时生效。默认：Q 通过并跳下一行、W 有问题、A 批注。
+    </div>
+    <div class="actions">
+      <button id="btnKeysReset" class="secondary push-left" title="恢复默认键位">重置</button>
+      <button id="btnKeysCancel" class="secondary">取消</button>
+      <button id="btnKeysSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 全局操作提示(保存成功等,不依赖 alert 弹窗) -->
+<div id="toast"></div>
+
+<script type="module" src="/src/main.js"></script>
+<script>
+// 开发期错误显示(生产版同样可用,帮助诊断)
+window.addEventListener('error', function (ev){
+  var box = document.getElementById('errbox');
+  if (!box){
+    box = document.createElement('div');
+    box.id = 'errbox';
+    box.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#7e3030;color:#fff;font:12px/1.5 monospace;padding:8px 12px;white-space:pre-wrap;max-height:30vh;overflow:auto;';
+    document.body.appendChild(box);
+  }
+  box.textContent += '[error] ' + (ev.message || '') + '\n' + (ev.filename || '') + ':' + (ev.lineno || '') + '\n';
+});
+</script>
+</body>
+</html>
