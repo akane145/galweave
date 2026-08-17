@@ -190,6 +190,7 @@ body.theme-bw #bgLayer{ filter:grayscale(1) }
 
 *{ box-sizing:border-box }
 html,body{ margin:0; padding:0; height:100%; overflow:hidden }
+.hidden{ display:none }
 body{
   min-height:100vh;
   background:var(--app-bg);
@@ -361,6 +362,7 @@ input[type=checkbox]{ accent-color:var(--accent) }
   position:relative; /* 拖拽调宽手柄(#sbResize)的定位容器 */
   width:400px;
   flex:none;
+  margin-left:10px; /* 与 #list 滚动条拉开间距: 拖滚动条时不会误触左侧的拖宽手柄 */
   background:var(--panel-bg);
   border-left:1px solid var(--border);
   display:flex;
@@ -368,9 +370,10 @@ input[type=checkbox]{ accent-color:var(--accent) }
   overflow:hidden;
 }
 #sidebar.hidden{ display:none }
-/* 左缘拖拽手柄: 拖动改宽(宽度记忆在 localStorage),双击复位 */
+/* 左缘拖拽手柄: 拖动改宽(宽度记忆在 localStorage),双击复位。
+   只贴 sidebar 自身左缘(margin 外侧即滚动条空隙),并保持窄宽避免误触滚动条 */
 #sbResize{
-  position:absolute; left:0; top:0; bottom:0; width:6px;
+  position:absolute; left:0; top:0; bottom:0; width:5px;
   cursor:col-resize; z-index:5; background:transparent;
 }
 #sbResize:hover,#sbResize.dragging{ background:var(--accent) }
@@ -442,7 +445,7 @@ input[type=checkbox]{ accent-color:var(--accent) }
 
 .para{
   display:grid;
-  grid-template-columns:72px minmax(0,1fr);
+  grid-template-columns:96px minmax(0,1fr);
   align-items:stretch;
   margin:0;
   border-top:1px solid var(--border-soft);
@@ -479,8 +482,11 @@ input[type=checkbox]{ accent-color:var(--accent) }
   line-height:1.45;
   font-variant-numeric:tabular-nums;
   user-select:none;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
 }
-.num .pid{ display:block; margin-top:4px; color:var(--text-dim); font-size:11px; word-break:break-all }
+.num .pid{ display:block; margin-top:4px; color:var(--text-dim); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
 .body{
   min-width:0;
   display:flex;
@@ -616,12 +622,24 @@ kbd{ background:var(--kbd-bg); border:1px solid var(--border-strong); border-rad
 .modal{
   width:500px;
   max-width:92vw;
+  max-height:calc(100vh - 48px); /* 低分辨率/全屏下可滚动,内容不被裁 */
+  overflow-y:auto;
   background:var(--panel-bg);
   border:1px solid var(--border-strong);
   border-radius:2px;
   padding:16px 18px;
   box-shadow:0 14px 36px rgba(0,0,0,.42);
 }
+/* 弹窗顶部横向标签页(点击切换配置页) */
+.modal-tabs{ display:flex; gap:2px; margin:0 0 12px; border-bottom:1px solid var(--border) }
+.modal-tabs button{
+  padding:5px 12px; font-size:13px; height:auto; line-height:1.5;
+  color:var(--text-muted); background:none; border:none;
+  border-bottom:2px solid transparent; border-radius:0;
+  cursor:pointer;
+}
+.modal-tabs button:hover{ color:var(--text) }
+.modal-tabs button.active{ color:var(--accent-hover); border-bottom-color:var(--accent) }
 .modal h3{ margin:0 0 14px; color:var(--text); font-size:15px; font-weight:600 }
 .modal .field{ margin-bottom:12px }
 .modal .row{ display:flex; gap:10px; align-items:center }

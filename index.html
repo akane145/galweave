@@ -326,6 +326,10 @@
         <option value="sakura">Sakura 本地（离线专用模型）</option>
       </select>
     </div>
+    <div class="modal-tabs" id="mtTabs">
+      <button type="button" data-mtpage="0" class="active">连接与模型</button>
+      <button type="button" data-mtpage="1">参数与选项</button>
+    </div>
     <div id="mtForm"></div>
     <div class="field">
       <label>测试翻译（输入一句日文,验证连接与效果）</label>
@@ -384,58 +388,66 @@
   </div>
 </div>
 
-<!-- 主题设置模态(主题模式 + 背景 + 原文/译文字体) -->
+<!-- 主题设置模态(界面设置 + 文本设置,顶部 tab 切换) -->
 <div id="themeModal" class="modal-mask">
   <div class="modal">
     <h3>主题设置</h3>
-    <div class="field">
-      <label>主题模式</label>
-      <label class="check-label modal-check"><input type="radio" name="thMode" value="dark" checked> 深色</label>
-      <label class="check-label modal-check"><input type="radio" name="thMode" value="light"> 浅色</label>
-      <label class="check-label modal-check"><input type="radio" name="thMode" value="bw"> 黑白</label>
+    <div class="modal-tabs" id="thTabs">
+      <button type="button" data-thpage="0" class="active">界面设置</button>
+      <button type="button" data-thpage="1">文本设置</button>
     </div>
-    <div class="field">
-      <label>选择背景图片（jpg / png / webp，建议 2MB 以内）</label>
-      <input type="file" id="bgFile" accept="image/jpeg,image/png,image/webp,image/gif">
-    </div>
-    <div class="field">
-      <label>遮罩不透明度（越低背景越明显，文字越淡）</label>
-      <input type="range" id="bgOpacity" min="0.5" max="0.98" step="0.01">
-      <span id="bgOpacityVal"></span>
-    </div>
-    <div class="field">
-      <label>填充方式</label>
-      <select id="bgFit">
-        <option value="cover">铺满裁剪（默认）</option>
-        <option value="contain">完整显示</option>
-        <option value="stretch">拉伸铺满</option>
-        <option value="tile">平铺</option>
-        <option value="auto">原始大小居中</option>
-      </select>
-    </div>
-    <div class="preview" id="bgPreview">未设置背景</div>
-    <div class="field">
-      <label>原文字体（留空=跟随主题；可输入系统任意已安装字体，多个用英文逗号分隔）</label>
-      <input type="text" id="foFamily" list="fontPresets" placeholder="如：微软雅黑 或 自定义字体名">
-    </div>
-    <div class="field">
-      <label>原文字号 / 颜色</label>
-      <div class="row">
-        <input type="number" id="foSize" min="8" max="72" step="1" value="17">
-        <input type="color" id="foColor" value="#aeb9c9" title="原文颜色">
-        <button id="foReset" class="toolbtn secondary nowrap" title="恢复默认">恢复默认</button>
+    <div id="thPage0">
+      <div class="field">
+        <label>主题模式</label>
+        <label class="check-label modal-check"><input type="radio" name="thMode" value="dark" checked> 深色</label>
+        <label class="check-label modal-check"><input type="radio" name="thMode" value="light"> 浅色</label>
+        <label class="check-label modal-check"><input type="radio" name="thMode" value="bw"> 黑白</label>
       </div>
+      <div class="field">
+        <label>选择背景图片（jpg / png / webp，建议 2MB 以内）</label>
+        <input type="file" id="bgFile" accept="image/jpeg,image/png,image/webp,image/gif">
+      </div>
+      <div class="field">
+        <label>遮罩不透明度（越低背景越明显，文字越淡）</label>
+        <input type="range" id="bgOpacity" min="0.5" max="0.98" step="0.01">
+        <span id="bgOpacityVal"></span>
+      </div>
+      <div class="field">
+        <label>填充方式</label>
+        <select id="bgFit">
+          <option value="cover">铺满裁剪（默认）</option>
+          <option value="contain">完整显示</option>
+          <option value="stretch">拉伸铺满</option>
+          <option value="tile">平铺</option>
+          <option value="auto">原始大小居中</option>
+        </select>
+      </div>
+      <div class="preview" id="bgPreview">未设置背景</div>
     </div>
-    <div class="field">
-      <label>译文字体（留空=跟随主题；可输入系统任意已安装字体，多个用英文逗号分隔）</label>
-      <input type="text" id="ftFamily" list="fontPresets" placeholder="如：微软雅黑 或 自定义字体名">
-    </div>
-    <div class="field">
-      <label>译文字号 / 颜色</label>
-      <div class="row">
-        <input type="number" id="ftSize" min="8" max="72" step="1" value="17">
-        <input type="color" id="ftColor" value="#e6edf7" title="译文颜色">
-        <button id="ftReset" class="toolbtn secondary nowrap" title="恢复默认">恢复默认</button>
+    <div id="thPage1" class="hidden">
+      <div class="field">
+        <label>原文字体（留空=跟随主题；可输入系统任意已安装字体，多个用英文逗号分隔）</label>
+        <input type="text" id="foFamily" list="fontPresets" placeholder="如：微软雅黑 或 自定义字体名">
+      </div>
+      <div class="field">
+        <label>原文字号 / 颜色</label>
+        <div class="row">
+          <input type="number" id="foSize" min="8" max="72" step="1" value="17">
+          <input type="color" id="foColor" value="#aeb9c9" title="原文颜色">
+          <button id="foReset" class="toolbtn secondary nowrap" title="恢复默认">恢复默认</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>译文字体（留空=跟随主题；可输入系统任意已安装字体，多个用英文逗号分隔）</label>
+        <input type="text" id="ftFamily" list="fontPresets" placeholder="如：微软雅黑 或 自定义字体名">
+      </div>
+      <div class="field">
+        <label>译文字号 / 颜色</label>
+        <div class="row">
+          <input type="number" id="ftSize" min="8" max="72" step="1" value="17">
+          <input type="color" id="ftColor" value="#e6edf7" title="译文颜色">
+          <button id="ftReset" class="toolbtn secondary nowrap" title="恢复默认">恢复默认</button>
+        </div>
       </div>
     </div>
     <datalist id="fontPresets">

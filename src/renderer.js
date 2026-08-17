@@ -141,8 +141,9 @@ function targetWindow(){
   return t;
 }
 
-/** 核心入口: 按当前滚动位置重算挂载窗口,卸载远处行、挂载视口侧行,实测新行并锚定滚动 */
-export function renderWindow(){
+/** 核心入口: 按当前滚动位置重算挂载窗口,卸载远处行、挂载视口侧行,实测新行并锚定滚动。
+ *  force=true 时即使挂载窗口未变也重渲染窗口内已挂载行(清除/更新内联 mark/term 高亮)。 */
+export function renderWindow(force){
   if (!vbot) return;
   const n = state.paras().length;
   if (n !== heights.count){
@@ -154,6 +155,14 @@ export function renderWindow(){
     if (heights.isHidden(Number(k))) unmountRow(Number(k));
   }
   const t = targetWindow();
+  // 强制模式: 先重渲染窗口内已挂载行 —— mark/term 等内联 HTML 变化(清空搜索、
+  // 替换后匹配重算)时,挂载窗口不变也必须重画;不卸载以保住输入框焦点
+  if (force){
+    for (const k of Object.keys(rows)){
+      const i = Number(k);
+      if (i >= t.start && i < t.end) syncRow(i);
+    }
+  }
   if (t.start === winStart && t.end === winEnd) return;
   // 卸载窗口外的行(实测高度保留在模型里,滚回来直接复用)
   for (const k of Object.keys(rows)){

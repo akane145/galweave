@@ -293,8 +293,12 @@ test('buildOrigHighlights: 搜索高亮与术语命中合并,术语不越界', (
   const matches = [{ i: 0, col: 'orig', from: 0, to: 3 }]; // 搜索 観覧車
   const terms = { '観覧車': '摩天轮' };
   const u = buildOrigHighlights(0, content, matches, terms);
-  // mark 优先,术语同区间被 mark 覆盖
-  assert.deepEqual(u, [{ from: 0, to: 3, type: 'mark', data: null }]);
+  // term 优先: 术语与搜索区间重叠时保留 term(可点击),非重叠部分仍是 mark
+  assert.deepEqual(u, [{ from: 0, to: 3, type: 'term', data: '摩天轮' }]);
+
+  // 非术语的搜索匹配仍为 mark
+  const u2 = buildOrigHighlights(0, '乗った。', [{ i: 0, col: 'orig', from: 0, to: 2 }], {});
+  assert.deepEqual(u2, [{ from: 0, to: 2, type: 'mark', data: null }]);
 });
 
 test('applyNames: 只应用未手动改过的名字', () => {

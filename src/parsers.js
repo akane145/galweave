@@ -299,12 +299,13 @@ export function mergeRanges(ranges){
   for (let k = 0; k < ps.length - 1; k++){
     const from = ps[k], to = ps[k + 1];
     if (from === to) continue;
-    // 找覆盖该单元的区间;优先级 mark > term
+    // 找覆盖该单元的区间;优先级 term > mark —— 术语始终可点击,
+    // 搜索匹配与术语重叠时保留 term-hit(否则点击原文术语无法选中插入译文)
     let type = null, data = null;
     for (const r of ranges){
       if (r.from <= from && to <= r.to){
-        if (r.type === 'mark'){ type = 'mark'; data = null; break; }
-        if (r.type === 'term' && !type){ type = 'term'; data = r.dst; }
+        if (r.type === 'term'){ type = 'term'; data = r.dst; break; }
+        if (r.type === 'mark' && !type){ type = 'mark'; data = null; }
       }
     }
     units.push({ from, to, type, data });

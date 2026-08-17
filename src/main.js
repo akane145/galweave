@@ -306,6 +306,15 @@ const debouncedRecompute = debounce(() => {
     matchIndex = matches.length ? 0 : -1;
     rdr.updateMatchInfo(matches, matchIndex, q);
     rdr.applyRowMatchClasses(matches, matchIndex);
+    // 同步重渲染原文 HTML: mark/term 高亮内联在 .orig,仅切行类不会让残留高亮消失
+    if (!matches.length){
+      rdr.renderWindow(true); // 清空搜索 → 重挂载可见窗口,移除全部残留 mark
+    } else {
+      const seen = new Set();
+      for (const m of matches){
+        if (!seen.has(m.i)){ seen.add(m.i); rdr.refreshRow(m.i); }
+      }
+    }
     matchesScheduled = false;
   }).catch(e => { matchesScheduled = false; console.error('[search] worker 失败,回退:', e); });
 }, 180);
@@ -324,6 +333,7 @@ function recomputeMatchesUI(forceFull){
 function rerMatchesUI_applyUI(){
   rdr.updateMatchInfo(matches, matchIndex, $q.value);
   rdr.applyRowMatchClasses(matches, matchIndex);
+  rdr.renderWindow(true); // 同步重渲染行内 mark(matches 变化后残留高亮需清除)
 }
 
 function gotoMatch(delta){
@@ -2101,6 +2111,8 @@ async function openThemeSettings(){
   }
   // 字体
   syncFontUI(await loadFontSettings());
+  // 打开时重置到「界面设置」页
+  thSwitchTab(document.querySelector('#thTabs button[data-thpage="0"]'));
   document.getElementById('themeModal').classList.add('show');
 }
 
@@ -2244,29 +2256,34 @@ function mtParams(list){
 }
 
 function mtFormLlm(conf){
-  return mtField('接口地址（OpenAI 兼容，如 https://api.openai.com/v1）', mtInput('mtBaseUrl', conf.baseUrl, 'https://api.openai.com/v1')) +
+  const page1 =
+    mtField('接口地址（OpenAI 兼容，如 https://api.openai.com/v1）', mtInput('mtBaseUrl', conf.baseUrl, 'https://api.openai.com/v1')) +
     mtField('API Key（留空则不发送；llama.cpp 本地可留空）', mtInput('mtApiKey', conf.apiKey, 'sk-…')) +
     mtField('模型名', mtInput('mtModel', conf.model, 'gpt-4o-mini')) +
     mtField('系统提示词（留空使用默认翻译提示词）',
       '<textarea id="mtSystem" rows="3" placeholder="You are a translator…">' + String(conf.systemPrompt || '').replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</textarea>') +
+    mtField('多轮上下文（0=关闭，附最近 N 句原文/译文使翻译更连贯）', mtNum('mtContextTurns', conf.contextTurns, 0, 20));
+  const page2 =
     mtField('采样参数', mtParams([
       { label: '温度 temperature', id: 'mtTemperature', value: conf.temperature, min: 0, max: 2 },
       { label: 'top_p', id: 'mtTopP', value: conf.topP, min: 0, max: 1 },
       { label: 'max_tokens', id: 'mtMaxTokens', value: conf.maxTokens, min: 1, max: 32768 },
       { label: 'frequency_penalty', id: 'mtFreqPenalty', value: conf.frequencyPenalty, min: -2, max: 2 },
     ])) +
-    mtField('多轮上下文（0=关闭，附最近 N 句原文/译文使翻译更连贯）', mtNum('mtContextTurns', conf.contextTurns, 0, 20)) +
     mtField('选项', mtCheck('mtStreaming', '流式输出（翻译当前行时逐字显示）', conf.streaming) +
       '<br>' + mtCheck('mtUseGlossary', '翻译时附加当前项目的 glossary.json 术语', conf.useGlossary));
+  return '<div id="mtP0">' + page1 + '</div><div id="mtP1" class="hidden">' + page2 + '</div>';
 }
 
 function mtFormSakura(conf){
-  return mtField('Sakura / llama.cpp 服务地址（Sakura_Launcher_GUI 或 llama-server 显示的地址/端口）',
-    '<div class="row">' + mtInput('mtHost', conf.host, 'http://127.0.0.1:8080') +
-    '<button id="btnMtDetect" class="toolbtn secondary nowrap">检测端口</button></div>') +
+  const page1 =
+    mtField('Sakura / llama.cpp 服务地址（Sakura_Launcher_GUI 或 llama-server 显示的地址/端口）',
+      '<div class="row">' + mtInput('mtHost', conf.host, 'http://127.0.0.1:8080') +
+      '<button id="btnMtDetect" class="toolbtn secondary nowrap">检测端口</button></div>') +
     mtField('模型名（用于提示词版本自动识别，可留空）', mtInput('mtModel', conf.model, '如 sakura-qwen2.5-7b-v1.0')) +
     mtField('提示词版本（auto=按模型名自动识别）',
-      '<select id="mtPromptVersion">' + mt.SAKURA_PROMPT_VERSIONS.map(v => '<option value="' + v + '"' + (conf.promptVersion === v ? ' selected' : '') + '>' + v + '</option>').join('') + '</select>') +
+      '<select id="mtPromptVersion">' + mt.SAKURA_PROMPT_VERSIONS.map(v => '<option value="' + v + '"' + (conf.promptVersion === v ? ' selected' : '') + '>' + v + '</option>').join('') + '</select>');
+  const page2 =
     mtField('采样参数', mtParams([
       { label: '温度 temperature', id: 'mtTemperature', value: conf.temperature, min: 0, max: 2 },
       { label: 'top_p', id: 'mtTopP', value: conf.topP, min: 0, max: 1 },
@@ -2274,12 +2291,29 @@ function mtFormSakura(conf){
     ])) +
     mtField('选项', mtCheck('mtStreaming', '流式输出（翻译当前行时逐字显示）', conf.streaming) +
       '<br>' + mtCheck('mtUseGlossary', '翻译时附加当前项目的 glossary.json 术语', conf.useGlossary));
+  return '<div id="mtP0">' + page1 + '</div><div id="mtP1" class="hidden">' + page2 + '</div>';
+}
+
+/* ---- 机翻/主题配置 tab 切换 ---- */
+function mtSwitchTab(btn){
+  for (const b of document.querySelectorAll('#mtTabs button')) b.classList.toggle('active', b === btn);
+  const p = Number(btn.dataset.mtpage) || 0;
+  document.getElementById('mtP0').classList.toggle('hidden', p !== 0);
+  document.getElementById('mtP1').classList.toggle('hidden', p !== 1);
+}
+function thSwitchTab(btn){
+  for (const b of document.querySelectorAll('#thTabs button')) b.classList.toggle('active', b === btn);
+  const p = Number(btn.dataset.thpage) || 0;
+  document.getElementById('thPage0').classList.toggle('hidden', p !== 0);
+  document.getElementById('thPage1').classList.toggle('hidden', p !== 1);
 }
 
 function renderMTForm(providerId, conf){
   const form = document.getElementById('mtForm');
   const id = providerId === 'sakura' ? 'sakura' : 'llm';
   form.innerHTML = (id === 'sakura' ? mtFormSakura(conf) : mtFormLlm(conf));
+  // 重置到第 1 页「连接与模型」
+  mtSwitchTab(document.querySelector('#mtTabs button[data-mtpage="0"]'));
   // 检测端口按钮在 Sakura 表单内,每次渲染后重新绑定(元素已重建)
   const detectBtn = document.getElementById('btnMtDetect');
   if (detectBtn) detectBtn.addEventListener('click', detectSakuraPorts);
@@ -2745,6 +2779,8 @@ function initEvents(){
   $mtProvider.addEventListener('change', () => setMTProvider($mtProvider.value));
   document.getElementById('btnMTSettings').addEventListener('click', openMTSettings);
   document.getElementById('mtProviderSel').addEventListener('change', mtSelChanged);
+  document.querySelectorAll('#mtTabs button').forEach(b => b.addEventListener('click', () => mtSwitchTab(b)));
+  document.querySelectorAll('#thTabs button').forEach(b => b.addEventListener('click', () => thSwitchTab(b)));
   document.getElementById('btnMtTest').addEventListener('click', testMT);
   document.getElementById('mtTestIn').addEventListener('keydown', (e) => {
     if (e.key === 'Enter'){ e.preventDefault(); testMT(); }
