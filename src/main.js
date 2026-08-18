@@ -2,7 +2,7 @@
 // 职责: 初始化各模块,绑定事件,编排 导入/导出/保存/搜索/术语表/机翻/文件夹 流程。
 
 import { parseFile, buildExport, transValue, stripBrackets, setParseConf, getParseConf, parsePrefix, migrateNameTranslations as migrateNameTranslationsPure, mergeSavedState } from './parsers.js';
-import { loadSettings, saveSettings, loadBackground, saveBackground, clearBackground, loadFontSettings, saveFontSettings, loadThemeMode, saveThemeMode } from './settings.js';
+import { loadSettings, saveSettings, loadBackground, saveBackground, clearBackground, loadFontSettings, saveFontSettings, loadThemeMode, saveThemeMode, loadFavorites, saveFavorites } from './settings.js';
 import * as theme from './theme.js';
 import * as model from './model.js';
 import * as rdr from './renderer.js';
@@ -66,6 +66,7 @@ rdr.setRendererState({
   q: () => $q.value,
   scope: () => $scope.value,
   terms: () => (glossData ? glossData.terms : {}),
+  rowIssueKind: (i) => proof.analyzeRow(model.getPara(i)),
   onTermClick: insertTerm,
   // 输入建议(术语/片段)与划词查词
   getSuggestions: (token) => suggest.matchSuggestions(token, glossData ? glossData.terms : {}, snippetData.merged),
@@ -1236,80 +1237,106 @@ async function testDictHttp(){
 
 /* ---- 查询 ---- */
 
-async function doDictLookup(word){
+async function doDictLookup(word, isFuzzy){
   word = String(word || '').trim();
   if (!word) return;
   const box = document.getElementById('dictResults');
   if (!box) return;
+  const fuzzy = isFuzzy !== undefined ? !!isFuzzy : document.getElementById('dictFuzzy').checked;
   box.innerHTML = '';
   const loading = document.createElement('div');
   loading.className = 'dict-empty';
   loading.textContent = '查询「' + word + '」中…';
   box.appendChild(loading);
-  const res = await dictx.lookupAll(word);
-  renderDictResults(res);
+  const res = fuzzy ? await dictx.lookupAllFuzzy(word) : await dictx.lookupAll(word);
+  renderDictResults(res, fuzzy);
 }
 
-function renderDictResults(res){
+function renderDictResults(res, fuzzy){
   const box = document.getElementById('dictResults');
   if (!box) return;
   box.innerHTML = '';
-  if (!res.results.length && !res.errors.length){
+  const groups = dictx.groupDictResults(res.results || []);
+  if (!groups.length && !res.errors.length){
     const empty = document.createElement('div');
     empty.className = 'dict-empty';
-    empty.textContent = '「' + res.word + '」: 没有查到。可在「词典源」里添加 JSON 词典或配置 HTTP 词典。';
+    empty.textContent = '「' + res.word + '」: 没有查到。可在「词典源」里添加 JSON/词典或配置 HTTP 词典' + (fuzzy ? '' : '；或勾选「包含匹配」做模糊搜索。');
     box.appendChild(empty);
     return;
   }
-  for (const r of res.results){
+  for (const g of groups){
     const card = document.createElement('div');
     card.className = 'dict-card';
+    card.dataset.head = g.headword || '';
     const head = document.createElement('div');
     head.className = 'dc-head';
-    head.textContent = r.headword;
-    if (r.reading){
+    // 收藏按钮
+    const favBtn = document.createElement('button');
+    favBtn.className = 'dc-fav' + (isDictFav(g) ? ' on' : '');
+    favBtn.textContent = isDictFav(g) ? '★' : '☆';
+    favBtn.title = '收藏 / 取消收藏该词条';
+    const favData = { word: g.headword || '', reading: g.reading || '', source: (g.sources[0] && g.sources[0].source) || '' };
+    favBtn.addEventListener('click', () => {
+      dictFavorites = dictx.toggleFavorite(dictFavorites, favData);
+      saveDictFavorites();
+      favBtn.textContent = dictx.isFavorite(dictFavorites, favData) ? '★' : '☆';
+      favBtn.classList.toggle('on', dictx.isFavorite(dictFavorites, favData));
+    });
+    head.appendChild(favBtn);
+    const hw = document.createElement('span');
+    hw.textContent = g.headword || '';
+    head.appendChild(hw);
+    if (g.reading){
       const rd = document.createElement('span');
       rd.className = 'dc-reading';
-      rd.textContent = r.reading;
+      rd.textContent = g.reading;
       head.appendChild(rd);
     }
-    const src = document.createElement('span');
-    src.className = 'dc-src';
-    src.textContent = r.source;
-    head.appendChild(src);
+    if (fuzzy){
+      const fz = document.createElement('span');
+      fz.className = 'dc-fuzzy';
+      fz.textContent = '（包含）';
+      head.appendChild(fz);
+    }
+    head.appendChild(cardHeadSource(g));
     card.appendChild(head);
-    for (const s of r.senses){
-      const line = document.createElement('div');
-      line.className = 'dc-sense';
-      if (s.html){
-        // MDX 词典: 词条正文是(已消毒的)词典 HTML
-        const body = document.createElement('div');
-        body.className = 'dc-html';
-        body.innerHTML = s.html;
-        // 词条交互: 关联本词典的 MDD 资源(图片/发音)
-        const mdd = sourceMdd.get(r.source) || null;
-        body.__mdd = mdd;
-        line.appendChild(body);
-        card.appendChild(line);
-        hydrateMddImages(body, mdd); // 异步把本地资源 src 替换为 data URL
-        continue;
-      }
-      if (s.pos){
-        const pos = document.createElement('span');
-        pos.className = 'dc-pos';
-        pos.textContent = s.pos;
-        line.appendChild(pos);
-      }
-      line.appendChild(document.createTextNode(s.gloss));
-      if (s.examples && s.examples.length){
-        for (const ex of s.examples){
-          const exEl = document.createElement('div');
-          exEl.className = 'dc-ex';
-          exEl.textContent = '例: ' + ex.src + (ex.dst ? ' → ' + ex.dst : '');
-          line.appendChild(exEl);
+    // 组内多源分段
+    for (const seg of g.sources){
+      const srcLine = document.createElement('div');
+      srcLine.className = 'dc-src-line';
+      srcLine.textContent = seg.source;
+      card.appendChild(srcLine);
+      for (const s of seg.senses || []){
+        const line = document.createElement('div');
+        line.className = 'dc-sense';
+        if (s.html){
+          const body = document.createElement('div');
+          body.className = 'dc-html';
+          body.innerHTML = s.html;
+          const mdd = sourceMdd.get(seg.source) || null;
+          body.__mdd = mdd;
+          line.appendChild(body);
+          card.appendChild(line);
+          hydrateMddImages(body, mdd);
+          continue;
         }
+        if (s.pos){
+          const pos = document.createElement('span');
+          pos.className = 'dc-pos';
+          pos.textContent = s.pos;
+          line.appendChild(pos);
+        }
+        line.appendChild(document.createTextNode(s.gloss));
+        if (s.examples && s.examples.length){
+          for (const ex of s.examples){
+            const exEl = document.createElement('div');
+            exEl.className = 'dc-ex';
+            exEl.textContent = '例: ' + ex.src + (ex.dst ? ' → ' + ex.dst : '');
+            line.appendChild(exEl);
+          }
+        }
+        card.appendChild(line);
       }
-      card.appendChild(line);
     }
     box.appendChild(card);
   }
@@ -1321,6 +1348,66 @@ function renderDictResults(res){
   }
   // 词条交互事件委托: entry:// 跳转 / sound:// 发音(容器级监听,水合后仍生效)
   bindDictResultInteractions(box);
+}
+
+function cardHeadSource(g){
+  const src = document.createElement('span');
+  src.className = 'dc-src';
+  src.textContent = (g.sources || []).map(s => s.source).join(' / ');
+  return src;
+}
+
+/* ---------------- 词典收藏 ---------------- */
+
+let dictFavorites = [];
+
+function isDictFav(g){
+  return dictx.isFavorite(dictFavorites, { word: g.headword || '', reading: g.reading || '', source: (g.sources[0] && g.sources[0].source) || '' });
+}
+
+function saveDictFavorites(){
+  return saveFavorites(dictFavorites);
+}
+
+async function initDictFavorites(){
+  dictFavorites = await loadFavorites();
+}
+
+function renderDictFavorites(){
+  const box = document.getElementById('favList');
+  if (!box) return;
+  box.innerHTML = '';
+  if (!dictFavorites.length){
+    box.appendChild(emptyProofItem('还没有收藏的词典词条。查询结果卡片标题旁的 ☆ 可收藏。'));
+    return;
+  }
+  dictFavorites.forEach((f, idx) => {
+    const el = document.createElement('div');
+    el.className = 'proof-item';
+    el.style.cursor = 'pointer';
+    const head = document.createElement('div');
+    head.style.color = 'var(--text-muted)';
+    head.textContent = f.word + (f.reading ? '（' + f.reading + '）' : '') + ' · ' + (f.source || '');
+    const del = document.createElement('button');
+    del.className = 'pr-btn';
+    del.textContent = '✕';
+    del.title = '取消收藏';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      dictFavorites = dictx.toggleFavorite(dictFavorites, f);
+      saveDictFavorites();
+      renderDictFavorites();
+    });
+    head.appendChild(del);
+    el.append(head);
+    el.addEventListener('click', () => {
+      switchDictView('lookup');
+      const input = document.getElementById('dictInput');
+      if (input) input.value = f.word || '';
+      doDictLookup(f.word || '', false);
+    });
+    box.appendChild(el);
+  });
 }
 
 /**
@@ -1387,9 +1474,11 @@ function dictLookupFromSelection(word){
 function switchDictView(v){
   document.querySelectorAll('.proof-view-tab[data-dv]').forEach(x => x.classList.toggle('active', x.dataset.dv === v));
   document.getElementById('dv-lookup').classList.toggle('hidden', v !== 'lookup');
+  document.getElementById('dv-favorites').classList.toggle('hidden', v !== 'favorites');
   document.getElementById('dv-sources').classList.toggle('hidden', v !== 'sources');
   document.getElementById('dv-snippets').classList.toggle('hidden', v !== 'snippets');
   if (v === 'snippets') renderSnipTable();
+  if (v === 'favorites') renderDictFavorites();
 }
 
 /* ---- 快捷片段 ---- */
@@ -1757,6 +1846,10 @@ function refreshProofUI(){
   set('pfPending', st.pending);
   set('pfIssue', st.issue);
   set('pfApproved', st.approved);
+  const a = proof.analyzeRows();
+  set('pfMissing', a.total);
+  const pvm = document.getElementById('pvMissingCount');
+  if (pvm) pvm.textContent = a.total;
   const pc = document.getElementById('proofCount');
   if (pc) pc.textContent = '已通过 ' + st.approved + ' / ' + st.total + (st.issue ? ' · 有问题 ' + st.issue : '');
   renderProofPanel();
@@ -1769,12 +1862,56 @@ function emptyProofItem(text){
   return el;
 }
 
-// 侧栏校对面板: 批注总览 / 修改记录(仅在面板可见且校对模式开启时渲染)
+// 侧栏校对面板: 批注总览 / 漏翻异常 / 修改记录(面板可见即渲染;漏翻视图校对模式外也可用)
 function renderProofPanel(){
   const panel = document.getElementById('panel-proof');
-  if (!panel || panel.classList.contains('hidden') || !proof.isEnabled()) return;
-  if (proof.getViewTab() === 'log') renderProofLog();
+  if (!panel || panel.classList.contains('hidden')) return;
+  const tab = proof.getViewTab();
+  if (tab === 'missing') renderMissingList();
+  else if (tab === 'log') renderProofLog();
   else renderAnnoOverview();
+}
+
+const ISSUE_KIND_LABEL = { missing: '漏翻', placeholder: '占位未译', ratio: '长度可疑' };
+
+function renderMissingList(){
+  const list = document.getElementById('missingList');
+  if (!list) return;
+  const a = proof.analyzeRows();
+  document.getElementById('pvMissingCount').textContent = a.total;
+  // 顶栏漏翻计数 chip 同步
+  const chip = document.getElementById('pfMissing');
+  if (chip) chip.textContent = a.total;
+  list.innerHTML = '';
+  if (!a.total){
+    list.appendChild(emptyProofItem('没有漏翻或异常。'));
+    return;
+  }
+  const all = [...a.missing, ...a.placeholder, ...a.ratio];
+  all.forEach(x => {
+    const el = document.createElement('div');
+    el.className = 'proof-item';
+    el.style.cursor = 'pointer';
+    const head = document.createElement('div');
+    const kind = document.createElement('span');
+    kind.className = 'pr-tag ' + (x.kind === 'ratio' ? 'pr-tag-suggestion' : 'pr-tag-issue');
+    kind.textContent = ISSUE_KIND_LABEL[x.kind] || x.kind;
+    head.textContent = '第' + (x.i + 1) + '行 ';
+    head.style.color = 'var(--text-muted)';
+    head.appendChild(kind);
+    const orig = document.createElement('div');
+    orig.className = 'proof-item-text';
+    orig.textContent = x.origPreview;
+    const tv = document.createElement('div');
+    tv.className = 'proof-item-text muted';
+    tv.textContent = x.transPreview || '（译文为空）';
+    el.append(head, orig, tv);
+    el.addEventListener('click', () => {
+      rdr.scrollRowIntoView(x.i);
+      rdr.focusIdx(x.i);
+    });
+    list.appendChild(el);
+  });
 }
 
 function renderAnnoOverview(){
@@ -1830,6 +1967,14 @@ function annoOverviewItem(x, isOpen){
     el.appendChild(btn);
   }
   return el;
+}
+
+// 打开侧栏校对页并切到「漏翻/异常」视图(顶栏 ⚠ 漏翻 按钮)
+function openMissingList(){
+  setSidebar(true);
+  switchSidebarTab('proof');
+  const t = document.querySelector('.proof-view-tab[data-pv="missing"]');
+  if (t) t.click();
 }
 
 function renderProofLog(){
@@ -2262,7 +2407,7 @@ function mtFormLlm(conf){
     mtField('模型名', mtInput('mtModel', conf.model, 'gpt-4o-mini')) +
     mtField('系统提示词（留空使用默认翻译提示词）',
       '<textarea id="mtSystem" rows="3" placeholder="You are a translator…">' + String(conf.systemPrompt || '').replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</textarea>') +
-    mtField('多轮上下文（0=关闭，附最近 N 句原文/译文使翻译更连贯）', mtNum('mtContextTurns', conf.contextTurns, 0, 20));
+    mtField('多轮上下文（>0 时翻译/批量自动附带最近 N 句原文与译文，使人物语气、指代更连贯；批量逐句累积，切引擎/改配置后清空）', mtNum('mtContextTurns', conf.contextTurns, 0, 20));
   const page2 =
     mtField('采样参数', mtParams([
       { label: '温度 temperature', id: 'mtTemperature', value: conf.temperature, min: 0, max: 2 },
@@ -2811,6 +2956,7 @@ function initEvents(){
     b.addEventListener('click', () => setProofFilter(b.dataset.pf));
   });
   document.getElementById('btnNextIssue').addEventListener('click', jumpNextIssue);
+  document.getElementById('btnMissing').addEventListener('click', openMissingList);
   document.getElementById('btnProofKeys').addEventListener('click', openProofKeys);
   document.getElementById('btnKeysSave').addEventListener('click', saveProofKeys);
   document.getElementById('btnKeysCancel').addEventListener('click', () => {
@@ -2833,6 +2979,7 @@ function initEvents(){
       proof.setViewTab(v);
       document.querySelectorAll('.proof-view-tab[data-pv]').forEach(x => x.classList.toggle('active', x.dataset.pv === v));
       document.getElementById('pv-anno').classList.toggle('hidden', v !== 'anno');
+      document.getElementById('pv-missing').classList.toggle('hidden', v !== 'missing');
       document.getElementById('pv-log').classList.toggle('hidden', v !== 'log');
       renderProofPanel();
     });
@@ -2849,6 +2996,10 @@ function initEvents(){
 
   // 词典 / 快捷片段
   document.getElementById('btnDictLookup').addEventListener('click', () => doDictLookup(document.getElementById('dictInput').value));
+  document.getElementById('btnFavClear').addEventListener('click', () => {
+    dictFavorites = [];
+    saveDictFavorites().then(renderDictFavorites);
+  });
   document.getElementById('dictInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter'){ e.preventDefault(); doDictLookup(e.target.value); }
   });
@@ -2980,6 +3131,7 @@ async function init(){
   rebuildDictProviders();
   renderDictSourceList();
   await initSnippets();         // 全局快捷片段
+  await initDictFavorites();    // 词典收藏
   if (!fsx.isTauri()) hideMTUI(); // 单文件 HTML 版不含本地机翻
   initMT();
   initEvents();

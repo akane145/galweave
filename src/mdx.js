@@ -151,6 +151,12 @@ export function createTauriMdxProvider(cfg){
       const invoke = await getInvoke(invokeImpl);
       return invoke('mdx_prefix', { handle, word: String(word || ''), limit: limit || 6 });
     },
+    /** 模糊(包含)搜索词头,返回词头数组(Rust 侧遍历词表) */
+    async search(word, limit){
+      await ensure();
+      const invoke = await getInvoke(invokeImpl);
+      return invoke('mdx_search', { handle, word: String(word || ''), limit: limit || 20 });
+    },
     isLoaded(){ return handle !== null; },
     dispose(){
       if (handle !== null){

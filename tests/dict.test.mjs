@@ -10,6 +10,7 @@ import {
   parseDictJson, matchEntries, extractPath, httpToResults, lookupAll,
   createJsonDictProvider, createHttpDictProvider,
   registerProvider, clearProviders, getProviders,
+  groupDictResults, favoriteKey, isFavorite, toggleFavorite,
 } from '../src/dict.js';
 
 /* ---------------- CSV 解析 ---------------- */
@@ -241,4 +242,53 @@ test('注册表: registerProvider 去重,clearProviders 清空', async () => {
   assert.equal(rs[0].reading, 'かわいい');
   clearProviders();
   assert.equal(getProviders().length, 0);
+});
+
+/* ---------------- 词典增强: 模糊 / 分组 / 收藏 ---------------- */
+
+const EN = { apple: '苹果', candy: '糖果', application: '应用', 食べる: '吃', 食べ物: '食物' };
+
+test('matchEntries: 无精确/前缀时 fuzzy 走包含匹配(≤20)', () => {
+  // 精确
+  assert.deepEqual(matchEntries(EN, 'apple').map(e => e.headword), ['apple']);
+  // 前缀
+  assert.deepEqual(matchEntries(EN, 'app').map(e => e.headword), ['apple', 'application']);
+  // 普通无命中(没有 fuzzy) → 空
+  assert.deepEqual(matchEntries(EN, '吃'), []);
+  // fuzzy 包含: '食べ' 的包含匹配
+  const fz = matchEntries(EN, '食べ', { fuzzy: true }).map(e => e.headword);
+  assert.deepEqual(fz, ['食べる', '食べ物']);
+  // fuzzy 对精确命中不干扰
+  assert.deepEqual(matchEntries(EN, 'apple', { fuzzy: true }).map(e => e.headword), ['apple']);
+});
+
+test('groupDictResults: 同词多源并入一张卡,组内含来源分段', () => {
+  const results = [
+    { headword: '食べる', reading: 'たべる', senses: [{ gloss: 'A' }], source: 'D1' },
+    { headword: '食べる', reading: 'たべる', senses: [{ gloss: 'B' }], source: 'D2' },
+    { headword: '花火', reading: '', senses: [{ gloss: 'C' }], source: 'D1' },
+  ];
+  const g = groupDictResults(results);
+  assert.equal(g.length, 2);
+  const eat = g.find(x => x.headword === '食べる');
+  assert.deepEqual(eat.sources.map(s => s.source), ['D1', 'D2']);
+  assert.equal(eat.sources[0].senses[0].gloss, 'A');
+  assert.equal(eat.sources[1].senses[0].gloss, 'B');
+});
+
+test('收藏: favoriteKey 唯一、isFavorite/toggleFavorite 增删', () => {
+  const a = { word: '食べる', reading: 'たべる', source: 'D1' };
+  const b = { word: '食べる', reading: 'たべる', source: 'D2' };
+  assert.notEqual(favoriteKey(a), favoriteKey(b), '不同源视为不同收藏');
+  let list = [];
+  assert.equal(isFavorite(list, a), false);
+  list = toggleFavorite(list, a);
+  assert.equal(list.length, 1);
+  assert.equal(isFavorite(list, a), true);
+  assert.equal(isFavorite(list, b), false);
+  list = toggleFavorite(list, a); // 再切 → 取消
+  assert.deepEqual(list, []);
+  // 同时收集两个不同源都保留
+  list = toggleFavorite(toggleFavorite([], a), b);
+  assert.equal(list.length, 2);
 });

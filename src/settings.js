@@ -114,3 +114,19 @@ export async function saveFontSettings(font){
   s.ui.font = font;
   await saveSettings(s);
 }
+
+/* ---------------- 词典收藏 ---------------- */
+
+/** 读取词典收藏 → [{word,reading,source,at}](未设置返回 []) */
+export async function loadFavorites(){
+  const s = await loadSettings();
+  return Array.isArray(s.dictFavorites) ? s.dictFavorites : [];
+}
+
+/** 保存词典收藏列表 */
+export async function saveFavorites(list){
+  const s = await loadSettings();
+  s.dictFavorites = Array.isArray(list) ? list : [];
+  await saveSettings(s);
+}
+

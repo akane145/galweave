@@ -10,6 +10,7 @@
 
 import * as model from './model.js';
 import * as fsx from './fs.js';
+import { transValue } from './parsers.js';
 
 export const STATUS = { PENDING: 'pending', APPROVED: 'approved', ISSUE: 'issue' };
 export const ANNO_TYPES = { issue: '问题', suggestion: '建议', question: '疑问', note: '备注' };
@@ -255,6 +256,48 @@ export function stats(){
 export function rowPassesFilter(i){
   if (!enabled || filter === 'all') return true;
   return statusOf(i) === filter;
+}
+
+/* ---------------- 漏翻 / 异常分析(运行时派生,不入库) ---------------- */
+
+// 译文/原文长度比阈值: 日译中通常 0.3~3.5,越界视为可疑(可能漏译/过度扩写)
+export const RATIO_MIN = 0.3, RATIO_MAX = 3.5;
+
+/**
+ * 分析单行是否漏翻/异常。NAME 行与正常行返回 null。
+ * 返回 { kind:'missing'|'placeholder'|'ratio', ratio? } 或 null。
+ *   missing     — 译文为空
+ *   placeholder — 译文照抄原文(占位未译)
+ *   ratio       — 译文/原文长度比越界(可疑)
+ */
+export function analyzeRow(p){
+  if (!p || p.isName) return null;
+  const orig = p.content || '';
+  const tv = transValue(p);
+  if (!tv.trim()) return { kind: 'missing' };
+  if (p.translation === p.content) return { kind: 'placeholder' };
+  const r = tv.length / (orig.length || 1);
+  if (r < RATIO_MIN || r > RATIO_MAX) return { kind: 'ratio', ratio: +r.toFixed(2) };
+  return null;
+}
+
+const preview = (s, n) => { const x = String(s || ''); return x.length > n ? x.slice(0, n) + '…' : x; };
+
+/** 全量漏翻/异常分析 → { missing, placeholder, ratio, total }，每项含 i/origPreview/transPreview */
+export function analyzeRows(paras){
+  const out = { missing: [], placeholder: [], ratio: [] };
+  const list = paras || model.getParas();
+  list.forEach((p, i) => {
+    const a = analyzeRow(p);
+    if (!a) return;
+    out[a.kind].push({
+      i, kind: a.kind,
+      origPreview: preview(p.content, 40),
+      transPreview: preview(transValue(p), 40),
+      ...(a.ratio !== undefined ? { ratio: a.ratio } : {}),
+    });
+  });
+  return { ...out, total: out.missing.length + out.placeholder.length + out.ratio.length };
 }
 
 /* ---------------- 持久化 ---------------- */

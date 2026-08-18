@@ -109,6 +109,14 @@ pub fn mdx_prefix(state: State<DictState>, handle: u32, word: String, limit: Opt
     Ok(r.prefix(&word, (limit.unwrap_or(6) as usize).min(20)))
 }
 
+/// 模糊搜索(包含匹配)词头列表
+#[tauri::command]
+pub fn mdx_search(state: State<DictState>, handle: u32, word: String, limit: Option<u32>) -> Result<Vec<String>, String> {
+    let m = state.mdx.read().map_err(|_| "句柄锁失败".to_string())?;
+    let r = m.get(&handle).ok_or("词典句柄无效")?;
+    Ok(r.search(&word, (limit.unwrap_or(20) as usize).min(50)))
+}
+
 /// 关闭 MDX 词典
 #[tauri::command]
 pub fn mdx_close(state: State<DictState>, handle: u32) -> Result<(), String> {

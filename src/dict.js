@@ -66,12 +66,14 @@ export function parseDictJson(text){
 }
 
 /**
- * 在词条表中查词: 词条/读音精确命中优先;无精确命中时返回词条或读音前缀补全(≤20 条)。
+ * 在词条表中查词: 词条/读音精确命中优先;无精确命中时返回词条或读音前缀补全(≤20 条);
+ * opts.fuzzy 且精确/前缀均无结果时,再尝试包含匹配(≤20 条)。
  * 返回(不含 source 字段,由 Provider 补上)。
  */
-export function matchEntries(entries, word){
+export function matchEntries(entries, word, opts){
   const out = [];
   const norm = String(word || '').trim();
+  const fuzzy = !!(opts && opts.fuzzy);
   if (!norm || !entries) return out;
   for (const [head, ent] of Object.entries(entries)){
     if (head === norm || (ent.reading && ent.reading === norm)) out.push({ headword: head, ...ent });
@@ -84,7 +86,57 @@ export function matchEntries(entries, word){
       if (pref.length >= 20) break;
     }
   }
-  return pref;
+  if (pref.length) return pref;
+  // 模糊: 包含匹配
+  if (fuzzy){
+    const inc = [];
+    for (const [head, ent] of Object.entries(entries)){
+      if (head.includes(norm) || (ent.reading && ent.reading.includes(norm))){
+        inc.push({ headword: head, ...ent });
+        if (inc.length >= 20) break;
+      }
+    }
+    return inc;
+  }
+  return out;
+}
+
+/**
+ * 把多个 Provider 的查询结果按 词头(+读音) 分组: 同一词条在多个词典命中 → 并入一张卡片,
+ * 组内按来源分段。保持查询返回顺序(精确/前缀优先,模糊在后)。
+ * group: { headword, reading, sources:[{ source, senses }] }
+ */
+export function groupDictResults(results){
+  const groups = new Map();
+  for (const r of results || []){
+    if (!r || r.headword === undefined || r.headword === null) continue;
+    const key = r.headword + '\u0000' + (r.reading || '');
+    if (!groups.has(key)) groups.set(key, { headword: r.headword, reading: r.reading || '', sources: [] });
+    groups.get(key).sources.push({ source: r.source, senses: r.senses || [] });
+  }
+  return [...groups.values()];
+}
+
+/* ---------------- 收藏(纯逻辑) ---------------- */
+
+/** 收藏条目唯一键: word|reading|source */
+export function favoriteKey(f){
+  return (f && f.word || '') + '\u0000' + (f && f.reading || '') + '\u0000' + (f && f.source || '');
+}
+
+/** 是否已收藏 */
+export function isFavorite(list, f){
+  const k = favoriteKey(f);
+  return (list || []).some(x => favoriteKey(x) === k);
+}
+
+/** 切换收藏,返回新列表。fav={word,reading,source} */
+export function toggleFavorite(list, fav){
+  const k = favoriteKey(fav);
+  if ((list || []).some(x => favoriteKey(x) === k)){
+    return (list || []).filter(x => favoriteKey(x) !== k);
+  }
+  return [...(list || []), { word: fav.word, reading: fav.reading || '', source: fav.source || '', at: Date.now() }];
 }
 
 /** '$.a.b.0.c' 点路径取值('$' = 根);路径不合法或找不到返回 undefined */
@@ -178,6 +230,33 @@ export async function lookupAll(word, list){
   return { word: String(word || ''), results, errors };
 }
 
+/** 单 Provider 模糊查询: 优先 lookupFuzzy(JSON);有 search(词头)的(MDX)先搜词头再逐词查;否则回退精确 lookup */
+async function fuzzyLookup(p, word){
+  if (typeof p.lookupFuzzy === 'function') return p.lookupFuzzy(word);
+  if (typeof p.search === 'function'){
+    const heads = await p.search(word, 20);
+    const out = [];
+    for (const h of heads){
+      try { const hits = await p.lookup(h); out.push(...(hits || [])); } catch (e) { /* 单条失败跳过 */ }
+    }
+    return out;
+  }
+  if (typeof p.lookup === 'function') return p.lookup(word);
+  return [];
+}
+
+/** 模糊(包含)并发查询所有已配置 Provider */
+export async function lookupAllFuzzy(word, list){
+  const active = (list || getProviders()).filter(p => p.isConfigured());
+  const rs = await Promise.allSettled(active.map(p => fuzzyLookup(p, word)));
+  const results = [], errors = [];
+  rs.forEach((r, i) => {
+    if (r.status === 'fulfilled') results.push(...r.value);
+    else errors.push({ source: active[i].name, message: String((r.reason && r.reason.message) || r.reason || '查询失败') });
+  });
+  return { word: String(word || ''), results, errors };
+}
+
 /* ================= 内置适配器 ================= */
 
 /** 本地 JSON 词典适配器。
@@ -221,6 +300,20 @@ export function createJsonDictProvider(cfg){
       }
       if (!entries) return [];
       return matchEntries(entries, word).map(e => ({ ...e, source: name }));
+    },
+    // 模糊(包含)查询: 复用同一加载缓存
+    async lookupFuzzy(word){
+      if (failedErr) throw failedErr;
+      if (!entries && cfg.path){
+        try {
+          const raw = await (cfg.loadFile || defaultLoadFile)(cfg.path);
+          const parsed = raw ? parseDictJson(raw) : null;
+          if (!parsed) throw new Error('词典文件不存在或格式不合法: ' + (cfg.path || name));
+          entries = parsed.entries;
+        } catch (e){ failedErr = e; throw e; }
+      }
+      if (!entries) return [];
+      return matchEntries(entries, word, { fuzzy: true }).map(e => ({ ...e, source: name }));
     },
   };
 }

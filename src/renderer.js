@@ -56,6 +56,8 @@ let state = {
   onProofAnnoResolve: null,// (i, annoId)
   onProofAnnoDelete: null, // (i, annoId)
   onProofSessionEnd: null, // (i) 译文/译名失焦 → 结算修改记录
+  // 漏翻/异常行判定(main.js 注入): (i) => 'missing'|'placeholder'|'ratio'|null
+  rowIssueKind: null,
   // 输入建议与划词查词(main.js 注入)
   getSuggestions: null,    // (token) => [{kind:'term'|'snippet', src, dst}]
   onSuggestionApply: null, // (i, item) 采纳建议(替换光标前词元)
@@ -567,6 +569,10 @@ export function syncRow(i){
   r.el.classList.toggle('pr-approved', st === 'approved');
   r.el.classList.toggle('pr-issue', st === 'issue');
   r.el.classList.toggle('pr-on', prOn);
+  // 漏翻/异常(校对 / 漏翻清单): 译文空或照抄原文 → 红条,长度异常 → 黄条(仅校对模式开启时显示,避免干扰)
+  const ik = state.rowIssueKind ? state.rowIssueKind(i) : null;
+  r.el.classList.toggle('pr-missing', prOn && (ik === 'missing' || ik === 'placeholder'));
+  r.el.classList.toggle('pr-suspicious', prOn && ik === 'ratio');
   const uc = (p.pr && p.pr.annotations) ? p.pr.annotations.filter(a => !a.resolved).length : 0;
   r.prBadge.textContent = uc ? String(uc) : '';
   r.prBadge.classList.toggle('show', uc > 0);

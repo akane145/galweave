@@ -493,6 +493,21 @@ impl MdictReader {
         out
     }
 
+    /// 模糊搜索(包含匹配): 遍历词表,返回含 keyword 的词头(≤limit)。用于查词无精确/前缀命中时。
+    pub fn search(&self, keyword: &str, limit: usize) -> Vec<String> {
+        if keyword.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for k in &self.keywords {
+            if k.key_text.contains(keyword) {
+                out.push(k.key_text.clone());
+                if out.len() >= limit { break; }
+            }
+        }
+        out
+    }
+
     /// 查询并跟随 @@@LINK 变体词(≤3 跳,含大小写兜底),返回 (最终词头, 清理后的释义)。
     /// 清理: NUL 填充与尾部空白(js-mdict cleanDefinition 语义)。
     /// 跟随目标缺失/循环 → 返回 Ok(None)(与 js-mdict 行为一致,UI 显示未命中)。

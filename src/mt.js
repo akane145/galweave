@@ -253,7 +253,7 @@ const LLM_DEFAULTS = {
   maxTokens: 1024,
   frequencyPenalty: 0,
   streaming: false,           // SSE 流式输出(翻译当前行时逐字显示)
-  contextTurns: 0,            // 多轮上下文: 附最近 N 轮原文/译文历史(0=关)
+  contextTurns: 3,            // 多轮上下文: 附最近 N 句原文/译文历史(0=关),批量/单句连贯
   useGlossary: true,
 };
 

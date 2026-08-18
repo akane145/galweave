@@ -85,6 +85,7 @@
       <button class="toolbtn secondary proof-filter" data-pf="issue">有问题 <em id="pfIssue">0</em></button>
       <button class="toolbtn secondary proof-filter" data-pf="approved">已通过 <em id="pfApproved">0</em></button>
       <button class="toolbtn secondary" id="btnNextIssue" title="跳到下一处有问题(含未解决批注)">下一问题 ⤳</button>
+      <button class="toolbtn secondary" id="btnMissing" title="漏翻/异常清单(校对面板)">⚠ 漏翻 <em id="pfMissing">0</em></button>
     </div>
     <div class="tool-group">
       <span id="proofCount" class="proof-count"></span>
@@ -160,6 +161,7 @@
       <div class="side-body">
         <div class="proof-view-tabs">
           <button class="proof-view-tab active" data-dv="lookup">🔍 查询</button>
+          <button class="proof-view-tab" data-dv="favorites">★ 收藏</button>
           <button class="proof-view-tab" data-dv="sources">📚 词典源</button>
           <button class="proof-view-tab" data-dv="snippets">⌨ 片段</button>
         </div>
@@ -170,8 +172,18 @@
             <input type="text" id="dictInput" placeholder="输入日语词查询…" autocomplete="off">
             <button id="btnDictLookup" class="toolbtn">查询</button>
           </div>
+          <label class="check-label" title="精确/前缀无结果时按「词条包含查询词」模糊匹配"><input type="checkbox" id="dictFuzzy"> 包含匹配（模糊）</label>
           <div id="dictResults" class="dict-results"></div>
-          <div class="side-hint">在原文或译文里选中词，点弹出的「📖 查词」也能查询；查询会并发所有已启用的词典源。</div>
+          <div class="side-hint">在原文或译文里选中词，点弹出的「📖 查词」也能查询；查询会并发所有已启用的词典源。勾选「包含匹配」可在无精确命中时做包含式模糊搜索。</div>
+        </div>
+
+        <!-- 收藏 -->
+        <div class="proof-view hidden" id="dv-favorites">
+          <div class="gloss-toolbar">
+            <span class="side-hint">词典结果卡片标题旁的 ★ 可收藏/取消</span>
+            <button id="btnFavClear" class="secondary toolbtn" title="清空全部收藏">清空收藏</button>
+          </div>
+          <div id="favList" class="proof-list"></div>
         </div>
 
         <!-- 词典源管理 -->
@@ -205,6 +217,7 @@
       <div class="side-body">
         <div class="proof-view-tabs">
           <button class="proof-view-tab active" data-pv="anno">📌 批注总览</button>
+          <button class="proof-view-tab" data-pv="missing">⚠ 漏翻/异常 <em id="pvMissingCount">0</em></button>
           <button class="proof-view-tab" data-pv="log">📋 修改记录</button>
         </div>
 
@@ -215,6 +228,14 @@
           <div class="gloss-sec-title">已解决（<span id="annoDoneCount">0</span>）</div>
           <div id="annoDoneList" class="proof-list"></div>
           <div class="side-hint">批注会随翻译进度保存；行内 📝 按钮可快速添加。新增未解决的「问题/疑问」批注会把该行自动标为有问题。</div>
+        </div>
+
+        <!-- 漏翻/异常清单 -->
+        <div class="proof-view hidden" id="pv-missing">
+          <div id="missingList" class="proof-list">
+            <div class="pr-empty">正在检测漏翻与异常…</div>
+          </div>
+          <div class="side-hint">漏翻=译文为空；占位=译文照抄原文；可疑=译文/原文长度比异常（省译或过度扩写）。点击条目跳到对应行。此清单随翻译实时刷新。</div>
         </div>
 
         <!-- 修改记录 -->

@@ -243,7 +243,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             read_file, write_file, remove_file, list_dir, read_app_file, write_app_file, read_file_b64, app_dir,
-            dict_cmds::mdx_open, dict_cmds::mdx_lookup, dict_cmds::mdx_prefix, dict_cmds::mdx_close,
+            dict_cmds::mdx_open, dict_cmds::mdx_lookup, dict_cmds::mdx_prefix, dict_cmds::mdx_search, dict_cmds::mdx_close,
             dict_cmds::mdd_open, dict_cmds::mdd_resource, dict_cmds::mdd_close,
             dict_cmds::dict_list_sources, dict_cmds::dict_add_source, dict_cmds::dict_remove_source, dict_cmds::dict_set_enabled,
         ])

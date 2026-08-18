@@ -10,6 +10,7 @@ import {
   toggleApprove, toggleIssue, addAnnotation, resolveAnnotation, deleteAnnotation,
   demoteApproved, recordChange, snapshot, recordDiff, restoreChange,
   stats, rowPassesFilter, getChanges, collect, setKeys, proofKeys, defaultKeys,
+  analyzeRow, analyzeRows,
 } from '../src/proof.js';
 
 function paras3(){
@@ -191,4 +192,44 @@ test('快捷键: 默认值与自定义', () => {
   assert.equal(proofKeys.issue, 'w', '未指定的沿用默认');
   setKeys(defaultKeys());
   assert.equal(proofKeys.approve, 'q');
+});
+
+/* ---------------- 漏翻 / 异常分析 ---------------- */
+
+test('analyzeRow: 译文为空 → missing', () => {
+  assert.deepEqual(analyzeRow(makePara('☆0000☆☆こんにちは', '')), { kind: 'missing' });
+  assert.deepEqual(analyzeRow(makePara('☆0000☆☆こんにちは', '  ')), { kind: 'missing' });
+});
+
+test('analyzeRow: 译文照抄原文 → placeholder', () => {
+  assert.deepEqual(analyzeRow(makePara('☆0000☆☆こんにちは', 'こんにちは')), { kind: 'placeholder' });
+});
+
+test('analyzeRow: 长度比异常 → ratio', () => {
+  const short = analyzeRow(makePara('☆0000☆☆今日はいい天気ですね、一緒に散歩しましょう', '嗯'));
+  assert.equal(short.kind, 'ratio', '超短译文(省译)判可疑');
+  const long = analyzeRow(makePara('☆0000☆☆短い', '短い短い短い'.repeat(20)));
+  assert.equal(long.kind, 'ratio', '超长译文(扩写)判可疑');
+});
+
+test('analyzeRow: 正常译文 → null;NAME 行排除', () => {
+  assert.equal(analyzeRow(makePara('☆0000☆☆こんにちは', '你好')), null);
+  assert.equal(analyzeRow(makePara('☆NAME|2☆ティナ', '')), null, 'NAME 不判定漏翻');
+  assert.equal(analyzeRow(makePara('☆NAME|2☆ティナ', 'ティナ')), null, 'NAME 不判定占位');
+});
+
+test('analyzeRows: 汇总三类并排除 NAME,条目含预览', () => {
+  model.setParas([
+    makePara('☆0000☆☆こんにちは', '你好'),
+    makePara('☆0001☆☆さようなら', ''),
+    makePara('☆0002☆☆おやすみ', 'おやすみ'),
+    makePara('☆NAME|4☆ぼっち'),
+  ]);
+  const a = analyzeRows();
+  assert.ok(a.missing.some(x => x.i === 1));
+  assert.ok(a.placeholder.some(x => x.i === 2));
+  assert.ok(a.missing.every(x => x.i !== 3) && a.placeholder.every(x => x.i !== 3), 'NAME 不入清单');
+  assert.equal(a.total, a.missing.length + a.placeholder.length + a.ratio.length);
+  const m = a.missing.find(x => x.i === 1);
+  assert.ok(m.origPreview !== undefined && m.transPreview !== undefined, '清单项带预览');
 });
