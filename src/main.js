@@ -10,6 +10,7 @@ import * as s from './search.js';
 import * as wkr from './workers-client.js';
 import * as dbx from './db.js';
 import { debounce } from './debounce.js';
+import * as tb from './tabdock.js';
 import * as fsx from './fs.js';
 import * as gloss from './glossary.js';
 import * as mt from './mt.js';
@@ -572,17 +573,142 @@ async function loadSource(file, name){
   updateProgress(); // 加载后刷新进度 + 字数统计
 }
 
+/* ---------------- 多文档标签页 ---------------- */
+
+// 统一"打开文件"入口: 桌面(带路径)→ 进入标签体系;浏览器(无路径/session)→ 直接加载。
+async function openDoc(file, name){
+  const path = (file && file.path) || null;
+  if (path){
+    const key = tb.open(path, name || path.split(/[\\/]/).pop() || '');
+    if (tb.activeKey() === key){ renderTabs(); return; } // 已是当前文件(避免误重载丢编辑)
+    if (tb.getSnap(key) !== null){
+      await switchDoc(key); // 已有快照 → 直接切换
+    } else {
+      // 首次打开新文件: 先把当前活动文档冻结,避免被 loadSource 的 setParas 覆盖丢 undo
+      const cur = tb.activeKey();
+      if (cur) await flushDocToTab(cur);
+      await loadSource(file, name);
+      tb.setActive(key);
+      renderTabs();
+    }
+    return;
+  }
+  await loadSource(file, name); // 浏览器/会话文件不进标签体系
+}
+
+// 把当前活动文档冻结进标签快照(切换/关闭前调用)
+async function flushDocToTab(key){
+  try { await model.flushAutosave(); } catch (e) { /* 忽略 */ }
+  try { proof.flushSave(); } catch (e) { /* 忽略 */ }
+  tb.capture(key, {
+    model: model.snapshotState(),
+    proof: proof.snapshotState(),
+    glossData,
+  });
+}
+
+// 切到指定标签(从其快照恢复并重渲染)
+async function switchDoc(key){
+  const cur = tb.activeKey();
+  if (cur && cur !== key) await flushDocToTab(cur);
+  const snap = tb.getSnap(key);
+  if (!snap){ // 目标尚未快照(新开/异常) → 直接聚焦空
+    tb.setActive(key);
+    renderTabs();
+    return;
+  }
+  model.restoreState(snap.model);
+  glossData = snap.glossData;
+  proof.restoreState(snap.proof);
+  tb.setActive(key);
+  afterDocActivated();
+}
+
+// 标签切换/恢复后的公共重渲染尾(与 loadSource 尾部一致)
+function afterDocActivated(){
+  renderGlossTables();
+  updateGlossProjectLabel();
+  initSnippets();
+  document.getElementById('fname').textContent = '当前文件：' + (model.getFilename() || '');
+  rdr.fullRender();
+  recomputeMatchesUI(true);
+  rdr.focusIdx(0);
+  updateUndoButtons();
+  updateProgress();
+  renderTabs();
+}
+
+// 关闭标签;关闭的是活动标签则切到相邻,否则仅移除
+async function closeDoc(key){
+  if (!tb.has(key)) return;
+  const wasActive = tb.activeKey() === key;
+  if (wasActive){
+    await flushDocToTab(key);
+    const wasIndex = tb.list().findIndex(t => t.key === key);
+    tb.close(key);
+    const rest = tb.list();
+    const nb = tb.neighborAfterClose(rest, wasIndex);
+    if (nb){
+      await switchDoc(nb);
+    } else {
+      clearEditorForEmpty();
+    }
+  } else {
+    tb.close(key);
+    renderTabs();
+  }
+}
+
+// 没有标签时清空编辑区
+function clearEditorForEmpty(){
+  model.setParas([]);
+  model.setFileInfo({ name: '', path: null, nl: '\n', trailingBlank: false });
+  model.setRawText('');
+  glossData = { names: {}, terms: {} };
+  document.getElementById('fname').textContent = '当前文件：';
+  rdr.fullRender();
+  recomputeMatchesUI(true);
+  updateUndoButtons();
+  updateProgress();
+  renderTabs();
+}
+
+// 渲染顶栏标签
+function renderTabs(){
+  const bar = document.getElementById('tabs');
+  if (!bar) return;
+  bar.innerHTML = '';
+  const active = tb.activeKey();
+  for (const t of tb.list()){
+    const el = document.createElement('button');
+    el.className = 'doc-tab' + (t.key === active ? ' active' : '');
+    el.type = 'button';
+    const label = document.createElement('span');
+    label.className = 'dt-label';
+    label.textContent = t.name;
+    label.title = t.key;
+    label.addEventListener('click', (e) => { e.stopPropagation(); switchDoc(t.key); });
+    const close = document.createElement('span');
+    close.className = 'dt-close';
+    close.textContent = '✕';
+    close.title = '关闭';
+    close.addEventListener('click', (e) => { e.stopPropagation(); closeDoc(t.key); });
+    el.append(label, close);
+    bar.appendChild(el);
+  }
+}
+
 async function importWithPicker(){
   if (fsx.isTauri()){
     const res = await fsx.openFileDialog();
     if (!res) return;
-    await loadSource({ path: res.path }, res.name);
+    await openDoc({ path: res.path }, res.name);
     return;
   }
   // 浏览器: 优先 File System Access 拿句柄(可写回原文件),不支持则普通选择
   const picked = await fsx.pickBrowserFile();
   if (picked){
-    await loadSource(picked.file, picked.name);
+    await openDoc(picked.file, picked.name);
     return;
   }
   document.getElementById('fileInput').click();
@@ -2816,9 +2942,9 @@ function buildFileTree(entries){
             // 浏览器端: 拿句柄 → 可写回原文件
             fsx.setBrowserFileHandle(en.handle);
             const f = await en.handle.getFile();
-            await loadSource(f, en.name);
+            await openDoc(f, en.name);
           } else {
-            await loadSource({ path: en.path }, en.name);
+            await openDoc({ path: en.path }, en.name);
           }
         } catch (err){ alert('无法打开文件:' + err.message); }
       });
@@ -2837,7 +2963,7 @@ function initEvents(){
   document.getElementById('btnImport').addEventListener('click', importWithPicker);
   document.getElementById('fileInput').addEventListener('change', async (e) => {
     const f = e.target.files[0];
-    if (f) await loadSource(f, f.name);
+    if (f) await openDoc(f, f.name);
     e.target.value = '';
   });
   document.getElementById('btnSaveFile').addEventListener('click', saveDirect);
@@ -3028,7 +3154,7 @@ function initEvents(){
     const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
     if (f){
       try {
-        await loadSource(f, f.name);
+        await openDoc(f, f.name);
         return;
       } catch (err){
         alert('无法读取拖入的文件: ' + err.message);
@@ -3048,7 +3174,7 @@ function initEvents(){
           alert('仅支持打开 .txt / .ks 文本文件。');
           return;
         }
-        loadSource({ path: p }, p.split(/[\\/]/).pop() || p).catch(err => alert('无法打开拖入的文件: ' + err.message));
+        openDoc({ path: p }, p.split(/[\\/]/).pop() || p).catch(err => alert('无法打开拖入的文件: ' + err.message));
       });
     }).catch(() => {});
   }

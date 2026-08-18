@@ -226,6 +226,23 @@ body.has-background #sidebar{ background:var(--sidebar-glass); backdrop-filter:b
   border-bottom:1px solid var(--border);
   background:var(--panel-bg);
 }
+/* 多文档标签条 */
+.tab-strip{
+  display:flex; align-items:center; gap:4px; overflow-x:auto;
+  padding:4px 8px; border-top:1px solid var(--border-soft);
+  background:var(--panel-bg-2);
+}
+.doc-tab{
+  display:inline-flex; align-items:center; gap:6px; max-width:220px;
+  padding:3px 8px; height:auto; line-height:1.6; font-size:12px;
+  background:var(--button-bg); border:1px solid var(--border-strong); border-radius:2px;
+  color:var(--text-muted); cursor:pointer; white-space:nowrap; flex:none;
+}
+.doc-tab:hover{ border-color:var(--accent); color:var(--text) }
+.doc-tab.active{ background:var(--button-active); border-color:var(--accent); color:var(--text-strong) }
+.doc-tab .dt-label{ overflow:hidden; text-overflow:ellipsis }
+.doc-tab .dt-close{ color:var(--text-dim); font-size:11px; padding:0 2px; }
+.doc-tab .dt-close:hover{ color:var(--danger-text) }
 .menu-bar{
   height:34px;
   display:flex;

@@ -127,3 +127,29 @@ export function flushAutosave(){
   if (key) return saveState(key, paras);
   return Promise.resolve();
 }
+
+/* ---------------- 文档快照/恢复(多标签页) ---------------- */
+
+/** 捕获当前文档全部内存状态(含 undo/redo 栈)。paras 用引用(非活动标签冻结,无并发修改)。 */
+export function snapshotState(){
+  return {
+    paras, filename, filePath, nl, trailingBlank, rawText, canonicalDoc,
+    undoStack: undoStack.slice(),
+    redoStack: redoStack.slice(),
+  };
+}
+
+/** 恢复文档状态。不走 setParas(不清空 undo/redo)。 */
+export function restoreState(s){
+  if (!s) return;
+  paras = Array.isArray(s.paras) ? s.paras : [];
+  filename = s.filename || '';
+  filePath = s.filePath || null;
+  if (typeof s.nl === 'string') nl = s.nl;
+  if (typeof s.trailingBlank === 'boolean') trailingBlank = s.trailingBlank;
+  rawText = typeof s.rawText === 'string' ? s.rawText : '';
+  canonicalDoc = !!s.canonicalDoc;
+  undoStack = Array.isArray(s.undoStack) ? s.undoStack : [];
+  redoStack = Array.isArray(s.redoStack) ? s.redoStack : [];
+}
+

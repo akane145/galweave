@@ -397,6 +397,23 @@ export function resetState(){
   activeForFile = false;
 }
 
+/* ---------------- 状态快照/恢复(多标签页) ---------------- */
+
+/** 捕获校对内存状态(changes/proof 句柄)。行级 p.pr 已随 paras 快照携带。 */
+export function snapshotState(){
+  return { changes, proofPath, proofKey, activeForFile };
+}
+
+/** 恢复校对状态(切换标签时;不清 enabled/filter/viewTab 等全局偏好)。 */
+export function restoreState(s){
+  clearSettleTimers();
+  if (!s) return;
+  changes = Array.isArray(s.changes) ? s.changes : [];
+  proofPath = s.proofPath || null;
+  proofKey = s.proofKey || '';
+  activeForFile = !!s.activeForFile;
+}
+
 // 脏写控制: 数据变化后防抖保存;保存串行化避免竞态覆盖
 export function scheduleSave(){
   if (!activeForFile) return;
