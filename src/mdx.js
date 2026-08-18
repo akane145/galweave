@@ -8,13 +8,17 @@ import * as fsx from './fs.js';
 
 /* ================= 词条交互纯逻辑(可单测) ================= */
 
-/** 扩展名 → MIME(词条 HTML 里 MDD 资源的图片/音频) */
+/** 扩展名 → MIME(词条 HTML 里 MDD 资源的图片/音频/字体/CSS/视频) */
 export function mimeFromExt(name){
   const ext = String(name || '').split('.').pop().toLowerCase();
   const map = {
     png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
     svg: 'image/svg+xml', webp: 'image/webp', bmp: 'image/bmp', ico: 'image/x-icon',
     mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac',
+    css: 'text/css',
+    woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf', eot: 'application/vnd.ms-fontobject',
+    mp4: 'video/mp4', webm: 'video/webm', ogv: 'video/ogg',
+    pdf: 'application/pdf',
   };
   return map[ext] || 'application/octet-stream';
 }
@@ -44,8 +48,65 @@ export function linkTarget(href){
 
 /* ================= 词条 HTML 消毒(JS 端安全边界,两种路径共用) ================= */
 
+// CSS 中的危险/动态子串(整行命中则丢弃该行): @import 可拉外部、expression() 与可执行 url 属注入面
+const BAD_CSS = ['@import', 'expression(', 'url(javascript:', 'url(vbscript:', 'url(data:text/html'];
+
+/** CSS 文案消毒: 逐行丢弃含 @import / expression() / 可执行 url() 的行。 */
+export function sanitizeCss(css){
+  return String(css || '').split(/\r?\n/).map(line =>
+    BAD_CSS.some((b) => line.toLowerCase().indexOf(b) !== -1) ? '' : line
+  ).join('\n');
+}
+
+/** 提取 CSS 文本里的 url(…) 内联资源串列表(去引号)。纯扫描,不依赖回调式正则。 */
+export function extractCssUrls(css){
+  const s = String(css || '');
+  const out = [];
+  let i = 0;
+  while ((i = s.indexOf('url(', i)) !== -1){
+    let j = i + 4;
+    while (j < s.length && s[j] !== ')') j++;
+    let inner = s.slice(i + 4, j).trim();
+    if ((inner.startsWith('"') && inner.endsWith('"')) || (inner.startsWith("'") && inner.endsWith("'"))) inner = inner.slice(1, -1);
+    out.push(inner);
+    i = j + 1;
+  }
+  return out;
+}
+
 /**
- * MDX 词条 HTML 消毒: 只保留排版性标签,移除脚本/样式/表单/媒体与事件属性。
+ * 把 CSS 文本里的本地资源 url() 水化为 data URL。
+ * resolve(key) → { b64, mime } 或 null(缺失则原样保留)。http(s)/data/blob 外部资源不动。
+ */
+export function hydrateCssUrls(css, resolve){
+  const s = String(css || '');
+  let out = '';
+  let i = 0;
+  while (true){
+    const k = s.indexOf('url(', i);
+    if (k === -1){ out += s.slice(i); break; }
+    out += s.slice(i, k);
+    let j = k + 4;
+    while (j < s.length && s[j] !== ')') j++;
+    const raw = s.slice(k, j + 1);
+    let inner = s.slice(k + 4, j).trim();
+    if ((inner.startsWith('"') && inner.endsWith('"')) || (inner.startsWith("'") && inner.endsWith("'"))) inner = inner.slice(1, -1);
+    const url = inner.trim();
+    let replacement = raw;
+    if (isMddResourceSrc(url)){
+      const res = resolve ? resolve(srcToResourceKey(url)) : null;
+      if (res && res.b64){
+        replacement = 'url(data:' + (res.mime || mimeFromExt(url)) + ';base64,' + res.b64 + ')';
+      }
+    }
+    out += replacement;
+    i = j + 1;
+  }
+  return out;
+}
+
+/**
+ * MDX 词条 HTML 消毒: 保留排版、样式、媒体标签,移除脚本/表单/事件属性与危险 CSS/链接。
  * 词典是第三方内容,Webview 内必须消毒后再渲染。Node(无 DOMParser)环境直接原样返回(供测试)。
  */
 export function sanitizeMdxHtml(html){
@@ -56,12 +117,22 @@ export function sanitizeMdxHtml(html){
   } catch (e){ return ''; }
   const root = doc.getElementById('mdx-root');
   if (!root) return '';
-  root.querySelectorAll('script,style,iframe,frame,object,embed,link,meta,base,form,input,select,textarea,button,video,audio,source').forEach(el => el.remove());
+  // 移除脚本/表单/内嵌 iframe 等;保留 style/link(stylesheet)/audio/video/source 供水化
+  root.querySelectorAll('script,iframe,frame,object,embed,meta,base,form,input,select,textarea,button').forEach(el => el.remove());
+  // <link>: 仅保留 rel=stylesheet 且 href 安全的;其余 link(icon/preload 等)移除
+  root.querySelectorAll('link').forEach(el => {
+    const rel = (el.getAttribute('rel') || '').toLowerCase();
+    const href = el.getAttribute('href') || '';
+    if (!rel.includes('stylesheet') || /^\s*(javascript|data|blob|vbscript):/i.test(href)) el.remove();
+  });
+  // <style>: 内容消毒(去 @import/expression/可执行 url)
+  root.querySelectorAll('style').forEach(el => { el.textContent = sanitizeCss(el.textContent); });
+  // 通用属性清理: on* 事件、危险协议的 href/src/data
   root.querySelectorAll('*').forEach(el => {
     for (const a of [...el.attributes]){
       const n = a.name.toLowerCase();
       if (n.startsWith('on')) el.removeAttribute(a.name);
-      else if ((n === 'href' || n === 'src' || n === 'xlink:href') && /^\s*(javascript|data|vbscript):/i.test(a.value)) el.removeAttribute(a.name);
+      else if ((n === 'href' || n === 'src' || n === 'data' || n === 'xlink:href') && /^\s*(javascript|data|vbscript):/i.test(a.value)) el.removeAttribute(a.name);
     }
   });
   return root.innerHTML;

@@ -1,5 +1,12 @@
 # 更新日志
 
+## [未发布] - MDX/MDD 附属资源完整兼容
+
+- MDX 词条附庸资源完整加载: 外部 CSS(`<link rel="stylesheet">` 指向 MDD)、内联 `<style>`、字体(woff/ttf)、背景图 等经 `url()` 水化为 data URL;图片/音频/视频/object/use 的本地资源同步水化。
+- `sanitizeMdxHtml` 保留样式与媒体标签,新增 `sanitizeCss` 去除 `@import`/`expression()`/可执行 `url()` 保障安全;新增纯函数 `extractCssUrls`/`hydrateCssUrls`。
+- `mimeFromExt` 扩展 css/字体/视频/PDF 类型;`.dc-html` 补音视频显示样式。
+- 浏览器(无 MDD)版自动移除本地 stylesheet link 避免 404,功能不受影响。
+
 ## [未发布] - 多文档标签页
 
 - 顶栏新增标签条：一次打开多个 `.txt`，每个标签对应一个文件，点击/✕ 切换关闭；同一文件再次打开聚焦已有标签。

@@ -940,6 +940,7 @@ kbd{ font-size:14px }
 /* MDX 词典词条正文(词典自带排版 HTML,已消毒) */
 .dc-html{ max-height:300px; overflow:auto; line-height:1.6; padding:2px 0 }
 .dc-html img{ max-width:100%; height:auto }
+.dc-html audio,.dc-html video{ max-width:100%; display:block; margin:4px 0 }
 .dc-html a{ color:var(--accent); text-decoration:none }
 .dc-html table{ border-collapse:collapse; max-width:100% }
 .dc-html td,.dc-html th{ border:1px solid var(--border-soft); padding:2px 6px }

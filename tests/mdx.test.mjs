@@ -7,7 +7,8 @@ import { deflateSync } from 'node:zlib';
 import fsShim, { registerBuffer, unregisterBuffer } from '../src/node-shims/fs.js';
 import zlibShim from '../src/node-shims/zlib.js';
 import assertShim from '../src/node-shims/assert.js';
-import { sanitizeMdxHtml, buildMdxResults, createMdxProvider, createPathMdxProvider,
+import { sanitizeMdxHtml, sanitizeCss, extractCssUrls, hydrateCssUrls,
+  buildMdxResults, createMdxProvider, createPathMdxProvider,
   createTauriMdxProvider, createTauriMdd,
   mimeFromExt, srcToResourceKey, isMddResourceSrc, isEntryLink, isSoundLink, linkTarget } from '../src/mdx.js';
 import { base64ToArrayBuffer } from '../src/fs.js';
@@ -22,6 +23,50 @@ test('mimeFromExt: 常见图片/音频扩展名 → MIME', () => {
   assert.equal(mimeFromExt('a.wav'), 'audio/wav');
   assert.equal(mimeFromExt('unknown.xyz'), 'application/octet-stream');
   assert.equal(mimeFromExt(''), 'application/octet-stream');
+});
+
+test('mimeFromExt: 附庸资源(css/字体/视频/文档)', () => {
+  assert.equal(mimeFromExt('a.css'), 'text/css');
+  assert.equal(mimeFromExt('f.woff'), 'font/woff');
+  assert.equal(mimeFromExt('f.woff2'), 'font/woff2');
+  assert.equal(mimeFromExt('f.ttf'), 'font/ttf');
+  assert.equal(mimeFromExt('f.otf'), 'font/otf');
+  assert.equal(mimeFromExt('v.mp4'), 'video/mp4');
+  assert.equal(mimeFromExt('v.webm'), 'video/webm');
+  assert.equal(mimeFromExt('d.pdf'), 'application/pdf');
+});
+
+/* ---------------- CSS 附庸资源: 消毒 / url 水化 ---------------- */
+
+test('sanitizeCss: 去掉 @import/expression/javascript url,保留普通规则', () => {
+  const dirty = [
+    '@import url("http://evil/x.css");',
+    'a { expression(alert(1)) }',
+    '.x { background: url(javascript:evil()) }',
+    '.y { color: red; }',
+    '@font-face { font-family: F; src: url("f.woff2"); }',
+  ].join('\n');
+  const clean = sanitizeCss(dirty);
+  assert.ok(!/@import/i.test(clean), '去 @import');
+  assert.ok(!/expression/i.test(clean), '去 expression()');
+  assert.ok(!/url\(javascript:/i.test(clean), '去可执行 url');
+  assert.ok(clean.includes('color: red'), '保留普通规则');
+  assert.ok(clean.includes('f.woff2'), '保留普通字体 url');
+});
+
+test('extractCssUrls: 提取 url(…) 内联资源(去引号)', () => {
+  const css = '.a{background:url(/img/a.png)}.b{font:url( "f.woff2" )}.c{src:url(\'x.ttf\')}';
+  assert.deepEqual(extractCssUrls(css), ['/img/a.png', 'f.woff2', 'x.ttf']);
+  assert.deepEqual(extractCssUrls('no url here'), []);
+});
+
+test('hydrateCssUrls: 本地 url → data URL,http/data 外部与缺失不动', () => {
+  const css = '.a{background:url(/img/a.png)}.b{background:url(https://x/b.png)}.c{background:url(a.png)}';
+  const resolve = (k) => k === 'img/a.png' ? { b64: 'QUJD', mime: 'image/png' } : null;
+  const out = hydrateCssUrls(css, resolve);
+  assert.ok(out.includes('url(data:image/png;base64,QUJD)'), '本地已水化');
+  assert.ok(out.includes('url(https://x/b.png)'), 'http 外部保留');
+  assert.ok(out.includes('url(a.png)'), '缺失资源保留');
 });
 
 test('srcToResourceKey: 去前导 / 或 \\ (MDD key 保留内部反斜杠)', () => {

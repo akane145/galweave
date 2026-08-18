@@ -1443,7 +1443,7 @@ function renderDictResults(res, fuzzy){
           body.__mdd = mdd;
           line.appendChild(body);
           card.appendChild(line);
-          hydrateMddImages(body, mdd);
+          hydrateMddResources(body, mdd);
           continue;
         }
         if (s.pos){
@@ -1540,20 +1540,58 @@ function renderDictFavorites(){
  * 把词条 HTML 内的本地资源 <img src> 解析为 MDD 资源 data URL。
  * 仅处理来自 MDD 的本地资源(http/data/blob 等外部 src 不动),缺失资源静默。
  */
-function hydrateMddImages(body, mdd){
-  if (!mdd) return;
-  const imgs = [...body.querySelectorAll('img[src]')];
-  for (const img of imgs){
-    const raw = img.getAttribute('src');
-    if (!isMddResourceSrc(raw)) continue;
+/**
+ * MDD 附属资源完整水化: 图片/音频/视频/object/use 的本地 src → data URL;
+ * <link rel="stylesheet">(MDD 里的 css)与内联 <style> 文本中的 url()(字体/背景图)一并水化。
+ * 无 MDD(浏览器/会话)时移除本地 stylesheet link,避免相对 href 404。
+ */
+function hydrateMddResources(body, mdd){
+  if (!mdd){
+    body.querySelectorAll('link[rel="stylesheet"]').forEach(el => { if (el.getAttribute('href') && isMddResourceSrc(el.getAttribute('href'))) el.remove(); });
+    return;
+  }
+  // (A) 直接引用资源的标签: img/audio/video/source/object/use
+  for (const el of [...body.querySelectorAll('img[src],audio[src],video[src],source[src],object[data],use[href]')]){
+    const raw = el.getAttribute('src') || el.getAttribute('data') || el.getAttribute('href');
+    if (!raw || !isMddResourceSrc(raw)) continue;
     const key = srcToResourceKey(raw);
     mdd.resourceB64(key).then(b64 => {
-      if (b64){
-        const mime = mimeFromExt(raw);
-        img.src = 'data:' + mime + ';base64,' + b64;
-      }
-    }).catch(() => { /* 资源缺失: 保留原样 */ });
+      if (!b64) return;
+      const mime = mimeFromExt(raw);
+      const attr = el.hasAttribute('src') ? 'src' : (el.hasAttribute('data') ? 'data' : 'href');
+      el.setAttribute(attr, 'data:' + mime + ';base64,' + b64);
+    }).catch(() => {});
   }
+  // (B) CSS: 读 MDD 里的 stylesheet 文件 + 内联 <style>,水化其中 url()(字体/背景图)
+  const styleEls = [...body.querySelectorAll('style')];
+  const linkEls = [...body.querySelectorAll('link[rel="stylesheet"]')].filter(l => {
+    const h = l.getAttribute('href'); return h && isMddResourceSrc(h);
+  });
+  Promise.all(linkEls.map(l => mdd.resourceB64(srcToResourceKey(l.getAttribute('href'))).then(b64 => ({ l, text: b64 ? atob(b64) : null }))))
+    .then(linkRes => {
+      const cssTexts = [...linkRes.filter(x => x.text).map(x => x.text), ...styleEls.map(s => s.textContent)];
+      const needed = [];
+      for (const t of cssTexts){
+        for (const u of mdx.extractCssUrls(t)){ if (isMddResourceSrc(u)) needed.push(srcToResourceKey(u)); }
+      }
+      const unique = [...new Set(needed)];
+      if (!unique.length){
+        for (const s of styleEls) if (s.textContent) s.textContent = mdx.hydrateCssUrls(s.textContent, () => null);
+        for (const x of linkRes) if (x.text){ const st = document.createElement('style'); st.textContent = x.text; x.l.replaceWith(st); }
+        return;
+      }
+      return Promise.all(unique.map(k => mdd.resourceB64(k).then(b64 => ({ k, b64 })))).then(urls => {
+        const umap = new Map(urls.filter(x => x.b64).map(x => [x.k, { b64: x.b64, mime: mimeFromExt(x.k) }]));
+        const resolve = k => (umap.has(k) ? umap.get(k) : null);
+        for (const s of styleEls) if (s.textContent) s.textContent = mdx.hydrateCssUrls(s.textContent, resolve);
+        for (const x of linkRes){
+          if (!x.text) continue;
+          const st = document.createElement('style');
+          st.textContent = mdx.hydrateCssUrls(x.text, resolve);
+          x.l.replaceWith(st);
+        }
+      });
+    }).catch(() => { /* 缺失 css/资源: 保留原样 */ });
 }
 
 /** 容器级事件委托: entry:// 跳转查词 / sound:// 播放发音 */
