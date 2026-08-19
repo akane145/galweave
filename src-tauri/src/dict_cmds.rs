@@ -134,19 +134,32 @@ pub fn mdd_open(state: State<DictState>, path: String) -> Result<u32, String> {
 }
 
 /// 读取 MDD 资源(图片/音频原始字节;base64 编码返回,WebView 可直接用 data URL 或写文件)
+/// 生成 MDD 资源 key 的候选变体: 原样、去前导 / \、以及内部斜杠风格互换
+/// (MDX 词条 href/src 常用正斜杠,MDD 内部 key 常用反斜杠,二者需互相尝试方能命中)。
+fn mdd_key_variants(k: &str) -> Vec<String> {
+    let t = k.trim_start_matches(['\\', '/']);
+    let mut v = vec![k.to_string(), t.to_string()];
+    if t.contains('\\') || t.contains('/') {
+        v.push(t.replace('\\', "/"));
+        v.push(t.replace('/', "\\"));
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
 #[tauri::command]
 pub fn mdd_resource(state: State<DictState>, handle: u32, key: String) -> Result<Option<String>, String> {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     let m = state.mdd.read().map_err(|_| "句柄锁失败".to_string())?;
     let r = m.get(&handle).ok_or("MDD 句柄无效")?;
-    // 尝试常见路径形式:原样、去首 \ 或 /
-    let mut bytes = r.mdd_resource(&key)?;
-    if bytes.is_none() {
-        let k = key.trim_start_matches(['\\', '/']);
-        bytes = r.mdd_resource(k)?;
+    for cand in mdd_key_variants(&key) {
+        if let Some(b) = r.mdd_resource(&cand)? {
+            return Ok(Some(STANDARD.encode(b)));
+        }
     }
-    Ok(bytes.map(|b| STANDARD.encode(b)))
+    Ok(None)
 }
 
 /// 关闭 MDD
