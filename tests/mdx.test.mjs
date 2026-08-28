@@ -10,6 +10,8 @@ import assertShim from '../src/node-shims/assert.js';
 import { sanitizeMdxHtml, sanitizeCss, extractCssUrls, hydrateCssUrls,
   buildMdxResults, createMdxProvider, createPathMdxProvider,
   createTauriMdxProvider, createTauriMdd,
+  extractHtmlHeadword, displayHeadword, cleanGaijiMarkers, unifyCssFontSize,
+  replaceCssTokens, normalizeDictionaryColors, scopeDictionaryCss, normalizeDictionaryCss,
   mimeFromExt, srcToResourceKey, isMddResourceSrc, isEntryLink, isSoundLink, linkTarget } from '../src/mdx.js';
 import { base64ToArrayBuffer } from '../src/fs.js';
 
@@ -52,6 +54,39 @@ test('sanitizeCss: 去掉 @import/expression/javascript url,保留普通规则',
   assert.ok(!/url\(javascript:/i.test(clean), '去可执行 url');
   assert.ok(clean.includes('color: red'), '保留普通规则');
   assert.ok(clean.includes('f.woff2'), '保留普通字体 url');
+});
+
+
+
+
+
+test('normalizeDictionaryColors: 黑白硬编码转为可随主题切换的变量', () => {
+  const out = normalizeDictionaryColors('body{color:#000;background:#fff} table{border-color:#d4d4d4} .x{background:radial-gradient(white, silver)}');
+  assert.ok(out.includes('color:var(--dict-ink)'));
+  assert.ok(out.includes('background:var(--dict-surface)'));
+  assert.ok(out.includes('border-color:#d4d4d4') || out.includes('border-color:var(--dict-border)'));
+  assert.ok(out.includes('radial-gradient(var(--dict-surface), var(--dict-border))'));
+});
+
+test('scopeDictionaryCss: 将词典规则限制在独立词条容器内', () => {
+  const css = 'body{font-size:16px}table, th{border:1px solid} @media screen { .headline { color:red } } @font-face{font-family:X;src:url(x.woff2)}';
+  const out = scopeDictionaryCss(css, '.dc-html[data-dict-profile="demo"]');
+  assert.ok(out.includes('.dc-html[data-dict-profile="demo"]{font-size:16px}'));
+  assert.ok(out.includes('.dc-html[data-dict-profile="demo"] table, .dc-html[data-dict-profile="demo"] th'));
+  assert.ok(out.includes('@media screen { .dc-html[data-dict-profile="demo"] .headline'));
+  assert.ok(out.includes('@font-face{font-family:X;src:url(x.woff2)}'));
+  assert.ok(!out.includes('body{font-size'));
+});
+
+test('normalizeDictionaryCss: 模板变量替换并统一字号', () => {
+  const out = normalizeDictionaryCss('.midashi{font-size:$size$;color:$color$}', {
+    tokens: { '$size$': '12px', '$color$': 'red' },
+    scope: '.dc-html[data-dict-profile="kojien7"]',
+  });
+  assert.ok(out.includes('.dc-html[data-dict-profile="kojien7"] .midashi'));
+  assert.ok(out.includes('font-size:0.75em'));
+  assert.ok(out.includes('color:var(--dict-accent)'));
+  assert.ok(!out.includes('$size$'));
 });
 
 test('extractCssUrls: 提取 url(…) 内联资源(去引号)', () => {
@@ -236,6 +271,74 @@ test('buildMdxResults: @@@LINK 变体词跟随到主词条(含循环保护)', as
   // 目标不存在 → 空结果
   const rs3 = await buildMdxResults(inst, 'c', 'D');
   assert.deepEqual(rs3, []);
+});
+
+test('buildMdxResults: 纯数字内部 ID 目标(明镜)用 HTML 真实词头', async () => {
+  // 明镜: 食べる → @@@LINK=38658,数字 key 的释义里含 <headword> 真实词头
+  const dict = {
+    食べる: { keyText: '食べる', definition: '@@@LINK=38658' },
+    38658: {
+      keyText: '38658',
+      definition: '<html><body><div class="head"><head2><headword class="カナ">た・べる</headword><headword class="表記"><red>【</red>食べる<red>】</red></headword></head2></div><div class="body"><meaning>固形物をかんで飲み込む。</meaning></div></body></html>',
+    },
+  };
+  const inst = { lookup: (w) => dict[w] || { keyText: '', definition: null }, prefix: () => [] };
+  const rs = await buildMdxResults(inst, '食べる', '明鏡');
+  assert.equal(rs.length, 1);
+  assert.equal(rs[0].headword, 'た・べる【食べる】', '应显示 HTML 内真实词头而非数字 ID');
+  assert.ok(rs[0].senses[0].html.includes('固形物'));
+  // 数字 ID 目标但 HTML 无 headword → 回退查询词
+  const inst2 = { lookup: (w) => w === 'x' ? { keyText: 'x', definition: '@@@LINK=123' } : { keyText: '123', definition: '<div>无词头</div>' }, prefix: () => [] };
+  const rs2 = await buildMdxResults(inst2, 'x', 'D');
+  assert.equal(rs2[0].headword, 'x', '无 headword 时回退查询词');
+});
+
+test('extractHtmlHeadword / displayHeadword: 纯逻辑', () => {
+  assert.equal(extractHtmlHeadword('<div class="head"><headword class="カナ">た・べる</headword><headword>【食べる】</headword></div>'), 'た・べる【食べる】');
+  // <red> 装饰标签直接剔除不留空格
+  assert.equal(extractHtmlHeadword('<headword><red>【</red>食べる<red>】</red></headword>'), '【食べる】');
+  // 只取前两个 headword,跳过子見出し(惯用句)
+  assert.equal(
+    extractHtmlHeadword('<headword class="カナ">みる</headword><headword class="表記">【見る】</headword><headword class="子見出し">⦿見ぬが花</headword>'),
+    'みる【見る】',
+  );
+  assert.equal(extractHtmlHeadword('<div>没有词头标签</div>'), '');
+  assert.equal(extractHtmlHeadword(''), '');
+  // displayHeadword: 内部 ID → HTML 词头;无词头 → 查询词;普通词头原样
+  assert.equal(displayHeadword('38658', '<headword>たべる</headword>', '食べる'), 'たべる');
+  assert.equal(displayHeadword('@jitendex-123', '<div>x</div>', '食べる'), '食べる');
+  assert.equal(displayHeadword('食べる', '<div>x</div>', '食べる'), '食べる');
+});
+
+test('cleanGaijiMarkers: 清除 〓XXXX 外字占位标记', () => {
+  // XSJRH 外字标记: 〓 + 4位十六进制 + ASCII 描述
+  assert.equal(cleanGaijiMarkers('ベアルック【〓F18D bare+look】'), 'ベアルック【bare+look】');
+  assert.equal(cleanGaijiMarkers('ブックカバー【〓F18D book+cover】'), 'ブックカバー【book+cover】');
+  assert.equal(cleanGaijiMarkers('〓F18D bare+look'), 'bare+look');
+  // 无标记原样
+  assert.equal(cleanGaijiMarkers('た・べる【食べる】'), 'た・べる【食べる】');
+  assert.equal(cleanGaijiMarkers(''), '');
+  assert.equal(cleanGaijiMarkers(null), '');
+  // 通过 displayHeadword 生效(普通词头也净化)
+  assert.equal(displayHeadword('ベアルック【〓F18D bare+look】', '<div>x</div>', 'ベアルック'), 'ベアルック【bare+look】');
+});
+
+test('unifyCssFontSize: 固定 px/rem 字号转 em,随容器缩放', () => {
+  // XSJRH 的 12px/14px 固定字号 → em(基准 16px)
+  assert.equal(unifyCssFontSize('.xsjrh-fbox{font-size:12px}'), '.xsjrh-fbox{font-size:0.75em}');
+  assert.equal(unifyCssFontSize('.xsjrh-exbox{font-size:14px}'), '.xsjrh-exbox{font-size:0.875em}');
+  // jitendex 的 rem → em(相对根元素 → 相对容器)
+  assert.equal(unifyCssFontSize('.word{font-size:0.7rem}'), '.word{font-size:0.7em}');
+  assert.equal(unifyCssFontSize('.word{font-size:1.3rem}'), '.word{font-size:1.3em}');
+  // 不碰 padding/margin 等其他 px
+  assert.equal(unifyCssFontSize('.a{font-size:12px;padding:4px 8px;margin-top:2px}'), '.a{font-size:0.75em;padding:4px 8px;margin-top:2px}');
+  // em/相对值原样
+  assert.equal(unifyCssFontSize('.b{font-size:1.4em;line-height:1.7}'), '.b{font-size:1.4em;line-height:1.7}');
+  // 空/无字号
+  assert.equal(unifyCssFontSize(''), '');
+  assert.equal(unifyCssFontSize(null), '');
+  // 小数 px
+  assert.equal(unifyCssFontSize('.c{font-size:13.5px}'), '.c{font-size:0.844em}');
 });
 
 test('createMdxProvider: 非 ArrayBuffer 直接拒绝', async () => {

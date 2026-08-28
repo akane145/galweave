@@ -22,6 +22,7 @@ import * as mdx from './mdx.js';
 import * as suggest from './suggest.js';
 import * as snips from './snippets.js';
 import { parseCsv, toGlossary, fromGlossary } from './csv.js';
+import { profileForDictionary, dictionaryCssCandidates, profileNormalizationCss } from './dictionary-profiles.js';
 
 /* ---------------- 状态 ---------------- */
 
@@ -32,7 +33,8 @@ let snippetData = { global: {}, project: {}, merged: {} }; // 快捷片段(merge
 let dictSettings = null;                                   // settings.dict(词典源配置)
 const sessionDictEntries = new Map(); // 浏览器版会话内 JSON 词典词条: 源 id -> entries
 const mdxProviders = new Map();      // 会话内 MDX 词典 Provider: 源 id -> provider(含 dispose)
-const sourceMdd = new Map();         // 词典源 name -> MDD 资源 provider(词条内图片/发音用)
+const sourceAssets = new Map();      // 词典源 id -> { profile, css:[{key,text}], mdd }
+const dictProfileStyles = new Set();
 let lastPush = {};      // 撤销快照合并计时
 
 const $q = document.getElementById('q');
@@ -75,7 +77,7 @@ rdr.setRendererState({
   onDictLookup: dictLookupFromSelection,
   onNameInput: nameInputHandler,
   onTransInput: transInputHandler,
-  onFocusRow: () => {},
+  onFocusRow: updateContextFromRow,
   onUndoState: updateUndoButtons,
   onMTState: updateMTButtons,
   // 校对模式钩子
@@ -109,7 +111,11 @@ function applyTheme(mode){
   document.documentElement.setAttribute('data-theme', currentMode);
   document.body.classList.toggle('theme-bw', currentMode === 'bw');
   const btn = document.getElementById('btnTheme');
-  if (btn) btn.textContent = theme.themeButtonIcon(currentMode);
+  if (btn){
+    const labels = { dark: '深色', light: '浅色', bw: '黑白' };
+    btn.textContent = labels[currentMode];
+    btn.setAttribute('aria-label', `当前主题：${labels[currentMode]}，点击切换主题`);
+  }
 }
 
 /** 应用字体设置到 CSS 变量(仅用户设置项覆盖,其余跟随主题) */
@@ -199,7 +205,7 @@ function previewFontFromUI(){
 
 /* ---------------- 进度 / 撤销按钮 / 统计 ---------------- */
 
-function updateProgress(){ rdr.updateProgress(); updateStats(); }
+function updateProgress(){ rdr.updateProgress(); updateStats(); syncEditorialMeta(); }
 
 // 字数统计: 总字符 / 已翻译字符 / 完成百分比(基于译文字符数)
 function updateStats(){
@@ -565,6 +571,7 @@ async function loadSource(file, name){
 
   document.getElementById('fname').textContent = '当前文件：' + fname + '　编码：' + (file.encoding || 'utf-8')
     + (applied ? '　📖术语已自动应用 ' + applied + ' 个人名' : '');
+  setHeaderSaveState('已载入', 'saved');
   await proof.loadForFile(); // 加载该文件的校对数据(批注/状态/修改记录)
   rdr.fullRender();
   recomputeMatchesUI(true); // 新文件载入 → 强制全量同步影子
@@ -630,6 +637,7 @@ function afterDocActivated(){
   updateGlossProjectLabel();
   initSnippets();
   document.getElementById('fname').textContent = '当前文件：' + (model.getFilename() || '');
+  setHeaderSaveState(model.getFilename() ? '已载入' : '准备就绪', 'saved');
   rdr.fullRender();
   recomputeMatchesUI(true);
   rdr.focusIdx(0);
@@ -666,6 +674,7 @@ function clearEditorForEmpty(){
   model.setRawText('');
   glossData = { names: {}, terms: {} };
   document.getElementById('fname').textContent = '当前文件：';
+  setHeaderSaveState('准备就绪', 'ready');
   rdr.fullRender();
   recomputeMatchesUI(true);
   updateUndoButtons();
@@ -680,19 +689,27 @@ function renderTabs(){
   bar.innerHTML = '';
   const active = tb.activeKey();
   for (const t of tb.list()){
-    const el = document.createElement('button');
+    const el = document.createElement('div');
     el.className = 'doc-tab' + (t.key === active ? ' active' : '');
-    el.type = 'button';
+    el.tabIndex = 0;
+    el.setAttribute('role', 'tab');
+    el.setAttribute('aria-selected', String(t.key === active));
+    el.setAttribute('aria-label', '打开文档 ' + t.name);
     const label = document.createElement('span');
     label.className = 'dt-label';
     label.textContent = t.name;
     label.title = t.key;
-    label.addEventListener('click', (e) => { e.stopPropagation(); switchDoc(t.key); });
-    const close = document.createElement('span');
+    const close = document.createElement('button');
     close.className = 'dt-close';
     close.textContent = '✕';
+    close.type = 'button';
+    close.setAttribute('aria-label', '关闭文档 ' + t.name);
     close.title = '关闭';
     close.addEventListener('click', (e) => { e.stopPropagation(); closeDoc(t.key); });
+    el.addEventListener('click', () => switchDoc(t.key));
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); switchDoc(t.key); }
+    });
     el.append(label, close);
     bar.appendChild(el);
   }
@@ -726,32 +743,40 @@ async function saveDirect(){
   await proof.flushSave(); // 先落盘校对数据(与源文件保持一致)
   await model.flushAutosave();
   const content = buildExport(model.getParas(), model.getNl(), model.getTrailingBlank());
+  setHeaderSaveState('保存中…', 'saving');
   try {
     if (fsx.isTauri() && model.getFilePath()){
       await fsx.writeFileSource(model.getFilePath(), content, model.getFilename());
+      setHeaderSaveState('已保存', 'saved');
       showToast('✅ 已保存到原文件');
       return;
     }
     if (fsx.isTauri()){
       const res = await fsx.saveFileDialog(saveSuggestedName());
-      if (!res) return; // 用户取消,静默
+      if (!res){ setHeaderSaveState('准备就绪', 'ready'); return; } // 用户取消,静默
       await fsx.writeFileSource(res.path, content, res.name);
       model.setFileInfo({ ...model.getFilePath() ? { path: res.path } : {}, name: res.name });
+      setHeaderSaveState('已保存', 'saved');
       showToast('✅ 已保存到：' + res.path);
       return;
     }
     // 浏览器: 写回原文件句柄 / 另存为 / 下载
     const r = await fsx.writeBrowserFile(content, saveSuggestedName());
     if (r.saved){
+      setHeaderSaveState('已保存', 'saved');
       showToast('✅ 已保存到原文件');
     } else if (r.cancelled){
+      setHeaderSaveState('准备就绪', 'ready');
       // 另存为对话框取消,静默
     } else if (r.downloaded){
+      setHeaderSaveState('已导出', 'saved');
       showToast('⬇ 已下载译文副本：' + saveSuggestedName());
     } else {
+      setHeaderSaveState('已保存', 'saved');
       showToast('✅ 已保存');
     }
   } catch (e){
+    setHeaderSaveState('保存失败', 'error');
     showToast('❌ 保存失败：' + (e && e.message ? e.message : e), true);
   }
 }
@@ -823,12 +848,15 @@ async function clearProgress(){
 function updateGlossProjectLabel(){
   const dir = gloss.getProjectDir();
   const el = document.getElementById('glossProjectLabel');
+  const commandStatus = document.getElementById('glossaryCommandStatus');
   if (dir){
     el.textContent = '📖 术语表：' + dir + '/glossary.json';
     el.title = '术语表保存位置：' + dir + '/glossary.json';
+    if (commandStatus) commandStatus.textContent = '项目术语库 · glossary.json';
   } else {
     el.textContent = '📖 全局术语表（未打开文件）';
     el.title = '未打开文件,术语表保存在全局位置';
+    if (commandStatus) commandStatus.textContent = '全局术语库 · 未打开项目';
   }
 }
 
@@ -1067,7 +1095,7 @@ function rebuildDictProviders(){
         // 浏览器版: 无路径(会话内加载),此时 session 源已在本次会话持有 provider。
         if (fsx.isTauri()){
           p = mdx.createTauriMdxProvider({ id: src.id, name: src.name, path: src.path });
-          if (!sourceMdd.has(p.name)) tryPairMdd(p, src.path); // 重启后恢复 MDD 关联(异步)
+          if (!sourceAssets.has(src.id)) tryPairMdd(p, src.path, src.id); // 重启后恢复 MDD/CSS 关联(异步)
         } else {
           p = createPathMdxProvider({
             id: src.id, name: src.name,
@@ -1207,20 +1235,37 @@ async function installJsonDictSource(raw, path, fallbackName){
   showToast('✅ 已添加词典「' + src.name + '」(共 ' + count + ' 词条)');
 }
 
-/** 探测同名 .mdd 资源包并关联到词典(桌面版)。成功返回 mdd,无配对返回 null。 */
-async function tryPairMdd(prov, mdxPath){
+/** 探测同名 .mdd 资源包与同名 .css(独立样式文件,如新明解 XMJRH.css)并关联到词典(桌面版)。
+ *  成功返回 mdd,无配对返回 null;独立 CSS 读入 prov.extraCss({key,text})。 */
+async function tryPairMdd(prov, mdxPath, sourceId){
   if (!fsx.isTauri() || !prov || !mdxPath) return null;
+  const profileInfo = dictionaryCssCandidates(mdxPath);
+  const profile = profileInfo.profile;
+  const dir = mdxPath.replace(/[\\/][^\\/]*$/, '');
+  const assets = { profile, css: [], mdd: null };
   const mddPath = mdxPath.replace(/\.mdx$/i, '.mdd');
-  if (mddPath === mdxPath) return null;
-  try {
-    const mdd = createTauriMdd({ name: prov.name + ' 资源', path: mddPath });
-    await mdd.resourceB64(''); // 触发 mdd_open 校验;文件不存在会抛错
-    prov.mdd = mdd;
-    sourceMdd.set(prov.name, mdd);
-    return mdd;
-  } catch (e){
-    return null; // 无同名 mdd(正常)或打开失败 → 无资源
+  if (mddPath !== mdxPath){
+    try {
+      const mdd = createTauriMdd({ name: prov.name + ' 资源', path: mddPath });
+      await mdd.resourceB64(''); // 触发 mdd_open 校验;文件不存在会抛错
+      assets.mdd = mdd;
+      prov.mdd = mdd;
+    } catch (e){ /* 无配对 mdd(正常)或打开失败 */ }
   }
+  // 显式 Profile 先解决命名不一致与多 CSS；同名 CSS 由候选列表优先尝试。
+  for (const candidate of profileInfo.candidates){
+    const cssPath = dir + '/' + candidate;
+    try {
+      const raw = await fsx.readTextFileSource(cssPath);
+      const text = raw && raw.content !== undefined ? raw.content : raw;
+      if (text){ assets.css.push({ key: candidate, text }); }
+    } catch (e){ /* 缺少候选 CSS 正常 */ }
+  }
+  if (assets.mdd || assets.css.length){
+    sourceAssets.set(sourceId || prov.id, assets);
+    prov.extraAssets = assets;
+  }
+  return assets.mdd;
 }
 
 /** 添加 MDX 词典文件。
@@ -1242,7 +1287,7 @@ async function addMdxSource(){
     mdxProviders.set(src.id, prov);
     dictSettings.sources.push(src);
     await saveDictSettings();
-    await tryPairMdd(prov, res.path); // 探测同名 .mdd(词条内图片/发音)
+    await tryPairMdd(prov, res.path, src.id); // 探测同目录 .mdd/CSS(词条内资源与样式)
     rebuildDictProviders();
     renderDictSourceList();
     showToast('✅ 已加载 MDX 词典「' + prov.name + '」(重启后自动恢复)');
@@ -1437,13 +1482,19 @@ function renderDictResults(res, fuzzy){
         line.className = 'dc-sense';
         if (s.html){
           const body = document.createElement('div');
+          const sourceId = seg.sourceId || seg.source || '';
+          const assets = sourceAssets.get(sourceId) || sourceAssets.get(seg.source) || { profile: profileForDictionary(seg.source), css: [], mdd: null };
+          const profile = assets.profile || profileForDictionary(seg.source);
           body.className = 'dc-html';
-          body.innerHTML = s.html;
-          const mdd = sourceMdd.get(seg.source) || null;
+          body.dataset.dictProfile = profile.id;
+          body.dataset.dictSource = sourceId;
+          ensureDictProfileStyle(profile);
+          body.innerHTML = mdx.cleanGaijiInHtml(s.html);
+          const mdd = assets.mdd || null;
           body.__mdd = mdd;
           line.appendChild(body);
           card.appendChild(line);
-          hydrateMddResources(body, mdd);
+          hydrateMddResources(body, assets);
           continue;
         }
         if (s.pos){
@@ -1545,53 +1596,119 @@ function renderDictFavorites(){
  * <link rel="stylesheet">(MDD 里的 css)与内联 <style> 文本中的 url()(字体/背景图)一并水化。
  * 无 MDD(浏览器/会话)时移除本地 stylesheet link,避免相对 href 404。
  */
-function hydrateMddResources(body, mdd){
-  if (!mdd){
-    body.querySelectorAll('link[rel="stylesheet"]').forEach(el => { if (el.getAttribute('href') && isMddResourceSrc(el.getAttribute('href'))) el.remove(); });
-    return;
+function ensureDictProfileStyle(profile){
+  if (!profile || dictProfileStyles.has(profile.id)) return;
+  const style = document.createElement('style');
+  style.dataset.dictProfile = profile.id;
+  style.textContent = profileNormalizationCss(profile);
+  document.head.appendChild(style);
+  dictProfileStyles.add(profile.id);
+}
+
+function decodeBase64Text(b64){
+  try {
+    const bin = atob(b64);
+    const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+    return new TextDecoder('utf-8').decode(bytes);
+  } catch (e){ return null; }
+}
+
+function assetCssMatch(assets, href){
+  const key = srcToResourceKey(href);
+  const base = key.split(/[\\/]/).pop();
+  return (assets.css || []).find(x => x.key === key || x.key === base || x.key.split(/[\\/]/).pop() === base) || null;
+}
+
+function normalizeInlineDictionaryStyles(body, profile){
+  for (const el of body.querySelectorAll('[style]')){
+    const raw = el.getAttribute('style') || '';
+    const replaced = mdx.replaceCssTokens(raw, profile.tokens || {});
+    el.setAttribute('style', mdx.normalizeDictionaryColors(replaced));
   }
-  // (A) 直接引用资源的标签: img/audio/video/source/object/use
-  for (const el of [...body.querySelectorAll('img[src],audio[src],video[src],source[src],object[data],use[href]')]){
-    const raw = el.getAttribute('src') || el.getAttribute('data') || el.getAttribute('href');
-    if (!raw || !isMddResourceSrc(raw)) continue;
-    const key = srcToResourceKey(raw);
-    mdd.resourceB64(key).then(b64 => {
-      if (!b64) return;
-      const mime = mimeFromExt(raw);
-      const attr = el.hasAttribute('src') ? 'src' : (el.hasAttribute('data') ? 'data' : 'href');
-      el.setAttribute(attr, 'data:' + mime + ';base64,' + b64);
-    }).catch(() => {});
+  for (const el of body.querySelectorAll('[bgcolor]')){
+    const color = el.getAttribute('bgcolor');
+    if (color) el.style.backgroundColor = color;
+    el.removeAttribute('bgcolor');
   }
-  // (B) CSS: 读 MDD 里的 stylesheet 文件 + 内联 <style>,水化其中 url()(字体/背景图)
+  for (const el of body.querySelectorAll('[color]')){
+    const color = el.getAttribute('color');
+    if (color) el.style.color = color;
+    el.removeAttribute('color');
+  }
+}
+
+function appendDictProfileStyle(body, profile){
+  if (body.querySelector('style[data-dict-normalization]')) return;
+  const style = document.createElement('style');
+  style.dataset.dictNormalization = profile.id;
+  style.textContent = profileNormalizationCss(profile);
+  body.appendChild(style);
+}
+
+/** MDD/CSS 资源水化: 支持多 CSS、独立 CSS、profile 作用域与多种资源路径。 */
+function hydrateMddResources(body, assets){
+  const mdd = assets && assets.mdd;
+  const profile = (assets && assets.profile) || profileForDictionary(body.dataset.dictSource || '');
+  const cssScope = '.dc-html[data-dict-profile="' + profile.id + '"]';
+  normalizeInlineDictionaryStyles(body, profile);
   const styleEls = [...body.querySelectorAll('style')];
   const linkEls = [...body.querySelectorAll('link[rel="stylesheet"]')].filter(l => {
     const h = l.getAttribute('href'); return h && isMddResourceSrc(h);
   });
-  Promise.all(linkEls.map(l => mdd.resourceB64(srcToResourceKey(l.getAttribute('href'))).then(b64 => ({ l, text: b64 ? atob(b64) : null }))))
+  if (!mdd && !(assets && assets.css && assets.css.length)){
+    linkEls.forEach(el => el.remove());
+  }
+  if (mdd){
+    for (const el of [...body.querySelectorAll('img[src],audio[src],video[src],source[src],object[data],use[href]')]){
+      const raw = el.getAttribute('src') || el.getAttribute('data') || el.getAttribute('href');
+      if (!raw || !isMddResourceSrc(raw)) continue;
+      const key = srcToResourceKey(raw);
+      mdd.resourceB64(key).then(b64 => {
+        if (!b64) return;
+        const mime = mimeFromExt(raw);
+        const attr = el.hasAttribute('src') ? 'src' : (el.hasAttribute('data') ? 'data' : 'href');
+        el.setAttribute(attr, 'data:' + mime + ';base64,' + b64);
+      }).catch(() => {});
+    }
+  }
+  const cssResolver = async (href) => {
+    const key = srcToResourceKey(href);
+    if (mdd){
+      const b64 = await mdd.resourceB64(key).catch(() => null);
+      if (b64) return decodeBase64Text(b64);
+    }
+    const extra = assetCssMatch(assets || {}, href);
+    return extra ? extra.text : null;
+  };
+  Promise.all(linkEls.map(async l => ({ l, text: await cssResolver(l.getAttribute('href')) })))
     .then(linkRes => {
-      const cssTexts = [...linkRes.filter(x => x.text).map(x => x.text), ...styleEls.map(s => s.textContent)];
+      const linkedKeys = new Set(linkEls.map(l => srcToResourceKey(l.getAttribute('href') || '').split(/[\\/]/).pop()));
+      const standalone = (assets && assets.css ? assets.css.filter(x => !linkedKeys.has(x.key.split(/[\\/]/).pop())) : []);
+      const cssTexts = [...linkRes.filter(x => x.text).map(x => x.text), ...standalone.map(x => x.text), ...styleEls.map(s => s.textContent || '')];
       const needed = [];
-      for (const t of cssTexts){
-        for (const u of mdx.extractCssUrls(t)){ if (isMddResourceSrc(u)) needed.push(srcToResourceKey(u)); }
-      }
+      for (const t of cssTexts) for (const u of mdx.extractCssUrls(t)) if (isMddResourceSrc(u)) needed.push(srcToResourceKey(u));
       const unique = [...new Set(needed)];
+      const applyCss = (text) => mdx.normalizeDictionaryCss(mdx.hydrateCssUrls(text, k => null), { scope: cssScope, tokens: profile.tokens || {} });
       if (!unique.length){
-        for (const s of styleEls) if (s.textContent) s.textContent = mdx.hydrateCssUrls(s.textContent, () => null);
-        for (const x of linkRes) if (x.text){ const st = document.createElement('style'); st.textContent = x.text; x.l.replaceWith(st); }
+        for (const el of styleEls) if (el.textContent) el.textContent = applyCss(el.textContent);
+        for (const x of linkRes) if (x.text){ const st = document.createElement('style'); st.textContent = applyCss(x.text); x.l.replaceWith(st); }
+        for (const x of standalone){ const st = document.createElement('style'); st.dataset.dictAsset = x.key; st.textContent = applyCss(x.text); body.appendChild(st); }
+        appendDictProfileStyle(body, profile);
         return;
       }
-      return Promise.all(unique.map(k => mdd.resourceB64(k).then(b64 => ({ k, b64 })))).then(urls => {
+      return Promise.all(unique.map(k => mdd ? mdd.resourceB64(k).then(b64 => ({ k, b64 })) : Promise.resolve({ k, b64: null }))).then(urls => {
         const umap = new Map(urls.filter(x => x.b64).map(x => [x.k, { b64: x.b64, mime: mimeFromExt(x.k) }]));
-        const resolve = k => (umap.has(k) ? umap.get(k) : null);
-        for (const s of styleEls) if (s.textContent) s.textContent = mdx.hydrateCssUrls(s.textContent, resolve);
+        const resolve = k => umap.has(k) ? umap.get(k) : null;
+        const applyHydrated = (text) => mdx.normalizeDictionaryCss(mdx.hydrateCssUrls(text, resolve), { scope: cssScope, tokens: profile.tokens || {} });
+        for (const el of styleEls) if (el.textContent) el.textContent = applyHydrated(el.textContent);
         for (const x of linkRes){
           if (!x.text) continue;
-          const st = document.createElement('style');
-          st.textContent = mdx.hydrateCssUrls(x.text, resolve);
-          x.l.replaceWith(st);
+          const st = document.createElement('style'); st.textContent = applyHydrated(x.text); x.l.replaceWith(st);
         }
+        for (const x of standalone){ const st = document.createElement('style'); st.dataset.dictAsset = x.key; st.textContent = applyHydrated(x.text); body.appendChild(st); }
+        appendDictProfileStyle(body, profile);
       });
-    }).catch(() => { /* 缺失 css/资源: 保留原样 */ });
+    }).catch(() => { /* 缺失 css/资源: 保留已消毒内容 */ });
 }
 
 /** 容器级事件委托: entry:// 跳转查词 / sound:// 播放发音 */
@@ -2190,8 +2307,10 @@ function renderProofLog(){
 function toggleProofMode(){
   const on = !proof.isEnabled();
   proof.setEnabled(on);
-  document.getElementById('btnProof').classList.toggle('active', on);
-  document.getElementById('btnProof').textContent = on ? '📋 校对中' : '📋 校对';
+  const proofButton = document.getElementById('btnProof');
+  proofButton.classList.toggle('active', on);
+  proofButton.setAttribute('aria-pressed', String(on));
+  proofButton.textContent = on ? '校对中' : '校对';
   document.getElementById('proofbar').classList.toggle('hidden', !on);
   if (on){
     rdr.setNotesAutoOpen(true); // 有批注的行默认展开批注框
@@ -2838,39 +2957,94 @@ let dirState = { activePath: '' };
 function syncSidebarTop(){
   const tb = document.getElementById('topbar');
   const main = document.getElementById('main');
-  const list = document.getElementById('list');
   const footer = document.querySelector('footer');
-  if (!tb || !main || !list) return;
+  if (!tb || !main) return;
   const h = tb.offsetHeight;
   const fh = footer ? footer.offsetHeight : 0;
-  // 侧栏是 #main 的 flex 子元素(随行高伸展),不再设置 top/maxHeight
-  // (旧固定定位方案的遗留赋值,与 #sidebar 的 position:relative 冲突会把侧栏顶下去)
-  // 列表区固定为视口剩余高度(减去 footer),#list 显式设高保证滚动容器稳定
-  // (虚拟滚动依赖稳定的 clientHeight 与 scrollTop 行为)
+  // Stage 内部由 CSS Grid 分配 scene header / review strip / virtual list 的高度。
   main.style.height = 'calc(100vh - ' + h + 'px - ' + fh + 'px)';
-  list.style.height = 'calc(100vh - ' + h + 'px - ' + fh + 'px)';
 }
 
 function setSidebar(open){
-  document.getElementById('sidebar').classList.toggle('hidden', !open);
+  const sb = document.getElementById('sidebar');
+  const toggle = document.getElementById('btnSidebar');
+  sb.classList.toggle('hidden', !open);
+  sb.classList.toggle('is-open', open);
+  if (toggle) toggle.setAttribute('aria-pressed', String(open));
   if (open) syncSidebarTop();
+}
+
+function syncEditorialMeta(){
+  const file = model.getFilename() || '';
+  const count = model.getParas().length;
+  const progress = document.getElementById('progress').textContent.trim();
+  const stats = document.getElementById('stats').textContent.trim();
+  const label = file || '未打开文档';
+  const railFile = document.getElementById('railFilename');
+  const railProgress = document.getElementById('railProgress');
+  const sceneTitle = document.getElementById('sceneTitle');
+  const sceneReference = document.getElementById('sceneReference');
+  const sceneProgress = document.getElementById('sceneProgress');
+  if (railFile) railFile.textContent = label;
+  if (railProgress) railProgress.textContent = progress || (count ? count + ' 条对白' : '等待导入');
+  if (sceneTitle) sceneTitle.textContent = file || '从一句对白开始。';
+  if (sceneReference) sceneReference.textContent = count ? ('SCRIPT · ' + count + ' LINES') : 'NO SCENE';
+  if (sceneProgress) sceneProgress.textContent = stats || progress || '准备就绪';
+}
+
+function setHeaderSaveState(label, tone = 'ready'){
+  const el = document.getElementById('headerSaveState');
+  if (!el) return;
+  el.textContent = label;
+  el.dataset.state = tone;
+}
+
+function updateContextFromRow(i){
+  const p = model.getPara(i);
+  if (!p) return;
+  const ref = p.id ? String(p.id) : ('LINE ' + String(i + 1).padStart(4, '0'));
+  const speaker = p.nameTr || p.name || 'NARRATION';
+  const original = (p.content || '').replace(/\s+/g, ' ').trim();
+  const ctxRef = document.getElementById('contextReference');
+  const ctxSpeaker = document.getElementById('contextSpeaker');
+  const ctxOrig = document.getElementById('contextOriginal');
+  const sceneReference = document.getElementById('sceneReference');
+  if (ctxRef) ctxRef.textContent = ref;
+  if (ctxSpeaker) ctxSpeaker.textContent = speaker;
+  if (ctxOrig) ctxOrig.textContent = original || '人物名或系统文本';
+  if (sceneReference) sceneReference.textContent = 'LINE ' + String(i + 1).padStart(4, '0') + ' · ' + ref;
 }
 
 /* ---- 侧边栏拖拽调宽: 左缘手柄,宽度记忆在 localStorage,双击复位 ---- */
 
 const SB_W_KEY = 'galtrans_sidebar_width';
-const SB_W_MIN = 260, SB_W_DEFAULT = 400;
+const SB_W_MIN = 260, SB_W_DEFAULT = 328;
 
-function sidebarMaxWidth(){ return Math.min(760, window.innerWidth - 300); }
+function sidebarMaxWidth(){
+  // 移动端侧栏由 CSS 作为抽屉铺开,不应被桌面端的宽度上限覆盖。
+  if (window.innerWidth <= 720) return Math.max(SB_W_MIN, window.innerWidth - 24);
+  const rail = window.innerWidth <= 1180 ? 184 : 224;
+  return Math.max(SB_W_MIN, Math.min(560, window.innerWidth - rail - 440));
+}
+
+function setSidebarWidth(sb, width){
+  const w = Math.round(Math.min(Math.max(width, SB_W_MIN), sidebarMaxWidth()));
+  sb.style.width = w + 'px';
+  // The editorial layout is Grid-based, so the track token, not only the element width, controls the visible panel width.
+  document.documentElement.style.setProperty('--context-w', w + 'px');
+}
 
 function initSidebarResize(){
   const sb = document.getElementById('sidebar');
   const handle = document.getElementById('sbResize');
   if (!sb || !handle) return;
   let saved = parseInt(localStorage.getItem(SB_W_KEY), 10);
-  if (saved >= SB_W_MIN) sb.style.width = Math.min(saved, sidebarMaxWidth()) + 'px';
+  if (saved >= SB_W_MIN && window.innerWidth > 720){
+    setSidebarWidth(sb, saved);
+  }
   let dragging = false;
   handle.addEventListener('pointerdown', (e) => {
+    if (window.innerWidth <= 900) return;
     dragging = true;
     handle.classList.add('dragging');
     handle.setPointerCapture(e.pointerId);
@@ -2879,7 +3053,7 @@ function initSidebarResize(){
   handle.addEventListener('pointermove', (e) => {
     if (!dragging) return;
     const w = Math.round(Math.min(Math.max(window.innerWidth - e.clientX, SB_W_MIN), sidebarMaxWidth()));
-    sb.style.width = w + 'px'; // 列表区自动让位,虚拟滚动经 ResizeObserver 重测行宽
+    setSidebarWidth(sb, w); // 列表区自动让位,虚拟滚动经 ResizeObserver 重测行宽
   });
   const endDrag = () => {
     if (!dragging) return;
@@ -2894,12 +3068,17 @@ function initSidebarResize(){
   handle.addEventListener('pointercancel', endDrag);
   handle.addEventListener('dblclick', () => {
     sb.style.width = '';
+    document.documentElement.style.setProperty('--context-w', SB_W_DEFAULT + 'px');
     try { localStorage.removeItem(SB_W_KEY); } catch (e) {}
   });
 }
 
 function switchSidebarTab(name){
-  document.querySelectorAll('.side-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.side-tab[data-tab]').forEach(b => {
+    const active = b.dataset.tab === name;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-selected', String(active));
+  });
   document.getElementById('panel-files').classList.toggle('hidden', name !== 'files');
   document.getElementById('panel-glossary').classList.toggle('hidden', name !== 'glossary');
   const pd = document.getElementById('panel-dict');
@@ -2907,6 +3086,127 @@ function switchSidebarTab(name){
   const pp = document.getElementById('panel-proof');
   if (pp) pp.classList.toggle('hidden', name !== 'proof');
   if (name === 'proof') renderProofPanel();
+}
+
+function closeUtilityPanel(){
+  const panel = document.getElementById('utilityPanel');
+  const scrim = document.getElementById('utilityScrim');
+  const more = document.getElementById('btnCommandPanel');
+  if (panel) panel.classList.add('hidden');
+  if (scrim){
+    scrim.classList.add('hidden');
+    scrim.setAttribute('aria-hidden', 'true');
+  }
+  if (more) more.setAttribute('aria-expanded', 'false');
+}
+
+function setWorkspaceMode(name){
+  const strip = document.getElementById('commandStrip');
+  if (strip) strip.dataset.panel = name;
+  document.querySelectorAll('.workspace-nav-item').forEach(b => {
+    const active = b.dataset.workspace === name;
+    b.classList.toggle('active', active);
+    if (active) b.setAttribute('aria-current', 'page');
+    else b.removeAttribute('aria-current');
+  });
+  if (name === 'search') requestAnimationFrame(() => $q.focus());
+}
+
+// 兼容现有快捷键调用名: 工作模式现在切换固定的上下文工具栏,不再打开遮罩浮层。
+function openUtilityPanel(name){
+  closeUtilityPanel();
+  setWorkspaceMode(name);
+}
+
+function toggleMorePanel(){
+  const panel = document.getElementById('utilityPanel');
+  const more = document.getElementById('btnCommandPanel');
+  if (!panel || !more) return;
+  const open = panel.classList.contains('hidden');
+  panel.classList.toggle('hidden', !open);
+  more.setAttribute('aria-expanded', String(open));
+}
+
+function toggleStoryRail(){
+  const rail = document.getElementById('storyRail');
+  rail.classList.toggle('is-open');
+}
+
+function initWorkspaceNavigation(){
+  document.getElementById('btnHeaderSave').addEventListener('click', saveDirect);
+  document.getElementById('btnCommandPanel').addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleMorePanel();
+  });
+  document.addEventListener('click', (e) => {
+    const panel = document.getElementById('utilityPanel');
+    const more = document.getElementById('btnCommandPanel');
+    if (panel && !panel.classList.contains('hidden') && !panel.contains(e.target) && e.target !== more){
+      closeUtilityPanel();
+    }
+  });
+  document.getElementById('btnRailImport').addEventListener('click', importWithPicker);
+  document.getElementById('btnRailNext').addEventListener('click', jumpToNextUntranslated);
+  document.getElementById('btnGlossaryPanel').addEventListener('click', () => {
+    setSidebar(true);
+    switchSidebarTab('glossary');
+  });
+  document.querySelectorAll('.workspace-nav-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.workspace;
+      openUtilityPanel(mode);
+      if (mode === 'glossary'){
+        setSidebar(true);
+        switchSidebarTab('glossary');
+      }
+    });
+  });
+}
+
+/* 模态统一管理: 保留各业务自己的取消逻辑,这里只补齐键盘、焦点和背景滚动语义。 */
+function initModalA11y(){
+  const masks = Array.from(document.querySelectorAll('.modal-mask'));
+  const restore = new WeakMap();
+  for (const mask of masks){
+    const dialog = mask.querySelector('.modal');
+    if (!dialog) continue;
+    mask.setAttribute('aria-hidden', 'true');
+    const focusables = () => Array.from(dialog.querySelectorAll('button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')).filter(el => el.offsetParent !== null);
+    mask.addEventListener('keydown', (e) => {
+      if (!mask.classList.contains('show')) return;
+      if (e.key === 'Escape'){
+        e.preventDefault();
+        const cancel = dialog.querySelector('button[id$="Cancel"]');
+        if (cancel) cancel.click();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const items = focusables();
+      if (!items.length) return;
+      const first = items[0], last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first){ e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last){ e.preventDefault(); first.focus(); }
+    });
+    const observer = new MutationObserver(() => {
+      const open = mask.classList.contains('show');
+      mask.setAttribute('aria-hidden', String(!open));
+      if (open){
+        if (!restore.has(mask) && document.activeElement && !dialog.contains(document.activeElement)) restore.set(mask, document.activeElement);
+        document.body.classList.add('modal-open');
+        requestAnimationFrame(() => {
+          if (!mask.classList.contains('show')) return;
+          const first = focusables()[0];
+          if (first && !dialog.contains(document.activeElement)) first.focus();
+        });
+      } else {
+        if (!masks.some(x => x.classList.contains('show'))) document.body.classList.remove('modal-open');
+        const previous = restore.get(mask);
+        if (previous && previous.isConnected) previous.focus();
+        restore.delete(mask);
+      }
+    });
+    observer.observe(mask, { attributes:true, attributeFilter:['class'] });
+  }
 }
 
 async function pickFolder(){
@@ -2998,6 +3298,8 @@ function buildFileTree(entries){
 /* ---------------- 事件绑定 ---------------- */
 
 function initEvents(){
+  initModalA11y();
+  initWorkspaceNavigation();
   document.getElementById('btnImport').addEventListener('click', importWithPicker);
   document.getElementById('fileInput').addEventListener('change', async (e) => {
     const f = e.target.files[0];
@@ -3009,7 +3311,6 @@ function initEvents(){
   document.getElementById('btnRestore').addEventListener('click', restoreProgress);
   document.getElementById('btnClear').addEventListener('click', clearAll);
   document.getElementById('btnClearProgress').addEventListener('click', clearProgress);
-  document.getElementById('btnTheme').addEventListener('click', toggleTheme);
   // 主题设置(主题模式 + 背景 + 字体)
   document.getElementById('btnThemeModal').addEventListener('click', openThemeSettings);
   document.querySelectorAll('input[name="thMode"]').forEach(r => {
@@ -3110,7 +3411,10 @@ function initEvents(){
   });
   document.getElementById('btnSidebarClose').addEventListener('click', () => setSidebar(false));
   document.querySelectorAll('.side-tab[data-tab]').forEach(b => {
-    b.addEventListener('click', () => switchSidebarTab(b.dataset.tab));
+    b.addEventListener('click', () => {
+      switchSidebarTab(b.dataset.tab);
+      if (b.dataset.tab === 'glossary') setWorkspaceMode('glossary');
+    });
   });
   document.getElementById('btnPickFolder').addEventListener('click', pickFolder);
 
@@ -3223,13 +3527,19 @@ function initEvents(){
     if (recordingAction){ recordKeyEvent(e); return; }
     const key = (e.key || '').toLowerCase();
     if ((e.ctrlKey || e.metaKey) && key === 's'){ e.preventDefault(); saveDirect(); return; }
-    if ((e.ctrlKey || e.metaKey) && key === 'f'){ e.preventDefault(); $q.focus(); $q.select(); return; }
+    if ((e.ctrlKey || e.metaKey) && key === 'f'){ e.preventDefault(); openUtilityPanel('search'); $q.select(); return; }
     if ((e.ctrlKey || e.metaKey) && key === 'g'){ e.preventDefault(); document.getElementById('jumpInput').focus(); document.getElementById('jumpInput').select(); return; }
     if ((e.ctrlKey || e.metaKey) && key === 'z'){ e.preventDefault(); doUndo(); return; }
     if ((e.ctrlKey || e.metaKey) && key === 'y'){ e.preventDefault(); doRedo(); return; }
     if (e.key === 'F3'){ e.preventDefault(); gotoMatch(e.shiftKey ? -1 : 1); return; }
     if (e.key === 'F2'){ e.preventDefault(); jumpToNextUntranslated(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter'){ e.preventDefault(); replaceCurrent(); return; }
+    if (e.key === 'Escape' && !document.querySelector('.modal-mask.show')){
+      const panel = document.getElementById('utilityPanel');
+      if (!panel.classList.contains('hidden')){ closeUtilityPanel(); return; }
+      const rail = document.getElementById('storyRail');
+      if (rail.classList.contains('is-open')){ rail.classList.remove('is-open'); return; }
+    }
     // 校对快捷键: 单键(q/w/a)需校对模式开启且焦点在译文/译名框;组合键任意位置可用
     if (proof.isEnabled() || Object.values(proof.proofKeys).some(k => k && /^(Ctrl|Shift|Alt)\+/.test(k))){
       for (const act of PROOF_KEY_ACTIONS){
@@ -3303,6 +3613,7 @@ async function init(){
   syncSidebarTop();
   updateUndoButtons();
   setSidebar(true);
+  syncEditorialMeta();
   // 开发调试: ?autoload=<文件名> 在 Vite dev 下直接 fetch 加载本地文本(生产 file:// 下无参数不触发)
   const autoload = new URLSearchParams(location.search).get('autoload');
   // 开发调试: ?mdx=<文件名> 在 Vite dev 下 fetch 本地 .mdx 加载为词典源(生产同上不触发);

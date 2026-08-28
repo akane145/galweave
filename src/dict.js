@@ -112,7 +112,7 @@ export function groupDictResults(results){
     if (!r || r.headword === undefined || r.headword === null) continue;
     const key = r.headword + '\u0000' + (r.reading || '');
     if (!groups.has(key)) groups.set(key, { headword: r.headword, reading: r.reading || '', sources: [] });
-    groups.get(key).sources.push({ source: r.source, senses: r.senses || [] });
+    groups.get(key).sources.push({ source: r.source, sourceId: r.sourceId || r.source, senses: r.senses || [] });
   }
   return [...groups.values()];
 }

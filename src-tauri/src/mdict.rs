@@ -766,6 +766,33 @@ mod tests {
     }
 
     #[test]
+    fn diag_xsjrh_no_fffd() {
+        // 解码健全性: XSJRH 前 3 万条词条不应出现 U+FFFD(无效 UTF-8 被替换的标记)。
+        // 若出现则说明解码/解压路径有损坏。运行: cargo test diag_xsjrh_no_fffd -- --nocapture
+        let p = root().join("JPdict/新世纪日汉双解大辞典/XSJRH.mdx");
+        if !p.exists() { println!("XSJRH 不存在,跳过"); return; }
+        let r = MdictReader::open(p.to_str().unwrap(), false).unwrap();
+        let n = r.key_count().min(30000);
+        let mut fffd = 0usize;
+        let mut samples: Vec<(String, String)> = Vec::new();
+        for i in 0..n {
+            let (start, end) = {
+                let k = &r.keywords[i];
+                (k.record_start, k.record_end)
+            };
+            let bytes = r.read_record(start, end).unwrap_or_default();
+            let s = r.decode_record(&bytes);
+            if s.contains('\u{FFFD}') {
+                fffd += 1;
+                if samples.len() < 5 { samples.push((r.keywords[i].key_text.clone(), s.chars().take(60).collect())); }
+            }
+        }
+        println!("扫描 {} 条 | U+FFFD: {}", n, fffd);
+        for (k, s) in &samples { println!("  {}: {:?}", k, s); }
+        assert_eq!(fffd, 0, "XSJRH 解码出现 U+FFFD,解码路径有损坏");
+    }
+
+    #[test]
     fn mdd_locate_resource() {
         let p = root().join("JPdict/jitendex/jitendex.mdd");
         if !p.exists() { return; }

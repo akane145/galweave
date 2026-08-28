@@ -134,14 +134,22 @@ pub fn mdd_open(state: State<DictState>, path: String) -> Result<u32, String> {
 }
 
 /// 读取 MDD 资源(图片/音频原始字节;base64 编码返回,WebView 可直接用 data URL 或写文件)
-/// 生成 MDD 资源 key 的候选变体: 原样、去前导 / \、以及内部斜杠风格互换
-/// (MDX 词条 href/src 常用正斜杠,MDD 内部 key 常用反斜杠,二者需互相尝试方能命中)。
+/// 生成 MDD 资源 key 的候选变体: 原样、去前导 / \、内部斜杠风格互换,以及
+/// 补前导反斜杠(MDD 内部 key 普遍以 \ 开头,如 \common.css;而词条 HTML 引用
+/// 常不带前导斜杠,如 common.css)。正/反斜杠组合互试方能命中。
 fn mdd_key_variants(k: &str) -> Vec<String> {
     let t = k.trim_start_matches(['\\', '/']);
     let mut v = vec![k.to_string(), t.to_string()];
+    if !t.is_empty() {
+        v.push(format!("\\{t}"));
+    }
     if t.contains('\\') || t.contains('/') {
-        v.push(t.replace('\\', "/"));
-        v.push(t.replace('/', "\\"));
+        let fwd = t.replace('\\', "/");
+        let bwd = t.replace('/', "\\");
+        v.push(fwd.clone());
+        v.push(bwd.clone());
+        v.push(format!("\\{fwd}"));
+        v.push(format!("\\{bwd}"));
     }
     v.sort();
     v.dedup();
@@ -227,4 +235,64 @@ pub fn dict_set_enabled(state: State<DictState>, app: AppHandle, id: String, ena
         conn.execute("UPDATE dict_sources SET enabled=?1 WHERE id=?2", params![enabled as i64, id]).map_err(|e| e.to_string())?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mdd_key_variants;
+
+    fn contains(v: &[String], s: &str) -> bool {
+        v.iter().any(|x| x == s)
+    }
+
+    #[test]
+    fn mdd_key_variants_cover_real_key_shapes() {
+        // 真实词典(jitendex.mdd)的 key 形态: 前导反斜杠 + 反斜杠路径,
+        // 而词条 HTML 引用为无前导斜杠的正斜杠路径。两者必须都能互相命中。
+        let v = mdd_key_variants("common.css");
+        assert!(contains(&v, "common.css"), "原样缺失: {v:?}");
+        assert!(contains(&v, "\\common.css"), "前导反斜杠缺失: {v:?}");
+
+        let v = mdd_key_variants("svg/accent.svg");
+        assert!(contains(&v, "svg/accent.svg"));
+        assert!(contains(&v, "svg\\accent.svg"));
+        assert!(contains(&v, "\\svg\\accent.svg"), "真实 key 形态 \\svg\\accent.svg 缺失: {v:?}");
+        assert!(contains(&v, "\\svg/accent.svg"));
+
+        let v = mdd_key_variants("/svg/accent.svg");
+        assert!(contains(&v, "svg/accent.svg"), "去前导正斜杠缺失: {v:?}");
+        assert!(contains(&v, "\\svg\\accent.svg"), "前导反斜杠+反斜杠路径缺失: {v:?}");
+
+        let v = mdd_key_variants("kanji_alive_audio/06024-1.opus");
+        assert!(contains(&v, "\\kanji_alive_audio\\06024-1.opus"), "音频 key 缺失: {v:?}");
+    }
+
+    #[test]
+    fn mdd_key_variants_dedup_and_stable() {
+        let a = mdd_key_variants("a\\b");
+        let b = mdd_key_variants("a/b");
+        assert_eq!(a, b, "正反斜杠变体应收敛到同一集合");
+        // 无重复
+        let n = a.len();
+        let mut d = a.clone();
+        d.dedup();
+        assert_eq!(n, d.len(), "变体存在重复: {a:?}");
+    }
+
+    #[test]
+    fn mdd_resource_real_dict_hits_leading_backslash_key() {
+        // 集成: 词条 HTML 引用 "common.css"(无前导斜杠),MDD 内部 key 是 "\common.css"。
+        // mdd_key_variants + mdd_resource 组合必须命中。真实词典缺失则跳过。
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let p = root.join("JPdict/jitendex/jitendex.mdd");
+        if !p.exists() { return; }
+        let reader = crate::mdict::MdictReader::open(p.to_str().unwrap(), true).unwrap();
+        for cand in mdd_key_variants("common.css") {
+            if let Ok(Some(b)) = reader.mdd_resource(&cand) {
+                assert!(!b.is_empty(), "common.css 命中但内容为空");
+                return;
+            }
+        }
+        panic!("common.css 未命中 jitendex.mdd(前导反斜杠 key 变体缺失)");
+    }
 }

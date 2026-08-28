@@ -200,7 +200,11 @@ export function renderWindow(force){
 function scrollToRow(idx, center){
   const n = state.paras().length;
   if (idx < 0 || idx >= n) return;
-  const centerOff = center ? Math.floor(list.clientHeight / 2) : Math.max(0, list.clientHeight - 160);
+  // Center the row itself, rather than placing its top edge on the viewport midpoint.
+  const rowHeight = Math.max(0, heights.heightOf(idx));
+  const centerOff = center
+    ? Math.max(0, Math.floor((list.clientHeight - rowHeight) / 2))
+    : Math.max(0, list.clientHeight - 160);
   // 迭代: 每轮按模型偏移滚动并挂载窗口,窗口实测回写模型后误差迅速收敛(通常 ≤2 轮)
   for (let pass = 0; pass < 4; pass++){
     list.scrollTop = Math.max(0, heights.offsetOf(idx) + listPadTop - centerOff);
@@ -212,7 +216,10 @@ function scrollToRow(idx, center){
   if (!r) return; // 被过滤隐藏的行无法挂载
   const lr = list.getBoundingClientRect(), rr = r.el.getBoundingClientRect();
   const trueTop = rr.top - lr.top + list.scrollTop - listPadTop; // 行顶相对第一行顶的真实偏移
-  const want = Math.max(0, trueTop + listPadTop - centerOff);
+  const actualCenterOff = center
+    ? Math.max(0, Math.floor((list.clientHeight - rr.height) / 2))
+    : centerOff;
+  const want = Math.max(0, trueTop + listPadTop - actualCenterOff);
   if (Math.abs(want - list.scrollTop) > 1){
     list.scrollTop = want;
     renderWindow();
@@ -235,6 +242,7 @@ function buildRow(i){
   const row = document.createElement('div');
   row.className = 'para' + (p.done ? ' done' : '');
   row.id = 'para-' + i;
+  row.setAttribute('role', 'listitem');
 
   // 列1: 序号 + 编号
   const num = document.createElement('div');
@@ -247,12 +255,15 @@ function buildRow(i){
   // 列2: 原文行
   const origCell = document.createElement('div');
   origCell.className = 'orig-cell';
+  const origCaption = document.createElement('span');
+  origCaption.className = 'dialogue-caption orig-caption';
+  origCaption.textContent = 'ORIGINAL';
   const origName = document.createElement('div');
   origName.className = 'orig-name';
   origName.title = '原始人名(只读)';
   const orig = document.createElement('div');
   orig.className = 'orig';
-  origCell.append(origName, orig);
+  origCell.append(origCaption, origName, orig);
 
   const body = document.createElement('div');
   body.className = 'body';
@@ -260,6 +271,13 @@ function buildRow(i){
   // 译文行
   const inputRow = document.createElement('div');
   inputRow.className = 'row-input';
+  const translationBlock = document.createElement('section');
+  translationBlock.className = 'translation-block';
+  const transCaption = document.createElement('span');
+  transCaption.className = 'dialogue-caption trans-caption';
+  transCaption.textContent = 'TRANSLATION';
+  const speakerPlate = document.createElement('div');
+  speakerPlate.className = 'speaker-plate';
 
   const nameInput = document.createElement('input');
   nameInput.className = 'pname-input';
@@ -268,6 +286,7 @@ function buildRow(i){
   nameInput.spellcheck = false;
   nameInput.tabIndex = -1;
   nameInput.title = '译名(可编辑;写入译文行,原文不变)';
+  nameInput.setAttribute('aria-label', '第 ' + (i + 1) + ' 行说话人译名');
 
   const bOpen = document.createElement('span');
   bOpen.className = 'bkt';
@@ -283,10 +302,13 @@ function buildRow(i){
   input.autocomplete = 'off';
   input.spellcheck = false;
   input.placeholder = '在此输入译文…';
+  input.setAttribute('aria-label', '第 ' + (i + 1) + ' 行译文');
 
   const copyBtn = document.createElement('button');
   copyBtn.className = 'copy-btn';
   copyBtn.textContent = '复制原文';
+  copyBtn.type = 'button';
+  copyBtn.setAttribute('aria-label', '复制第 ' + (i + 1) + ' 行原文');
 
   // ---- 事件(仅创建时绑定一次) ----
   nameInput.addEventListener('input', () => {
@@ -374,16 +396,22 @@ function buildRow(i){
   btnApprove.className = 'pr-btn pr-approve';
   btnApprove.textContent = '✓ 通过';
   btnApprove.title = '标记为已通过(再点取消)';
+  btnApprove.type = 'button';
+  btnApprove.setAttribute('aria-label', '标记第 ' + (i + 1) + ' 行已通过');
 
   const btnIssue = document.createElement('button');
   btnIssue.className = 'pr-btn pr-issue-btn';
   btnIssue.textContent = '⚠ 有问题';
   btnIssue.title = '标记为有问题(再点取消)';
+  btnIssue.type = 'button';
+  btnIssue.setAttribute('aria-label', '标记第 ' + (i + 1) + ' 行有问题');
 
   const btnNotes = document.createElement('button');
   btnNotes.className = 'pr-btn pr-notes-btn';
   btnNotes.textContent = '📝';
   btnNotes.title = '打开批注框';
+  btnNotes.type = 'button';
+  btnNotes.setAttribute('aria-label', '打开第 ' + (i + 1) + ' 行批注');
 
   // 批注面板: 类型选择 + 输入 + 添加 + 列表
   const notes = document.createElement('div');
@@ -404,6 +432,8 @@ function buildRow(i){
   const notesAdd = document.createElement('button');
   notesAdd.className = 'pr-btn pr-notes-add';
   notesAdd.textContent = '添加';
+  notesAdd.type = 'button';
+  notesAdd.setAttribute('aria-label', '添加批注');
   const notesList = document.createElement('div');
   notesList.className = 'pr-notes-list';
 
@@ -418,6 +448,7 @@ function buildRow(i){
   btnNotes.addEventListener('click', () => {
     notes.classList.toggle('hidden');
     btnNotes.classList.toggle('on', !notes.classList.contains('hidden'));
+    btnNotes.setAttribute('aria-expanded', String(!notes.classList.contains('hidden')));
     if (notes.classList.contains('hidden')) userCollapsedNotes.add(i); // 手动收起 → 之后不再自动展开
     else userCollapsedNotes.delete(i);
     measureRow(i); // 面板展开/收起改变行高
@@ -445,10 +476,12 @@ function buildRow(i){
     if (hit && state.onTermClick) state.onTermClick(i, hit.getAttribute('data-dst') || '');
   });
 
-  rows[i] = { el: row, num, pid, origName, orig, nameInput, trans: input, bOpen, bClose, copy: copyBtn, inputRow, prBadge, btnApprove, btnIssue, btnNotes, notes, notesType, notesInput, notesList, proofRow };
-  // 组装 DOM: 译文输入行(译名 + [「] + 译文 + [」] + 复制) → body(原文行+译文行+校对控件) → 段落行
-  inputRow.append(nameInput, input, copyBtn);
-  body.append(origCell, inputRow, proofRow);
+  rows[i] = { el: row, num, pid, origName, orig, nameInput, trans: input, bOpen, bClose, copy: copyBtn, inputRow, translationBlock, speakerPlate, prBadge, btnApprove, btnIssue, btnNotes, notes, notesType, notesInput, notesList, proofRow };
+  // 原文阅读层 → 译者角色名牌 + 译文创作层 → 校对上下文。
+  speakerPlate.append(nameInput);
+  inputRow.append(input, copyBtn);
+  translationBlock.append(transCaption, speakerPlate, inputRow);
+  body.append(origCell, translationBlock, proofRow);
   row.append(num, body);
   insertRowDom(i, row); // 窗口化渲染: 按下标序插入挂载区
   syncRow(i);
@@ -533,6 +566,8 @@ export function syncRow(i){
   const p = state.paras()[i];
   if (!r || !p) return;
   r.el.className = 'para' + (p.done ? ' done' : '');
+  r.el.classList.toggle('has-speaker', !!p.name);
+  r.el.setAttribute('aria-label', '第 ' + (i + 1) + ' 行' + (p.name ? '，' + p.name : ''));
   r.pid.textContent = p.id || '';
   r.origName.textContent = p.name || '—';
   r.origName.className = 'orig-name' + (p.name ? '' : ' empty');
@@ -585,6 +620,7 @@ export function syncRow(i){
   const shouldOpen = notesAutoOpen && hasNotes && !userCollapsedNotes.has(i);
   r.notes.classList.toggle('hidden', !shouldOpen);
   r.btnNotes.classList.toggle('on', shouldOpen);
+  r.btnNotes.setAttribute('aria-expanded', String(shouldOpen));
   r.el.style.display = state.filterShowRow(i) ? '' : 'none';
   autoResize(r.trans);
   measureRow(i); // 行高可能已变(译文增高/批注增减),同步高度模型与占位
@@ -620,6 +656,19 @@ function computeNameColWidth(){
 let _nameColWidthCached = null;
 function applyNameColWidth(){
   if (_nameColWidthCached === null) _nameColWidthCached = computeNameColWidth() + 'px';
+  list.style.setProperty('--name-col-w', _nameColWidthCached);
+}
+
+// 编辑译名时只在新名字超过当前栏宽时扩展。这样正文始终对齐，
+// 又避免每次按键都扫描全文、重建虚拟列表，影响输入状态。
+function expandNameColWidthFor(p){
+  const needed = Math.max(96, Math.min(320, Math.ceil(Math.max(
+    measureTextWidth(p.name || ''),
+    measureTextWidth(p.nameTr || '')
+  ))));
+  const current = _nameColWidthCached === null ? 0 : parseFloat(_nameColWidthCached);
+  if (needed <= current) return;
+  _nameColWidthCached = Math.max(needed, computeNameColWidth()) + 'px';
   list.style.setProperty('--name-col-w', _nameColWidthCached);
 }
 // 显式失效(打开新文件、批量改动导致名字列宽可能变化时调用)
@@ -768,6 +817,8 @@ export function updateMatchInfo(matches, matchIndex, q){
 
 /** 刷新单行 DOM(数据已变时调用;行未挂载则忽略,滚回视口时按最新数据构建) */
 export function refreshRow(i){
+  const p = state.paras()[i];
+  if (p) expandNameColWidthFor(p);
   syncRow(i);
 }
 
