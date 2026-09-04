@@ -6,6 +6,7 @@
 // Provider 接口: { id, name, isConfigured(), translate(text, glossary, onChunk?), translateBatch(texts, glossary?) }
 
 import { loadSettings, saveSettings } from './settings.js';
+import { maskProtectedTokens, restoreProtectedTokens } from './universal-parser.js';
 
 export async function getMTSettings(){
   const s = await loadSettings();
@@ -634,6 +635,19 @@ export async function translateText(providerId, text, glossary, onChunk){
   const p = getProvider(providerId) || NotConfiguredProvider;
   if (!p.isConfigured()) throw new Error('尚未配置机器翻译服务。请在「⚙ 机翻配置」中配置。');
   return p.translate(text, glossary, onChunk);
+}
+
+/** 翻译正文并严格保护 Galgame 行内控制标签；标签异常时拒绝返回可写入结果。 */
+export async function translateTextProtected(providerId, text, glossary){
+  const mask = maskProtectedTokens(text);
+  const translated = await translateText(providerId, mask.text, glossary);
+  const restored = restoreProtectedTokens(String(translated), mask);
+  if (!restored.ok){
+    const labels = { missing: '丢失', duplicate: '重复', reordered: '顺序改变', unknown: '出现未知占位符', 'invalid-mask': '保护信息无效' };
+    const detail = [...new Set(restored.errors.map(error => labels[error.code] || error.code))].join('、');
+    throw new Error('机翻结果破坏了脚本控制标签（' + detail + '），已拒绝写入。请重试或手动翻译此行。');
+  }
+  return restored.text;
 }
 
 /** 批量翻译。未配置时抛错。 */

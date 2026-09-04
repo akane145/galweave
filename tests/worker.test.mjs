@@ -106,10 +106,15 @@ test('search worker: jumpToIndex 按数字/编号定位', () => {
 /* ---------------- recognize worker 消息协议 ---------------- */
 
 test('recognize worker: detect 接受 ☆/★ 文本返回 profile', () => {
-  const text = '☆0000☆☆判断基準は面白さ\n★0000☆☆判断标准是有趣\n\n';
+  const text = '☆0000☆☆判断基準は面白さ\n★0000★★判断标准是有趣\n\n';
   const p = recogHandle({ type: 'detect', text, file: 'x.txt' });
   assert.ok(p && typeof p === 'object');
   assert.ok(p.marks || (p.structure && p.structure.lineKinds), 'profile 含结构信息');
+  assert.equal(p.formatProfile.version, 1);
+  assert.equal(p.modules.records.length, 1);
+  const canonical = recogHandle({ type: 'canonicalize', profile: p });
+  const restored = recogHandle({ type: 'restore', profile: p, canonicalText: canonical });
+  assert.equal(restored, text);
 });
 
 test('recognize worker: analyzeWithParsers 对自洽文本返回结构化结果', () => {

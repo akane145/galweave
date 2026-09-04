@@ -3,6 +3,8 @@
 > 视觉小说（galgame）文本 日译中 辅助翻译工具。
 > 原文锁定、译文可编辑，逐段翻译 + MDX/JSON/HTTP 词典 + 项目术语与片段 + 本地 Sakura 机翻 + 校对工作流。
 
+当前版本：**v5.2.0**。Windows 安装包见 [GitHub Releases](https://github.com/akane145/galweave/releases/tag/v5.2.0)。
+
 ## ✨ 主要特性
 
 - **机器翻译双引擎**：通用大模型（OpenAI 兼容，流式输出、多轮上下文、自定义提示词）+ Sakura 本地离线模型，兼容 llama.cpp。
@@ -66,8 +68,8 @@ npm run tauri build
 ```
 
 产物（`src-tauri/target/release/bundle/`）：
-- `nsis/Galweave_5.0.1_x64-setup.exe`（安装器）
-- `msi/Galweave_5.0.1_x64_en-US.msi`（MSI）
+- `nsis/Galweave_5.2.0_x64-setup.exe`（安装器）
+- `msi/Galweave_5.2.0_x64_en-US.msi`（MSI）
 - 裸可执行文件：`src-tauri/target/release/galtrans.exe`（免安装直接运行）
 
 ## 单元测试（核心逻辑，无需浏览器）

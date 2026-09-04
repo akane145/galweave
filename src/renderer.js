@@ -7,6 +7,8 @@ import { transValue, buildOrigHighlights } from './parsers.js';
 import { getParas } from './model.js';
 import { createRowHeightModel } from './virtuallist.js';
 import { currentToken } from './suggest.js';
+import { byteCount, usageLevel, formatByteTitle, encodingLabel } from './bytes.js';
+import { rowStatusInfo } from './rowstatus.js';
 
 const ROW_MAX = 400;    // textarea 最大高度(px)
 const BUFFER = 10;      // 视口两侧预挂载的可见行数
@@ -310,6 +312,30 @@ function buildRow(i){
   copyBtn.type = 'button';
   copyBtn.setAttribute('aria-label', '复制第 ' + (i + 1) + ' 行原文');
 
+  // 行状态 pill(规范 §0.3 / §7.5：形状编码 + 文字标签,不靠色区分)
+  const statusPill = document.createElement('span');
+  statusPill.className = 'row-status';
+  statusPill.setAttribute('aria-hidden', 'true'); // 装饰性;整行已有 aria-label 含状态
+  const rsGlyph = document.createElement('span');
+  rsGlyph.className = 'rs-glyph';
+  const rsLabel = document.createElement('span');
+  rsLabel.className = 'rs-label';
+  statusPill.append(rsGlyph, rsLabel);
+
+  // 字节数指示器（规范 §8.3）：[2px 色条] 124 / 120 UTF8
+  // 四个状态经 data-level 交给 CSS 表达，JS 只负责算数与写类，视觉不动。
+  const byteMeter = document.createElement('div');
+  byteMeter.className = 'byte-meter';
+  byteMeter.dataset.level = 'ok';
+  const byteNum = document.createElement('b');
+  byteNum.className = 'byte-num';
+  const byteTotal = document.createElement('span');
+  byteTotal.className = 'byte-total';
+  const byteEnc = document.createElement('span');
+  byteEnc.className = 'byte-enc';
+  byteMeter.append(byteNum, byteTotal, byteEnc);
+  byteMeter.setAttribute('aria-live', 'off');
+
   // ---- 事件(仅创建时绑定一次) ----
   nameInput.addEventListener('input', () => {
     if (state.onNameInput) state.onNameInput(i, nameInput.value);
@@ -342,6 +368,8 @@ function buildRow(i){
   input.addEventListener('input', () => {
     if (state.onTransInput) state.onTransInput(i, input.value);
     updateSuggest(i, input); // 术语/片段输入建议
+    updateByteMeter(rows[i]);   // rows[i] 在监听器注册后才赋值，但事件触发时必然就绪
+    scheduleBreath(rows[i]);
   });
 
   // IME 组合输入中不出建议(避免与输入法候选窗打架)
@@ -476,11 +504,11 @@ function buildRow(i){
     if (hit && state.onTermClick) state.onTermClick(i, hit.getAttribute('data-dst') || '');
   });
 
-  rows[i] = { el: row, num, pid, origName, orig, nameInput, trans: input, bOpen, bClose, copy: copyBtn, inputRow, translationBlock, speakerPlate, prBadge, btnApprove, btnIssue, btnNotes, notes, notesType, notesInput, notesList, proofRow };
+  rows[i] = { el: row, num, pid, origName, orig, nameInput, trans: input, bOpen, bClose, copy: copyBtn, inputRow, translationBlock, speakerPlate, prBadge, btnApprove, btnIssue, btnNotes, notes, notesType, notesInput, notesList, proofRow, byteMeter, byteNum, byteTotal, byteEnc, statusPill, rsGlyph, rsLabel };
   // 原文阅读层 → 译者角色名牌 + 译文创作层 → 校对上下文。
   speakerPlate.append(nameInput);
-  inputRow.append(input, copyBtn);
-  translationBlock.append(transCaption, speakerPlate, inputRow);
+  inputRow.append(input, copyBtn, statusPill);
+  translationBlock.append(transCaption, speakerPlate, inputRow, byteMeter);
   body.append(origCell, translationBlock, proofRow);
   row.append(num, body);
   insertRowDom(i, row); // 窗口化渲染: 按下标序插入挂载区
@@ -610,10 +638,16 @@ export function syncRow(i){
   r.el.classList.toggle('pr-suspicious', prOn && ik === 'ratio');
   const uc = (p.pr && p.pr.annotations) ? p.pr.annotations.filter(a => !a.resolved).length : 0;
   r.prBadge.textContent = uc ? String(uc) : '';
+  updateByteMeter(r);
   r.prBadge.classList.toggle('show', uc > 0);
   r.btnNotes.textContent = '📝' + (uc ? ' ' + uc : '');
   r.btnApprove.classList.toggle('on', st === 'approved');
   r.btnIssue.classList.toggle('on', st === 'issue');
+  // 行状态 pill(§0.3 / §7.5 形状 + 文字双编码)
+  const si = rowStatusInfo(p);
+  r.statusPill.className = 'row-status rs-' + si.cls;
+  r.rsGlyph.textContent = si.glyph;
+  r.rsLabel.textContent = si.label;
   renderNotesList(i, r);
   // 校对模式开启且有批注 → 默认展开批注框(用户手动收起过的行除外)
   const hasNotes = !!(p.pr && p.pr.annotations && p.pr.annotations.length);
@@ -754,6 +788,9 @@ export function focusIdx(idx){
   scrollToRow(idx, true); // 与旧版一致: 当前行始终滚动到视口中部
 }
 
+// 当前活动行下标: 供术语面「插入」按钮等把内容塞进正在编辑的那一行(失焦不重置)
+export function getFocusIdx(){ return activeIdx; }
+
 export function scrollRowIntoView(idx){
   const n = state.paras().length;
   if (idx < 0 || idx >= n) return;
@@ -770,8 +807,10 @@ export function scrollRowIntoView(idx){
 export function updateProgress(){
   const paras = state.paras();
   const done = paras.filter(p => p.done).length;
-  document.getElementById('progress').textContent =
-    paras.length ? ('已翻译 ' + done + ' / ' + paras.length) : '';
+  const el = document.getElementById('progress');
+  el.textContent = paras.length ? ('已翻译 ' + done + ' / ' + paras.length) : '';
+  // 进度条填充比例交给 CSS（::before 渐变轨道），此处只写 0–1 数值
+  el.style.setProperty('--progress-pct', paras.length ? done / paras.length : 0);
 }
 
 export function updateUndoButtons(){
@@ -933,6 +972,59 @@ function renderSuggest(i, ta){
   sgPop.style.left = x + 'px';
   sgPop.style.top = y + 'px';
   sgRow = i;
+}
+
+/* ═══ 字节数指示器（规范 §8.3）═══
+   不用抖动：抖动在输入过程中打断肌肉记忆，且在 2000+ 行虚拟滚动里触发布局重排。
+   只在停止输入 400ms 后对超限行做 3 次呼吸，且不位移、不改尺寸。 */
+
+// 上限读自 CSS 变量 --byte-limit，读一次缓存。Q3 目标引擎确定后只需改 CSS，JS 不动。
+let _byteLimit = null;
+function byteLimit(){
+  if (_byteLimit === null){
+    const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--byte-limit'));
+    _byteLimit = Number.isFinite(v) && v > 0 ? v : 0;
+  }
+  return _byteLimit;
+}
+
+// 计数口径：默认 UTF-8。Shift-JIS 口径待 Q3 引擎规格确认后接设置项（bytes.js 已支持两种）。
+let _byteEnc = 'utf8';
+export function setByteEncoding(enc){
+  _byteEnc = enc === 'sjis' ? 'sjis' : 'utf8';
+  for (const r of rows) if (r) { r.byteMeter.classList.remove('breathe'); updateByteMeter(r); }
+}
+
+function updateByteMeter(r){
+  if (!r || !r.byteMeter) return;
+  const limit = byteLimit();
+  r.byteMeter.hidden = limit <= 0;          // 未配置上限就不显示，避免无意义的 0/0
+  if (limit <= 0) return;
+  const n = byteCount(r.trans.value || '', _byteEnc);
+  const lv = usageLevel(n, limit);
+  if (r.byteMeter.dataset.level !== lv) r.byteMeter.dataset.level = lv;
+  const txt = String(n);
+  if (r.byteNum.textContent !== txt) r.byteNum.textContent = txt;
+  const tot = '/ ' + limit;
+  if (r.byteTotal.textContent !== tot) r.byteTotal.textContent = tot;
+  const enc = encodingLabel(_byteEnc);
+  if (r.byteEnc.textContent !== enc) r.byteEnc.textContent = enc;
+  const title = formatByteTitle(n, limit, _byteEnc);
+  if (r.byteMeter.title !== title) r.byteMeter.title = title;
+}
+
+// 呼吸只在最后活动的那一行触发：其余行的指示器本来就不显示，没必要排队。
+let _breathTimer = null;
+function scheduleBreath(r){
+  if (!r || !r.byteMeter) return;
+  if (_breathTimer) clearTimeout(_breathTimer);
+  r.byteMeter.classList.remove('breathe');
+  _breathTimer = setTimeout(() => {
+    _breathTimer = null;
+    if (r.byteMeter.dataset.level !== 'over') return;
+    void r.byteMeter.offsetWidth;            // 强制重排，否则同名动画不会重新触发
+    r.byteMeter.classList.add('breathe');
+  }, 400);
 }
 
 /** 输入/组合结束后重算建议: 取光标前词元匹配术语表与片段表 */

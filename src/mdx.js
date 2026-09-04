@@ -75,37 +75,138 @@ const DICT_LIGHT_VALUES = new Set([
 const DICT_MUTED_VALUES = new Set(['#666', '#666666', '#777', '#888', '#999', '#9d928c', '#a0a0a0', '#b2b2b2', '#6b7280', '#667085', '#475569', '#475467']);
 const DICT_ACCENT_VALUES = new Set(['red', 'crimson', '#c00', '#cc3333', '#b9584f', '#b71c1c', '#982727', '#78350f', '#7a271a', '#8b1e1e']);
 
+/** 亮度阈值(0=黑,255 近似白): <=LIFT_MAX 的字色在深色主题提亮,>=DROP_MIN 的在浅色主题压暗 */
+const DICT_LIFT_MAX = 140;
+const DICT_DROP_MIN = 210;
+
+/** CSS 命名颜色 → hex(词典 CSS 常用集合,覆盖 CSS2.1 全部 + 常见扩展) */
+const CSS_NAMED_COLORS = {
+  black: '#000000', silver: '#c0c0c0', gray: '#808080', grey: '#808080', white: '#ffffff',
+  maroon: '#800000', red: '#ff0000', purple: '#800080', fuchsia: '#ff00ff', magenta: '#ff00ff',
+  green: '#008000', lime: '#00ff00', olive: '#808000', yellow: '#ffff00', navy: '#000080',
+  blue: '#0000ff', teal: '#008080', aqua: '#00ffff', cyan: '#00ffff', orange: '#ffa500',
+  gold: '#ffd700', goldenrod: '#daa520', darkgoldenrod: '#b8860b', palegoldenrod: '#eee8aa',
+  pink: '#ffc0cb', lightpink: '#ffb6c1', hotpink: '#ff69b4', deeppink: '#ff1493',
+  coral: '#ff7f50', tomato: '#ff6347', orangered: '#ff4500', darkorange: '#ff8c00',
+  salmon: '#fa8072', lightsalmon: '#ffa07a', darksalmon: '#e9967a', lightcoral: '#f08080',
+  indianred: '#cd5c5c', firebrick: '#b22222', brown: '#a52a2a', darkred: '#8b0000',
+  sienna: '#a0522d', chocolate: '#d2691e', saddlebrown: '#8b4513', peru: '#cd853f',
+  rosybrown: '#bc8f8f', tan: '#d2b48c', wheat: '#f5deb3', burlywood: '#deb887',
+  beige: '#f5f5dc', ivory: '#fffff0', linen: '#faf0e6', antiquewhite: '#faebd7',
+  papayawhip: '#ffefd5', blanchedalmond: '#ffebcd', moccasin: '#ffe4b5', navajowhite: '#ffdead',
+  peachpuff: '#ffdab9', bisque: '#ffe4c4', cornsilk: '#fff8dc', khaki: '#f0e68c', darkkhaki: '#bdb76b',
+  yellowgreen: '#9acd32', olivedrab: '#6b8e23', darkolivegreen: '#556b2f', greenyellow: '#adff2f',
+  chartreuse: '#7fff00', lawngreen: '#7cfc00', limegreen: '#32cd32', palegreen: '#98fb98',
+  lightgreen: '#90ee90', springgreen: '#00ff7f', mediumspringgreen: '#00fa9a', forestgreen: '#228b22',
+  seagreen: '#2e8b57', mediumseagreen: '#3cb371', darkseagreen: '#8fbc8f', darkgreen: '#006400',
+  lightseagreen: '#20b2aa', mediumaquamarine: '#66cdaa', aquamarine: '#7fffd4', turquoise: '#40e0d0',
+  mediumturquoise: '#48d1cc', darkturquoise: '#00ced1', lightcyan: '#e0ffff', powderblue: '#b0e0e6',
+  lightblue: '#add8e6', skyblue: '#87ceeb', lightskyblue: '#87cefa', deepskyblue: '#00bfff',
+  dodgerblue: '#1e90ff', cornflowerblue: '#6495ed', steelblue: '#4682b4', lightsteelblue: '#b0c4de',
+  royalblue: '#4169e1', mediumblue: '#0000cd', darkblue: '#00008b', midnightblue: '#191970',
+  slateblue: '#6a5acd', mediumslateblue: '#7b68ee', darkslateblue: '#483d8b', indigo: '#4b0082',
+  blueviolet: '#8a2be2', darkviolet: '#9400d3', darkorchid: '#9932cc', mediumorchid: '#ba55d3',
+  mediumpurple: '#9370db', thistle: '#d8bfd8', plum: '#dda0dd', violet: '#ee82ee', orchid: '#da70d6',
+  mediumvioletred: '#c71585', palevioletred: '#db7093', lavenderblush: '#fff0f5', lavender: '#e6e6fa',
+  aliceblue: '#f0f8ff', azure: '#f0ffff', mintcream: '#f5fffa', honeydew: '#f0fff0',
+  ghostwhite: '#f8f8ff', whitesmoke: '#f5f5f5', floralwhite: '#fffaf0', seashell: '#fff5ee',
+  oldlace: '#fdf5e6', lemonchiffon: '#fffacd', lightyellow: '#ffffe0', darkslategray: '#2f4f4f',
+  darkslategrey: '#2f4f4f', dimgray: '#696969', dimgrey: '#696969', slategray: '#708090',
+  slategrey: '#708090', lightslategray: '#778899', lightslategrey: '#778899', lightgray: '#d3d3d3',
+  lightgrey: '#d3d3d3', darkgray: '#a9a9a9', darkgrey: '#a9a9a9', gainsboro: '#dcdcdc',
+  sandybrown: '#f4a460',
+};
+
 function colorBrightness(raw){
-  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(raw);
+  const m = raw.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
   if (!m) return null;
   const hex = m[1].length === 3 ? m[1].split('').map(x => x + x).join('') : m[1];
   const n = Number.parseInt(hex, 16);
   return ((n >> 16) * 299 + (((n >> 8) & 255) * 587) + ((n & 255) * 114)) / 1000;
 }
 
+/** 颜色字面量 → 标准 #rrggbb(命名色/3位/6位 hex),认不出返回 null */
+function resolveColorHex(raw){
+  const lower = String(raw || '').trim().toLowerCase();
+  if (CSS_NAMED_COLORS[lower]) return CSS_NAMED_COLORS[lower];
+  const m = lower.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/);
+  if (!m) return null;
+  return m[1].length === 3 ? '#' + m[1].split('').map(x => x + x).join('') : '#' + m[1];
+}
+
+/** 深色主题下把过暗字色调亮(混白,保留色相);浅色主题 --dict-lift-amt 为 0% 即原色 */
+function liftMix(raw){
+  return 'color-mix(in srgb, ' + raw + ', var(--dict-lift) var(--dict-lift-amt))';
+}
+/** 浅色主题下把过浅字色压暗(混深),深色主题 --dict-drop-amt 为 0% 即原色 */
+function dropMix(raw){
+  return 'color-mix(in srgb, ' + raw + ', var(--dict-drop) var(--dict-drop-amt))';
+}
+
+/**
+ * 单个颜色字面量 → 主题变量。
+ * kind: 'text'(color/fill/stroke) | 'border'(border/outline 色) | 'background'。
+ * 成对规则:词典里「黑底白字」的反白块,背景与文字各自翻转到对应主题变量后仍保持对比。
+ */
+function mapColorLiteral(raw, kind){
+  const lower = String(raw || '').trim().toLowerCase();
+  const hex = resolveColorHex(lower);
+  if (!hex) return null; // 非单色字面量(rgba/多段值/未知),交给 token 扫描或原样保留
+  const isBackground = kind === 'background';
+  if (DICT_DARK_VALUES.has(lower) || DICT_DARK_VALUES.has(hex)){
+    return isBackground ? 'var(--dict-surface-strong)' : (kind === 'border' ? 'var(--dict-border)' : 'var(--dict-ink)');
+  }
+  if (DICT_LIGHT_VALUES.has(lower) || DICT_LIGHT_VALUES.has(hex)){
+    // 白/近白字色同样映射为 ink:配合背景(亦随主题翻转)在两种主题下都保持高对比。
+    // 旧实现映射到 --dict-paper(深色主题下是深色),黑底白字块会变成深字深底不可读。
+    return isBackground ? 'var(--dict-surface)' : (kind === 'border' ? 'var(--dict-border)' : 'var(--dict-ink)');
+  }
+  if (DICT_MUTED_VALUES.has(lower) || DICT_MUTED_VALUES.has(hex)) return 'var(--dict-muted)';
+  if (DICT_ACCENT_VALUES.has(lower) || DICT_ACCENT_VALUES.has(hex)) return 'var(--dict-accent)';
+  const b = colorBrightness(hex);
+  if (isBackground){
+    if (b >= 205) return 'var(--dict-surface-soft)';
+    if (b <= 45) return 'var(--dict-surface-strong)';
+    return raw; // 中间调背景原样保留(色块语义),靠 ink 字色保持对比
+  }
+  if (kind === 'border'){
+    if (b >= 205 || b <= 45) return 'var(--dict-border)';
+    return raw;
+  }
+  if (b <= 25) return 'var(--dict-ink)';
+  if (b <= DICT_LIFT_MAX) return liftMix(raw);
+  if (b >= DICT_DROP_MIN) return dropMix(raw);
+  return raw;
+}
+
+/** 值内的颜色 token 级替换(hex/命名色),用于 border 简写等多段值;非颜色 token 原样保留 */
+function mapColorTokens(value, kind){
+  return String(value || '').replace(
+    /#[0-9a-fA-F]{6}(?![0-9a-fA-F])|#[0-9a-fA-F]{3}(?![0-9a-fA-F])|(?<![-#.\w])[a-z]{3,}(?![\w-])/gi,
+    (token) => mapColorLiteral(token, kind) || token
+  );
+}
+
 function normalizeColorValue(value, property){
-  const raw = String(value || '').trim();
+  let raw = String(value || '').trim();
+  let important = '';
+  const imp = raw.match(/\s*!\s*important\s*$/i);
+  if (imp){ important = ' !important'; raw = raw.slice(0, imp.index).trim(); }
   const lower = raw.toLowerCase();
-  const isBackground = property.startsWith('background');
-  if (!raw || /^(?:inherit|initial|unset|transparent|currentcolor|var\(|url\()/i.test(lower)) return raw;
+  const kind = property.startsWith('background') ? 'background'
+    : (/^(?:border|outline)/.test(property) ? 'border' : 'text');
+  if (!raw || /^(?:inherit|initial|unset|transparent|currentcolor|var\(|url\()/i.test(lower)) return raw + important;
   if (/^(?:linear|radial)-gradient\(/i.test(lower)){
-    return raw
+    // 渐变属于块状填充:白/黑/银按背景语义翻转,其余颜色 token 同 background 规则
+    const mapped = raw
       .replace(/\bwhite\b/gi, 'var(--dict-surface)')
       .replace(/\bblack\b/gi, 'var(--dict-ink)')
       .replace(/\bsilver\b/gi, 'var(--dict-border)');
+    return mapColorTokens(mapped, 'background') + important;
   }
-  if (DICT_DARK_VALUES.has(lower)) return isBackground ? 'var(--dict-surface-strong)' : 'var(--dict-ink)';
-  if (DICT_LIGHT_VALUES.has(lower)) return isBackground ? 'var(--dict-surface)' : 'var(--dict-paper)';
-  if (DICT_MUTED_VALUES.has(lower)) return 'var(--dict-muted)';
-  if (DICT_ACCENT_VALUES.has(lower)) return 'var(--dict-accent)';
-  const brightness = colorBrightness(lower);
-  if (brightness !== null){
-    if (isBackground && brightness >= 205) return 'var(--dict-surface-soft)';
-    if (isBackground && brightness <= 45) return 'var(--dict-surface-strong)';
-    if (!isBackground && brightness >= 245) return 'var(--dict-paper)';
-    if (!isBackground && brightness <= 25) return 'var(--dict-ink)';
-  }
-  return raw;
+  const single = mapColorLiteral(raw, kind);
+  if (single !== null) return single + important;
+  return mapColorTokens(raw, kind) + important;
 }
 
 /** 将词典硬编码黑白色转换为主题变量，令同一份 CSS 随深/浅色主题切换。 */
@@ -113,7 +214,7 @@ export function normalizeDictionaryColors(css){
   let out = String(css || '')
     .replace(/var\(\s*--ink\s*\)/gi, 'var(--dict-ink)')
     .replace(/var\(\s*--muted\s*\)/gi, 'var(--dict-muted)');
-  out = out.replace(/((?:^|[;{])\s*)((color|background|background-color|border(?:-[a-z-]+)?-color|fill|stroke)\s*:\s*)([^;{}]+)/g,
+  out = out.replace(/((?:^|[;{])\s*)((color|background(?:-color)?|border(?:-[a-z-]+)?(?:-color)?|outline(?:-[a-z-]+)?(?:-color)?|fill|stroke)\s*:\s*)([^;{}]+)/g,
     (m, boundary, declaration, property, value) => boundary + declaration + normalizeColorValue(value, property.toLowerCase()));
   return out;
 }

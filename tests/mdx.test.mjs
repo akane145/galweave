@@ -68,6 +68,69 @@ test('normalizeDictionaryColors: 黑白硬编码转为可随主题切换的变�
   assert.ok(out.includes('radial-gradient(var(--dict-surface), var(--dict-border))'));
 });
 
+test('normalizeDictionaryColors: 黑底白字反白块成对翻转,两主题都保持对比', () => {
+  // 旧实现把白字映到 --dict-paper(深色主题下是深色),与黑底(翻成深色)叠在一起不可读
+  const out = normalizeDictionaryColors('.inv{background:#000;color:#fff}');
+  assert.ok(out.includes('background:var(--dict-surface-strong)'));
+  assert.ok(out.includes('color:var(--dict-ink)'));
+  assert.ok(!out.includes('var(--dict-paper)'));
+});
+
+test('normalizeDictionaryColors: !important 保留', () => {
+  const out = normalizeDictionaryColors('.x{color: black !important;background:#fff !important}');
+  assert.ok(out.includes('color: var(--dict-ink) !important'));
+  assert.ok(out.includes('background:var(--dict-surface) !important'));
+});
+
+test('normalizeDictionaryColors: 命名颜色按语义映射', () => {
+  const out = normalizeDictionaryColors('.a{color:navy}.b{color:blue}.c{background: antiquewhite}.d{color:steelblue}.e{color:gray}');
+  // 极暗命名色 → ink
+  assert.ok(out.includes('.a{color:var(--dict-ink)}'));
+  // 中暗色相保留:混 --dict-lift(深色主题提亮,浅色主题原色)
+  assert.ok(out.includes('color-mix(in srgb, blue, var(--dict-lift) var(--dict-lift-amt))'));
+  assert.ok(out.includes('color-mix(in srgb, steelblue, var(--dict-lift) var(--dict-lift-amt))'));
+  // 很浅的背景 → surface-soft
+  assert.ok(out.includes('.c{background: var(--dict-surface-soft)}'));
+  // 中间调灰字 → lift mix
+  assert.ok(out.includes('color-mix(in srgb, gray, var(--dict-lift) var(--dict-lift-amt))'));
+});
+
+test('normalizeDictionaryColors: 深色下过暗字色 lift、过浅字色 drop(色相保留)', () => {
+  const out = normalizeDictionaryColors('.a{color:#374151}.b{color:#d4d4d4}.c{color:#0B4CE5}');
+  assert.ok(out.includes('color-mix(in srgb, #374151, var(--dict-lift) var(--dict-lift-amt))'));
+  assert.ok(out.includes('color-mix(in srgb, #d4d4d4, var(--dict-drop) var(--dict-drop-amt))'));
+  assert.ok(out.includes('color-mix(in srgb, #0B4CE5, var(--dict-lift) var(--dict-lift-amt))'));
+});
+
+test('normalizeDictionaryColors: border 简写里的颜色 token 也被映射', () => {
+  const out = normalizeDictionaryColors('.a{border: 0.08em solid #000}.b{border-top:1px solid}');
+  assert.ok(out.includes('border: 0.08em solid var(--dict-border)'));
+  assert.ok(out.includes('border-top:1px solid')); // 无色 token 不动
+});
+
+test('normalizeDictionaryColors: 低透明度 rgba/未知值原样保留', () => {
+  const out = normalizeDictionaryColors('.a{background-color: rgba(176, 127, 57, 0.1)}.b{color: rgba(0,0,0,0.6)}.c{color: text}');
+  assert.ok(out.includes('rgba(176, 127, 57, 0.1)'));
+  assert.ok(out.includes('rgba(0,0,0,0.6)'));
+  assert.ok(out.includes('color: text')); // 无效值留给浏览器处理
+});
+
+test('normalizeDictionaryColors: 中间调背景保留,混色背景配 ink 字仍可读', () => {
+  const out = normalizeDictionaryColors('.a{background-color: #606060;color:white}');
+  assert.ok(out.includes('background-color: #606060'));
+  assert.ok(out.includes('color:var(--dict-ink)'));
+});
+
+test('normalizeDictionaryColors: 渐变中的命名色按背景语义映射', () => {
+  const out = normalizeDictionaryColors('.x{background: radial-gradient(blue 50%, white 100%)}');
+  assert.ok(out.includes('radial-gradient(var(--dict-surface-strong) 50%, var(--dict-surface) 100%)'));
+});
+
+test('normalizeDictionaryColors: 多段 background 值只动颜色 token', () => {
+  const out = normalizeDictionaryColors('.a{background:#000 url(bg.png) no-repeat}');
+  assert.ok(out.includes('background:var(--dict-surface-strong) url(bg.png) no-repeat'));
+});
+
 test('scopeDictionaryCss: 将词典规则限制在独立词条容器内', () => {
   const css = 'body{font-size:16px}table, th{border:1px solid} @media screen { .headline { color:red } } @font-face{font-family:X;src:url(x.woff2)}';
   const out = scopeDictionaryCss(css, '.dc-html[data-dict-profile="demo"]');

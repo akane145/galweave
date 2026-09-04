@@ -9,7 +9,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
-import { detect, canonicalize, restore, renderReport } from '../src/recognize.js';
+import { detect, restore, renderReport } from '../src/recognize.js';
+import { canonicalizeProfile, enrichDetectionProfile, restoreProfile } from '../src/universal-parser.js';
 
 function usage() {
   console.log(`Usage:
@@ -84,7 +85,11 @@ function main() {
     if (!fs.existsSync(profileFile)) throw new Error(`还原需要 profile JSON: ${profileFile}`);
     const profile = JSON.parse(readText(profileFile));
     const canonicalText = readText(opts.input, opts.encoding);
-    const restored = restore(profile, canonicalText);
+    const restoredResult = profile.lossless ? restoreProfile(profile, canonicalText) : null;
+    if (restoredResult && !restoredResult.ok){
+      throw new Error(`通用格式还原失败: ${restoredResult.errors.map(error => error.code).join('、')}`);
+    }
+    const restored = restoredResult ? restoredResult.text : restore(profile, canonicalText);
     const output = opts.out || (opts.input.endsWith('.canonical.txt')
       ? opts.input.replace(/\.canonical\.txt$/i, '.restored.txt')
       : defaultOutput(opts.input, '.restored.txt'));
@@ -94,12 +99,16 @@ function main() {
   }
 
   const sourceText = readText(opts.input, opts.encoding);
-  const profile = detect(sourceText, path.basename(opts.input));
+  const profile = enrichDetectionProfile(sourceText, detect(sourceText, path.basename(opts.input)));
   if (opts.report) console.log(renderReport(profile));
   if (opts.json) writeText(opts.json, JSON.stringify(profile, null, 2));
   if (opts.convert) {
     const output = opts.convertPath || opts.out || defaultOutput(opts.input, '.canonical.txt');
-    writeText(output, canonicalize(profile));
+    const canonicalResult = canonicalizeProfile(profile);
+    if (!canonicalResult.ok){
+      throw new Error(`通用规范化失败: ${canonicalResult.errors.map(error => error.code).join('、')}`);
+    }
+    writeText(output, canonicalResult.text);
     if (opts.report) console.log(`已规范化: ${output}`);
   }
   if (!opts.json && !opts.convert && !opts.report) process.stdout.write(`${JSON.stringify(profile, null, 2)}\n`);

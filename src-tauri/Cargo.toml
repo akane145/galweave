@@ -1,6 +1,6 @@
 [package]
 name = "galtrans"
-version = "5.0.1"
+version = "5.2.0"
 description = "Galweave 视觉小说日译中辅助翻译工具"
 authors = ["galtrans"]
 edition = "2021"

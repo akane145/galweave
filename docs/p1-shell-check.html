@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Galweave 外壳检查页 · P1-2 顶栏 / P1-3 场景树</title>
+<link rel="stylesheet" href="../src/style.css">
+<style>
+  /* 仅用于检查页自身的标注，不进产品 CSS */
+  .chk-note{
+    font:12px/1.6 var(--ui-font, system-ui), sans-serif;
+    color:var(--text-dim); background:var(--bg-panel);
+    border:1px dashed var(--border-soft); border-radius:var(--r-sm);
+    padding:10px 14px; margin:12px 16px;
+  }
+  .chk-note b{ color:var(--text-hi); font-weight:600 }
+  .chk-note code{ font-family:var(--font-mono); color:var(--accent) }
+  .chk-row{ display:flex; gap:8px; margin:8px 0 0; flex-wrap:wrap }
+  .chk-row button{ font-size:12px }
+  .chk-flag{ display:inline-block; margin-left:8px; padding:1px 6px;
+    border:1px solid var(--border-soft); border-radius:var(--r-xs);
+    font-size:11px; color:var(--text-dim) }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <header class="app-header">
+    <div class="brand-lockup" aria-label="Galweave 翻译工作台">
+      <span class="brand-mark">GW</span>
+      <div class="app-title">Galweave <span>VISUAL NOVEL STUDIO</span></div>
+    </div>
+    <nav class="workspace-nav" aria-label="工作台模式">
+      <button type="button" class="workspace-nav-item active" data-workspace="project" aria-current="page">项目</button>
+      <button type="button" class="workspace-nav-item" data-workspace="translate">翻译</button>
+      <button type="button" class="workspace-nav-item" data-workspace="glossary">术语</button>
+      <button type="button" class="workspace-nav-item" data-workspace="search">搜索</button>
+    </nav>
+    <div class="header-project-meta" aria-live="polite">
+      <span id="fname">sample_script.txt</span>
+      <span id="headerSaveState" class="header-save-state">已保存</span>
+      <span id="progress">已翻译 347 / 1000</span>
+      <span id="stats">1382 行</span>
+    </div>
+    <div class="header-actions">
+      <button type="button" class="header-proof" aria-pressed="false">校对</button>
+      <button type="button" class="header-tool" aria-pressed="false">上下文</button>
+      <button type="button" class="header-more" aria-haspopup="menu" aria-expanded="false">更多</button>
+      <button type="button" class="header-save">保存</button>
+    </div>
+  </header>
+
+  <div id="commandStrip" class="command-strip" data-panel="project" aria-label="当前工作模式工具">
+    <div id="controls" class="command-bar" data-panel="project" aria-label="文件与工具操作">
+      <div class="tool-group primary-group" data-command-panel="project" aria-label="文件操作">
+        <span class="tool-label">文件</span>
+        <button id="btnImport">导入文本</button>
+        <button id="btnSaveFile" title="直接写回导入的原文件">保存原文件</button>
+        <button id="btnSave" title="下载一份译文副本">导出译文</button>
+      </div>
+      <div class="tool-group" data-command-panel="project" aria-label="进度操作">
+        <span class="tool-label">进度</span>
+        <button class="secondary">恢复进度</button>
+        <button class="secondary">清除进度</button>
+        <button class="danger">清空翻译</button>
+      </div>
+      <div class="tool-group" data-command-panel="project" aria-label="机翻">
+        <span class="tool-label">机翻</span>
+        <button class="secondary">翻译当前行</button>
+        <button class="secondary">批量翻译</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="chk-note">
+  <b>① 顶栏 48px</b><span class="chk-flag">P1-2</span><br>
+  重点看：四个动作按钮是否<b>去实心</b>（raised 底 + 边框），只有「保存」边框更亮；
+  模式切换 hover 应有底色、选中态是底部下划线而非填充块。<br>
+  <b>进度条</b>：轨道在「已翻译 347 / 1000」左侧，填充色为 approved 青绿，数字用等宽 + tabular-nums。
+  <div class="chk-row">
+    <button type="button" class="secondary" data-pct="0">进度 0%</button>
+    <button type="button" class="secondary" data-pct="0.35">进度 35%</button>
+    <button type="button" class="secondary" data-pct="0.72">进度 72%</button>
+    <button type="button" class="secondary" data-pct="1">进度 100%</button>
+    <button type="button" class="secondary" data-pct="">空态（未打开文档）</button>
+  </div>
+</div>
+
+<div class="chk-note">
+  <b>② 命令条 40px</b><span class="chk-flag">P1-2</span><br>
+  <code>#btnImport</code> / <code>#btnSave</code> 保持<b>实心 accent</b>——它们是命令条内唯一主操作，
+  实心才是「强调位唯一」。其余按钮为 raised 底。
+</div>
+
+<div id="main">
+  <aside id="storyRail" aria-label="故事与文档导航">
+    <div class="rail-topline"><span>PROJECT</span><button type="button" id="btnRailImport" title="导入文本">导入</button></div>
+    <div class="rail-project">
+      <span class="rail-overline">CURRENT SCRIPT</span>
+      <strong id="railFilename">sample_script.txt</strong>
+      <span id="railProgress">347 / 1000</span>
+    </div>
+    <div class="rail-section-head"><span>STORY</span><span>OPEN</span></div>
+    <div id="tabs" class="tab-strip" role="tablist" aria-label="已打开的文档">
+      <div class="doc-tab active">sample_script.txt</div>
+      <div class="doc-tab">chapter02.txt</div>
+      <div class="doc-tab">readme.txt</div>
+    </div>
+    <div class="rail-bottom">
+      <div class="side-panel" id="panel-files" role="tabpanel" aria-labelledby="side-tab-files">
+        <div class="side-body">
+          <div id="fileTree" class="file-tree"></div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <div style="flex:1; padding:16px">
+    <div class="chk-note" style="margin-left:0">
+      <b>③ 场景树 30px 节点 / 12px 缩进</b><span class="chk-flag">P1-3</span><br>
+      · 目录 chevron 由 CSS 画（两条 1.5px 边旋转），<b>不再用 ▾ 字符</b>——点「切换折叠」验证旋转不抖。<br>
+      · 文件节点左侧 3px 圆点取代 📄 emoji；目录与文件的文本左缘必须<b>对齐</b>。<br>
+      · 选中态 = <code>--ov-selected</code> 底 + 左侧 2px accent 竖线（<b>不是</b>朱红/错误色）。<br>
+      · 层级引导线默认虚线，鼠标移入容器转实线。
+      <div class="chk-row">
+        <button type="button" class="secondary" id="btnToggle">切换第一个目录折叠</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── 进度条：复现 renderer.js updateProgress() 的写入方式 ──
+var TOTAL = 1000;
+function setPct(pct){
+  var el = document.getElementById('progress');
+  if (pct === ''){ el.textContent = ''; el.style.setProperty('--progress-pct', 0); return; }
+  var done = Math.round(parseFloat(pct) * TOTAL);
+  el.textContent = '已翻译 ' + done + ' / ' + TOTAL;
+  el.style.setProperty('--progress-pct', pct);
+}
+document.querySelectorAll('[data-pct]').forEach(function(b){
+  b.addEventListener('click', function(){ setPct(b.dataset.pct); });
+});
+setPct('0.347');
+
+// ── 场景树：复现 main.js 的 DOM 结构（caret 无字形字符、无 emoji）──
+var TREE = [
+  { kind:'dir',  name:'script', children:[
+      { kind:'dir', name:'chapter01', children:[
+          { kind:'file', name:'prologue.txt', cls:'active' },
+          { kind:'file', name:'scene01.txt' },
+          { kind:'file', name:'scene02_with_a_very_long_filename.txt' }
+      ]},
+      { kind:'dir', name:'chapter02', children:[
+          { kind:'file', name:'opening.txt' }
+      ]}
+  ]},
+  { kind:'file', name:'readme.txt' }
+];
+var tree = document.getElementById('fileTree');
+(function build(entries, parent){
+  for (var i=0;i<entries.length;i++){
+    var en = entries[i];
+    if (en.kind === 'dir'){
+      var item = document.createElement('div');
+      item.className = 'tree-item tree-dir collapsed';
+      var caret = document.createElement('span');
+      caret.className = 'caret';
+      var label = document.createElement('span');
+      label.className = 'lbl'; label.textContent = en.name;
+      var children = document.createElement('div');
+      children.className = 'tree-children collapsed';
+      item.append(caret, label);
+      item.addEventListener('click', function(children, item){
+        return function(e){
+          e.stopPropagation();
+          var was = children.classList.contains('collapsed');
+          children.classList.toggle('collapsed', !was);
+          item.classList.toggle('collapsed', !was);
+        };
+      }(children, item));
+      parent.append(item, children);
+      build(en.children, children);
+    } else {
+      var f = document.createElement('div');
+      f.className = 'tree-item tree-file' + (en.cls ? ' ' + en.cls : '');
+      var spacer = document.createElement('span');
+      spacer.className = 'tree-file-dot';
+      spacer.style.width = '12px';
+      var fl = document.createElement('span');
+      fl.className = 'fname'; fl.textContent = en.name;
+      f.append(spacer, fl);
+      parent.appendChild(f);
+    }
+  }
+})(TREE, tree);
+
+// 默认展开 chapter01，便于一眼看到嵌套与对齐
+var firstDir = tree.querySelector('.tree-dir');
+firstDir.classList.remove('collapsed');
+firstDir.nextElementSibling.classList.remove('collapsed');
+document.getElementById('btnToggle').addEventListener('click', function(){
+  var c = firstDir.nextElementSibling;
+  var was = c.classList.contains('collapsed');
+  c.classList.toggle('collapsed', !was);
+  firstDir.classList.toggle('collapsed', !was);
+});
+</script>
+</body>
+</html>

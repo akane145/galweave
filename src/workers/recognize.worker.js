@@ -3,13 +3,27 @@
 // 不再接收注入对象,因为函数无法跨 worker 边界传递)。
 import { detect as recogDetect, canonicalize, restore, renderReport, analyzeWithParsers } from '../recognize.js';
 import { parseFile, setParseConf, buildExport } from '../parsers.js';
+import { canonicalizeProfile, enrichDetectionProfile, restoreProfile } from '../universal-parser.js';
 
 const parsers = { parseFile, setParseConf, buildExport };
 
 export function handleMessage(msg){
-  if (msg.type === 'detect') return recogDetect(msg.text, msg.file || '');
-  if (msg.type === 'canonicalize') return canonicalize(msg.profile);
-  if (msg.type === 'restore') return restore(msg.profile, msg.canonicalText);
+  if (msg.type === 'detect'){
+    const profile = recogDetect(msg.text, msg.file || '');
+    return enrichDetectionProfile(msg.text, profile);
+  }
+  if (msg.type === 'canonicalize'){
+    if (!msg.profile?.lossless) return canonicalize(msg.profile);
+    const result = canonicalizeProfile(msg.profile);
+    if (!result.ok) throw new Error('通用规范化失败：' + result.errors.map(error => error.code).join('、'));
+    return result.text;
+  }
+  if (msg.type === 'restore'){
+    if (!msg.profile?.lossless) return restore(msg.profile, msg.canonicalText);
+    const result = restoreProfile(msg.profile, msg.canonicalText);
+    if (!result.ok) throw new Error('通用格式还原失败：' + result.errors.map(error => error.code).join('、'));
+    return result.text;
+  }
   if (msg.type === 'renderReport') return renderReport(msg.profile);
   if (msg.type === 'analyzeWithParsers'){
     // 直接复用 recognize.analyzeWithParsers;worker 内已 import parsers,

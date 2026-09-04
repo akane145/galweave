@@ -2,6 +2,7 @@
 // 主题模式: dark(深色) / light(浅色) / bw(黑白)。
 // 字体设置: orig(原文) 与 trans(译文) 各自的 family/size/color;
 // family/color 为空 = 跟随主题默认变量(style.css 的 --mono-font / --orig-text 等)。
+// 颜色按主题分槽:color(深色) / colorLight(浅色) / colorBw(黑白),见 colorForMode。
 
 export const THEME_MODES = ['dark', 'light', 'bw'];
 
@@ -27,11 +28,15 @@ export function themeButtonIcon(mode){
 
 /* ---------------- 字体设置 ---------------- */
 
-/** 字体默认值(size 17px 与现状一致;family/color 空=跟随主题变量) */
+/**
+ * 字体默认值(size 17px 与现状一致;family/color 空=跟随主题变量)。
+ * 颜色按主题分槽保存:color=深色、colorLight=浅色、colorBw=黑白,
+ * 切换主题时自动换用对应槽位,不再需要手动换字体颜色。
+ */
 export function defaultFontSettings(){
   return {
-    orig: { family: '', size: 17, color: '' },
-    trans: { family: '', size: 17, color: '' },
+    orig: { family: '', size: 17, color: '', colorLight: '', colorBw: '' },
+    trans: { family: '', size: 17, color: '', colorLight: '', colorBw: '' },
   };
 }
 
@@ -39,16 +44,21 @@ export function defaultFontSettings(){
 function normalizeFontGroup(g){
   const src = (g && typeof g === 'object') ? g : {};
   const size = Number(src.size);
+  const color = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : '';
   return {
     family: (typeof src.family === 'string' && src.family.trim()) ? src.family.trim() : '',
     size: Number.isFinite(size) ? Math.min(72, Math.max(8, Math.round(size))) : 17,
-    color: (typeof src.color === 'string' && src.color.trim()) ? src.color.trim() : '',
+    // color 为旧版单色字段:兼容保留,语义=深色主题下的颜色
+    color: color(src.color),
+    colorLight: color(src.colorLight),
+    colorBw: color(src.colorBw),
   };
 }
 
 /**
  * 用户字体设置与默认值合并(缺省/非法字段回退默认)。
- * user: { orig?: {family,size,color}, trans?: {family,size,color} }
+ * user: { orig?: {family,size,color,colorLight,colorBw}, trans?: {...} }
+ * 旧版数据只有 color 一项,视为深色主题的颜色,浅色/黑白回退跟随主题。
  */
 export function mergeFontSettings(user){
   const d = defaultFontSettings();
@@ -57,4 +67,12 @@ export function mergeFontSettings(user){
     orig: { ...d.orig, ...normalizeFontGroup(u.orig) },
     trans: { ...d.trans, ...normalizeFontGroup(u.trans) },
   };
+}
+
+/** 取某主题模式下应生效的颜色槽位(空串=跟随主题变量) */
+export function colorForMode(group, mode){
+  const g = (group && typeof group === 'object') ? group : {};
+  const m = normalizeThemeMode(mode);
+  const v = m === 'light' ? g.colorLight : (m === 'bw' ? g.colorBw : g.color);
+  return (typeof v === 'string' && v.trim()) ? v.trim() : '';
 }

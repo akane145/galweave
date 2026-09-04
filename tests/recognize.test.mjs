@@ -76,7 +76,7 @@ test('detectIdShape: 编号形状分类', () => {
 /* ---------------- 全文件识别 ---------------- */
 
 test('detect: 第二种(○/● + [[名字]] + 标签)', () => {
-  const p = detect(readSample('第二种.txt'), '第二种.txt');
+  const p = detect(readSample('新建 文本文档 (13).txt'), '新建 文本文档 (13).txt');
   assert.equal(p.marks.open, '○');
   assert.equal(p.marks.close, '●');
   assert.equal(p.structure.nameSource, 'bracket');
@@ -96,7 +96,7 @@ test('detect: (11) 系统性编号偏移被识别放行,不再误报', () => {
 });
 
 test('detect: 第一种 #NOTTRANS 作为行控制行保留', () => {
-  const p = detect(readSample('第一种.txt'), '第一种.txt');
+  const p = detect(readSample('新建 文本文档 (12).txt'), '新建 文本文档 (12).txt');
   const withControls = p.rows.filter(r => r.controls && r.controls.length).length;
   assert.equal(withControls, 11, '#NOTTRANS 附着在每对正文行上保留');
   assert.equal(p.issues.some(i => i.type === 'other-line'), false, '控制行不算无法归类');
@@ -136,7 +136,7 @@ test('detect: 无标记文本 → marks 为空且报无法归类', () => {
 });
 
 test('renderReport: 报告包含关键信息', () => {
-  const p = detect(readSample('第二种.txt'), '第二种.txt');
+  const p = detect(readSample('新建 文本文档 (13).txt'), '新建 文本文档 (13).txt');
   const r = renderReport(p);
   assert.ok(r.includes('○'), '报告含原文标记');
   assert.ok(r.includes('bracket'), '报告含说话人来源');
@@ -209,8 +209,8 @@ test('simulateEditor: [[名字]] 规范化后名字栏可用', async () => {
   const { analyzeWithParsers } = await import('../src/recognize.js');
   const { parseFile, setParseConf, buildExport } = await import('../src/parsers.js');
   const parsers = { parseFile, setParseConf, buildExport };
-  const text = readSample('第二种.txt');
-  const p = detect(text, '第二种.txt');
+  const text = readSample('新建 文本文档 (13).txt');
+  const p = detect(text, '新建 文本文档 (13).txt');
   const before = analyzeWithParsers(parsers, text, p.parseConfig, '原文件');
   assert.equal(before.named, 0, '原文件名字在 [[ ]] 内,编辑器名字栏为空');
   const canon = canonicalize(p);

@@ -159,12 +159,12 @@
 
     <div id="list" role="list">
     <div id="empty">
-      <b>Galweave</b><br>
-      <i>从一句对白开始。</i><br>
-      导入一份脚本，或将文本直接拖入工作台<br>
-      每一段对白都会在这里成为可阅读、可翻译的稿页<br>
-      <br>
-      <span>原文只读 · Enter 前往下一句 · 术语与词典始终贴近当前对白</span>
+      <div class="empty-state">
+        <div class="empty-icon" aria-hidden="true"></div>
+        <div class="empty-title">从一句对白开始</div>
+        <div class="empty-desc">导入一份 Galgame 脚本，或将文本直接拖入工作台。<br>每一段对白都会在这里成为可阅读、可翻译的稿页。</div>
+        <div class="empty-action"><button type="button" class="btn-import" id="emptyImport">导入脚本</button></div>
+      </div>
     </div>
   </div>
   </section>
@@ -333,73 +333,102 @@
 
 <!-- 格式识别 + 解析规则设置模态(合并) -->
 <div id="setModal" class="modal-mask">
-  <div class="modal recog-modal" role="dialog" aria-modal="true" aria-labelledby="setModalTitle" tabindex="-1">
-    <h3 id="setModalTitle">格式识别 + 解析规则</h3>
+  <div class="modal recog-modal settings-modal parse-settings-modal" role="dialog" aria-modal="true" aria-labelledby="setModalTitle" aria-describedby="setModalDesc" tabindex="-1">
+    <header class="settings-heading">
+      <span class="settings-mark" aria-hidden="true">解</span>
+      <div>
+        <span class="settings-kicker">SCRIPT INTERPRETER</span>
+        <h3 id="setModalTitle">格式识别与解析规则</h3>
+        <p id="setModalDesc">先让 Galweave 读懂脚本结构，再开始翻译。自动识别适合大多数文本，手动规则负责特殊格式。</p>
+      </div>
+    </header>
 
-    <!-- 一、自动识别 -->
-    <div class="field">
-      <label>① 自动识别格式</label>
-      <div class="row">
-        <label class="check-label modal-check"><input type="radio" name="recogSrc" id="recogSrcFile" checked> 当前已打开文件（原始文本）</label>
-        <label class="check-label modal-check"><input type="radio" name="recogSrc" id="recogSrcPaste"> 粘贴 / 选择文本</label>
-      </div>
-      <textarea id="recogText" rows="4" placeholder="粘贴需要识别的文本（原格式，如 ○0001○… / ☆0001☆…）…" hidden></textarea>
-      <div class="row" id="recogFileRow" hidden>
-        <button id="btnRecogPick" class="toolbtn secondary nowrap">选择文本文件…</button>
-        <input type="file" id="recogFile" accept=".txt,.ks,.ks.txt,text/plain" hidden>
-        <span class="hint-inline" id="recogFileHint"></span>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <button id="btnRecogRun" class="toolbtn">识别</button>
-        <button id="btnRecogApply" class="toolbtn secondary" hidden>应用为解析规则</button>
-        <button id="btnRecogLoad" class="toolbtn secondary" hidden>规范化并载入编辑器</button>
-        <button id="btnRecogProfile" class="toolbtn secondary" hidden>下载 profile JSON</button>
-        <button id="btnRecogCanon" class="toolbtn secondary" hidden>下载规范化文本</button>
-      </div>
-      <pre class="recog-report" id="recogOut"></pre>
-      <div class="hint">
-        识别：自动探测标记/编号/说话人（前缀段 / [[名]] / 【名】）/ 行类型与问题清单，并模拟编辑器对比导入效果。<br>
-        「应用为解析规则」= 把识别结果保存到下面的标记/正则（重新导入原文件生效）；「规范化并载入编辑器」= 转成 ☆/★ 直接开翻（翻译完可用脚本 --restore 还原）。
-      </div>
-    </div>
-
-    <div class="field">
-      <label>② 手动规则</label>
-      <div class="row">
-        <div class="field"><label>原文标记字符</label><input type="text" id="setOpen" maxlength="2"></div>
-        <div class="field"><label>译文标记字符</label><input type="text" id="setClose" maxlength="2"></div>
-      </div>
-      <div class="field">
-        <label>自定义前缀正则（留空 = 按标记自动生成标准结构）</label>
-        <input type="text" id="setRegex" placeholder="^([@#][^@#]*[@#](?:[^@#]*[@#])?)([\s\S]*)$">
-      </div>
-      <div class="row">
-        <div class="field">
-          <label>注释行前缀（空格分隔，行首命中即整行跳过，如 #NOTTRANS 的 #）</label>
-          <input type="text" id="setComments" placeholder="# ; // %">
+    <div class="settings-scroll">
+      <section class="settings-section parse-auto-section" aria-labelledby="parseAutoTitle">
+        <div class="settings-section-heading">
+          <span class="settings-section-index">01</span>
+          <div><h4 id="parseAutoTitle">自动识别</h4><p>选择文本来源，生成可复用的格式档案与导入建议。</p></div>
+          <span class="settings-badge">推荐</span>
         </div>
-        <div class="field">
-          <label>名字行编号正则（空格分隔，编号命中即按名字行处理，如 ^NAME ^[0-9A-Fa-f]+N$）</label>
-          <input type="text" id="setNameIds" placeholder="^NAME ^[0-9A-Fa-f]+N$">
+        <div class="parse-source-grid" role="radiogroup" aria-label="识别文本来源">
+          <label class="source-choice">
+            <input type="radio" name="recogSrc" id="recogSrcFile" checked>
+            <span class="source-choice-body"><strong>当前脚本</strong><small>读取已打开文件的原始文本</small></span>
+          </label>
+          <label class="source-choice">
+            <input type="radio" name="recogSrc" id="recogSrcPaste">
+            <span class="source-choice-body"><strong>外部文本</strong><small>粘贴内容或另选一个脚本文件</small></span>
+          </label>
         </div>
-      </div>
-      <div class="field">
-        <label>测试行（输入一行,点「测试」看拆分结果,Enter 也可）</label>
-        <input type="text" id="setTestIn" placeholder="例如: @0003@桐吾@「こんにちは」">
-        <div class="test-out" id="setTestOut"></div>
-      </div>
-    </div>
+        <textarea id="recogText" rows="4" aria-label="待识别文本" placeholder="粘贴需要识别的原格式文本，例如 ○0001○……" hidden></textarea>
+        <div class="row recog-file-row" id="recogFileRow" hidden>
+          <button id="btnRecogPick" class="toolbtn secondary nowrap">选择文本文件</button>
+          <input type="file" id="recogFile" accept=".txt,.ks,.ks.txt,text/plain" hidden>
+          <span class="hint-inline" id="recogFileHint">支持 TXT / KS</span>
+        </div>
+        <div class="row recog-actions">
+          <button id="btnRecogRun" class="toolbtn settings-primary">开始识别</button>
+          <button id="btnRecogApply" class="toolbtn secondary" hidden>应用规则</button>
+          <button id="btnRecogLoad" class="toolbtn secondary" hidden>规范化并载入</button>
+          <button id="btnRecogProfile" class="toolbtn secondary" hidden>下载档案</button>
+          <button id="btnRecogCanon" class="toolbtn secondary" hidden>下载规范化文本</button>
+        </div>
+        <pre class="recog-report" id="recogOut" role="status" aria-live="polite"></pre>
+        <p class="settings-caption">识别会检查标记、编号、说话人、行类型与潜在问题，并模拟编辑器导入结果；只有确认后才会改动规则或载入文本。</p>
+      </section>
 
-    <div class="hint">
-      正则约定：第 1 个捕获组 = 前缀（标记+编号+说话人），第 2 个捕获组 = 正文；<br>
-      或使用命名捕获组 (?&lt;id&gt;…)(?&lt;name&gt;…)?(?&lt;content&gt;…) 直接指定编号/说话人/正文。<br>
-      注释行前缀与名字行正则默认内置（# ; // % / ^NAME / N 后缀编号），可被「应用为解析规则」自动填入，<br>
-      保存后立即生效，重新导入文件后应用。术语表、进度等数据保存在程序目录。
+      <section class="settings-section parse-manual-section" aria-labelledby="parseManualTitle">
+        <div class="settings-section-heading">
+          <span class="settings-section-index">02</span>
+          <div><h4 id="parseManualTitle">手动规则</h4><p>为自定义引擎格式微调标记、前缀和名字行。</p></div>
+          <span class="settings-badge settings-badge--muted">高级</span>
+        </div>
+        <div class="parse-mark-grid">
+          <div class="field marker-field"><label for="setOpen">原文标记</label><input type="text" id="setOpen" maxlength="2"><small>例如 ☆</small></div>
+          <div class="field marker-field"><label for="setClose">译文标记</label><input type="text" id="setClose" maxlength="2"><small>例如 ★</small></div>
+          <div class="field regex-field">
+            <label for="setRegex">自定义前缀正则</label>
+            <input type="text" id="setRegex" placeholder="留空时按标记生成标准结构">
+            <small>仅在自动结构无法覆盖脚本格式时填写</small>
+          </div>
+        </div>
+        <div class="parse-rule-grid">
+          <div class="field">
+            <label for="setComments">注释行前缀</label>
+            <input type="text" id="setComments" placeholder="# ; // %">
+            <small>用空格分隔，命中行首时跳过整行</small>
+          </div>
+          <div class="field">
+            <label for="setNameIds">名字行编号正则</label>
+            <input type="text" id="setNameIds" placeholder="^NAME ^[0-9A-Fa-f]+N$">
+            <small>用空格分隔，命中编号时按名字行处理</small>
+          </div>
+        </div>
+        <div class="parse-test-bench">
+          <div class="field">
+            <label for="setTestIn">用一行脚本验证规则</label>
+            <div class="parse-test-input">
+              <input type="text" id="setTestIn" placeholder="例如：@0003@桐吾@「こんにちは」">
+              <button id="btnTestParse" class="toolbtn secondary">测试拆分</button>
+            </div>
+          </div>
+          <div class="test-out" id="setTestOut" role="status" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <details class="settings-help">
+        <summary>规则语法与导入说明</summary>
+        <div>
+          <p>普通捕获组：第 1 组为前缀（标记、编号、说话人），第 2 组为正文。</p>
+          <p>也可使用命名捕获组 <code>(?&lt;id&gt;…)(?&lt;name&gt;…)?(?&lt;content&gt;…)</code> 直接指定结构。</p>
+          <p>“应用规则”会把识别结果写入手动规则；“规范化并载入”会转为 ☆ / ★ 格式直接开始翻译。保存规则后需重新导入原文件。</p>
+        </div>
+      </details>
     </div>
-    <div class="actions">
+    <div class="actions settings-actions">
       <button id="btnSetCancel" class="secondary">取消</button>
-      <button id="btnTestParse" class="toolbtn secondary">测试</button>
-      <button id="btnSetSave">保存</button>
+      <span class="settings-action-note">规则保存后，在下次导入时生效</span>
+      <button id="btnSetSave">保存规则</button>
     </div>
   </div>
 </div>
@@ -479,64 +508,109 @@
 
 <!-- 主题设置模态(界面设置 + 文本设置,顶部 tab 切换) -->
 <div id="themeModal" class="modal-mask">
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="themeModalTitle" tabindex="-1">
-    <h3 id="themeModalTitle">主题设置</h3>
-    <div class="modal-tabs" id="thTabs">
-      <button type="button" data-thpage="0" class="active">界面设置</button>
-      <button type="button" data-thpage="1">文本设置</button>
+  <div class="modal settings-modal theme-settings-modal" role="dialog" aria-modal="true" aria-labelledby="themeModalTitle" aria-describedby="themeModalDesc" tabindex="-1">
+    <header class="settings-heading">
+      <span class="settings-mark" aria-hidden="true">景</span>
+      <div>
+        <span class="settings-kicker">READING ATMOSPHERE</span>
+        <h3 id="themeModalTitle">主题与阅读体验</h3>
+        <p id="themeModalDesc">调整工作台氛围与文本排印。所有预览都可随时取消，不会影响脚本内容。</p>
+      </div>
+    </header>
+    <div class="modal-tabs settings-tabs" id="thTabs" role="tablist" aria-label="主题设置分类">
+      <button type="button" data-thpage="0" class="active" role="tab" aria-selected="true" aria-controls="thPage0" id="thTab0">界面氛围</button>
+      <button type="button" data-thpage="1" role="tab" aria-selected="false" aria-controls="thPage1" id="thTab1">文本排印</button>
     </div>
-    <div id="thPage0">
-      <div class="field">
-        <label>主题模式</label>
-        <label class="check-label modal-check"><input type="radio" name="thMode" value="dark" checked> 深色</label>
-        <label class="check-label modal-check"><input type="radio" name="thMode" value="light"> 浅色</label>
-        <label class="check-label modal-check"><input type="radio" name="thMode" value="bw"> 黑白</label>
+    <div class="settings-scroll">
+      <div id="thPage0" role="tabpanel" aria-labelledby="thTab0">
+        <section class="settings-section theme-mode-section" aria-labelledby="themeModeTitle">
+          <div class="settings-section-heading compact">
+            <span class="settings-section-index">01</span>
+            <div><h4 id="themeModeTitle">选择工作台基调</h4><p>主题会立即预览，保存后才会记住。</p></div>
+          </div>
+          <div class="theme-choice-grid">
+            <label class="theme-choice">
+              <input class="theme-choice-input" type="radio" name="thMode" value="dark" checked>
+              <span class="theme-card-preview theme-card-preview--dark" aria-hidden="true"><i></i><b></b><em></em></span>
+              <span class="theme-choice-copy"><strong>夜读</strong><small>低亮度 · 蓝灰纸墨</small></span>
+            </label>
+            <label class="theme-choice">
+              <input class="theme-choice-input" type="radio" name="thMode" value="light">
+              <span class="theme-card-preview theme-card-preview--light" aria-hidden="true"><i></i><b></b><em></em></span>
+              <span class="theme-choice-copy"><strong>昼笺</strong><small>暖白底 · 清晰长读</small></span>
+            </label>
+            <label class="theme-choice">
+              <input class="theme-choice-input" type="radio" name="thMode" value="bw">
+              <span class="theme-card-preview theme-card-preview--bw" aria-hidden="true"><i></i><b></b><em></em></span>
+              <span class="theme-choice-copy"><strong>墨影</strong><small>纯灰阶 · 专注校对</small></span>
+            </label>
+          </div>
+        </section>
+
+        <section class="settings-section background-section" aria-labelledby="backgroundTitle">
+          <div class="settings-section-heading compact">
+            <span class="settings-section-index">02</span>
+            <div><h4 id="backgroundTitle">舞台背景</h4><p>用一张场景图建立作品氛围，并用遮罩保持文字可读。</p></div>
+          </div>
+          <div class="background-composer">
+            <div class="preview background-preview" id="bgPreview"><span>NO BACKDROP</span><small>尚未设置背景</small></div>
+            <div class="background-controls">
+              <div class="field">
+                <label for="bgFile">背景图片</label>
+                <input type="file" id="bgFile" accept="image/jpeg,image/png,image/webp,image/gif">
+                <small>JPG / PNG / WEBP，最大 4 MB</small>
+              </div>
+              <div class="field opacity-field">
+                <div class="field-label-row"><label for="bgOpacity">遮罩强度</label><output id="bgOpacityVal" for="bgOpacity"></output></div>
+                <input type="range" id="bgOpacity" min="0.5" max="0.98" step="0.01">
+                <small>数值越高，背景越收敛、文字越清晰</small>
+              </div>
+              <div class="field">
+                <label for="bgFit">画面填充</label>
+                <select id="bgFit">
+                  <option value="cover">铺满裁剪（推荐）</option>
+                  <option value="contain">完整显示</option>
+                  <option value="stretch">拉伸铺满</option>
+                  <option value="tile">平铺</option>
+                  <option value="auto">原始大小居中</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
-      <div class="field">
-        <label>选择背景图片（jpg / png / webp，建议 2MB 以内）</label>
-        <input type="file" id="bgFile" accept="image/jpeg,image/png,image/webp,image/gif">
-      </div>
-      <div class="field">
-        <label>遮罩不透明度（越低背景越明显，文字越淡）</label>
-        <input type="range" id="bgOpacity" min="0.5" max="0.98" step="0.01">
-        <span id="bgOpacityVal"></span>
-      </div>
-      <div class="field">
-        <label>填充方式</label>
-        <select id="bgFit">
-          <option value="cover">铺满裁剪（默认）</option>
-          <option value="contain">完整显示</option>
-          <option value="stretch">拉伸铺满</option>
-          <option value="tile">平铺</option>
-          <option value="auto">原始大小居中</option>
-        </select>
-      </div>
-      <div class="preview" id="bgPreview">未设置背景</div>
-    </div>
-    <div id="thPage1" class="hidden">
-      <div class="field">
-        <label>原文字体（留空=跟随主题；可输入系统任意已安装字体，多个用英文逗号分隔）</label>
-        <input type="text" id="foFamily" list="fontPresets" placeholder="如：微软雅黑 或 自定义字体名">
-      </div>
-      <div class="field">
-        <label>原文字号 / 颜色</label>
-        <div class="row">
-          <input type="number" id="foSize" min="8" max="72" step="1" value="17">
-          <input type="color" id="foColor" value="#aeb9c9" title="原文颜色">
-          <button id="foReset" class="toolbtn secondary nowrap" title="恢复默认">恢复默认</button>
-        </div>
-      </div>
-      <div class="field">
-        <label>译文字体（留空=跟随主题；可输入系统任意已安装字体，多个用英文逗号分隔）</label>
-        <input type="text" id="ftFamily" list="fontPresets" placeholder="如：微软雅黑 或 自定义字体名">
-      </div>
-      <div class="field">
-        <label>译文字号 / 颜色</label>
-        <div class="row">
-          <input type="number" id="ftSize" min="8" max="72" step="1" value="17">
-          <input type="color" id="ftColor" value="#e6edf7" title="译文颜色">
-          <button id="ftReset" class="toolbtn secondary nowrap" title="恢复默认">恢复默认</button>
-        </div>
+      <div id="thPage1" class="hidden" role="tabpanel" aria-labelledby="thTab1">
+        <section class="settings-section typography-section" aria-labelledby="typographyTitle">
+          <div class="settings-section-heading compact">
+            <span class="settings-section-index">01</span>
+            <div><h4 id="typographyTitle">对白排印</h4><p>分别控制原文的阅读质感与译文的输入清晰度。</p></div>
+          </div>
+          <div class="typography-grid">
+            <article class="type-card type-card--original">
+              <header><span>ORIGINAL</span><strong>原文</strong></header>
+              <p class="type-specimen" lang="ja">「この物語を、もう一度。」</p>
+              <div class="field"><label for="foFamily">字体族</label><input type="text" id="foFamily" list="fontPresets" placeholder="留空以跟随主题"></div>
+              <div class="type-controls">
+                <div class="field size-field"><label for="foSize">字号</label><input type="number" id="foSize" min="8" max="72" step="1" value="17"></div>
+                <div class="field color-field"><label for="foColor">颜色</label><input type="color" id="foColor" value="#aeb9c9" title="原文颜色"></div>
+                <label class="follow-theme" title="不自定义颜色，始终使用当前主题默认字色"><input type="checkbox" id="foFollow" checked><span>跟随主题</span></label>
+                <button id="foReset" class="toolbtn secondary nowrap" title="恢复原文字体默认值">重置</button>
+              </div>
+            </article>
+            <article class="type-card type-card--translation">
+              <header><span>TRANSLATION</span><strong>译文</strong></header>
+              <p class="type-specimen">“将这个故事，再讲一次。”</p>
+              <div class="field"><label for="ftFamily">字体族</label><input type="text" id="ftFamily" list="fontPresets" placeholder="留空以跟随主题"></div>
+              <div class="type-controls">
+                <div class="field size-field"><label for="ftSize">字号</label><input type="number" id="ftSize" min="8" max="72" step="1" value="17"></div>
+                <div class="field color-field"><label for="ftColor">颜色</label><input type="color" id="ftColor" value="#e6edf7" title="译文颜色"></div>
+                <label class="follow-theme" title="不自定义颜色，始终使用当前主题默认字色"><input type="checkbox" id="ftFollow" checked><span>跟随主题</span></label>
+                <button id="ftReset" class="toolbtn secondary nowrap" title="恢复译文字体默认值">重置</button>
+              </div>
+            </article>
+          </div>
+          <p class="settings-caption">颜色按主题分别记忆；切换夜读、昼笺或墨影时，会自动使用各自的颜色槽位。</p>
+        </section>
       </div>
     </div>
     <datalist id="fontPresets">
@@ -549,11 +623,11 @@
       <option value="Sarasa Gothic SC"><option value="Sarasa Mono SC">
       <option value="Noto Sans CJK SC"><option value="Noto Serif CJK SC">
     </datalist>
-    <div id="bgHint" class="hint">背景图片会内嵌保存到本机设置（桌面版 settings.json / 浏览器 localStorage），不随文件分发。字体与颜色同样保存在主题设置中。</div>
-    <div class="actions">
+    <div class="actions settings-actions">
       <button id="btnBgClear" class="secondary push-left">清除背景</button>
+      <span id="bgHint" class="settings-action-note">外观设置仅保存在本机，不随脚本分发</span>
       <button id="btnBgCancel" class="secondary">取消</button>
-      <button id="btnBgSave">保存</button>
+      <button id="btnBgSave">保存外观</button>
     </div>
   </div>
 </div>

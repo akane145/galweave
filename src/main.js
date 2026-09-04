@@ -1,7 +1,7 @@
 // main.js — 应用入口 / 模块编排
 // 职责: 初始化各模块,绑定事件,编排 导入/导出/保存/搜索/术语表/机翻/文件夹 流程。
 
-import { parseFile, buildExport, transValue, stripBrackets, setParseConf, getParseConf, parsePrefix, migrateNameTranslations as migrateNameTranslationsPure, mergeSavedState } from './parsers.js';
+import { parseFile, buildExport, transValue, stripBrackets, setParseConf, getParseConf, parsePrefix, validateParseConf, migrateNameTranslations as migrateNameTranslationsPure, mergeSavedState } from './parsers.js';
 import { loadSettings, saveSettings, loadBackground, saveBackground, clearBackground, loadFontSettings, saveFontSettings, loadThemeMode, saveThemeMode, loadFavorites, saveFavorites } from './settings.js';
 import * as theme from './theme.js';
 import * as model from './model.js';
@@ -14,7 +14,8 @@ import * as tb from './tabdock.js';
 import * as fsx from './fs.js';
 import * as gloss from './glossary.js';
 import * as mt from './mt.js';
-import { detect as recogDetect, canonicalize as recogCanonicalize, renderReport, analyzeWithParsers, restore as recogRestore } from './recognize.js';
+import { detect as recogDetect, renderReport } from './recognize.js';
+import { canonicalizeProfile, enrichDetectionProfile } from './universal-parser.js';
 import * as proof from './proof.js';
 import * as dictx from './dict.js';
 import { createMdxProvider, createPathMdxProvider, createTauriMdd, mimeFromExt, srcToResourceKey, isMddResourceSrc, linkTarget } from './mdx.js';
@@ -23,6 +24,11 @@ import * as suggest from './suggest.js';
 import * as snips from './snippets.js';
 import { parseCsv, toGlossary, fromGlossary } from './csv.js';
 import { profileForDictionary, dictionaryCssCandidates, profileNormalizationCss } from './dictionary-profiles.js';
+import { toast, toastError } from './toast.js';
+import { initPalette } from './palette.js';
+import { bindRowContextMenu } from './rowmenu.js';
+import { countStates, segments, percentText, isComplete, hasData, summaryText } from './filestats.js';
+import { showConfirm, showMtCompare } from './modals.js';
 
 /* ---------------- 状态 ---------------- */
 
@@ -103,7 +109,7 @@ proof.setProofUI({ refreshRow: rdr.refreshRow, refreshAll: rdr.refreshAllRows, r
 const THEME_KEY = 'galtrans_theme'; // 旧版 localStorage 键(首次启动一次性迁移)
 
 let currentMode = 'dark';
-let currentFonts = null; // { orig:{family,size,color}, trans:{...} },null=未设置
+let currentFonts = null; // { orig:{family,size,color,colorLight,colorBw}, trans:{...} },null=未设置;颜色按主题分槽
 
 /** 应用主题模式(深色/浅色/黑白)到 DOM */
 function applyTheme(mode){
@@ -116,6 +122,10 @@ function applyTheme(mode){
     btn.textContent = labels[currentMode];
     btn.setAttribute('aria-label', `当前主题：${labels[currentMode]}，点击切换主题`);
   }
+  // 字体颜色按主题分槽保存,主题切换后需按新模式重新取色生效
+  if (currentFonts) applyFonts(currentFonts);
+  // 主题设置弹窗开着时,颜色输入框同步到新模式对应的槽位
+  if (document.getElementById('themeModal').classList.contains('show')) syncFontUI(currentFonts);
 }
 
 /** 应用字体设置到 CSS 变量(仅用户设置项覆盖,其余跟随主题) */
@@ -125,7 +135,8 @@ function applyFonts(font){
     const el = document.documentElement;
     el.style.setProperty('--' + prefix + '-font-family', g.family || '');
     el.style.setProperty('--' + prefix + '-font-size', g.size ? (g.size + 'px') : '');
-    el.style.setProperty('--' + prefix + '-font-color', g.color || '');
+    // 颜色取当前主题模式对应的槽位(空=跟随主题变量)
+    el.style.setProperty('--' + prefix + '-font-color', theme.colorForMode(g, currentMode));
   };
   set('orig', currentFonts.orig);
   set('trans', currentFonts.trans);
@@ -164,37 +175,61 @@ function colorToHex(v){
   return /^#[0-9a-fA-F]{6}$/.test(c) ? c.toLowerCase() : '#000000';
 }
 
-function syncFontUI(font){
-  const f = theme.mergeFontSettings(font);
-  document.getElementById('foFamily').value = f.orig.family;
-  document.getElementById('foSize').value = String(f.orig.size);
-  document.getElementById('foColor').value = colorToHex(f.orig.color || getComputedStyle(document.documentElement).getPropertyValue('--orig-text').trim() || '#aeb9c9');
-  document.getElementById('ftFamily').value = f.trans.family;
-  document.getElementById('ftSize').value = String(f.trans.size);
-  document.getElementById('ftColor').value = colorToHex(f.trans.color || getComputedStyle(document.documentElement).getPropertyValue('--trans-text').trim() || '#e6edf7');
+/** 当前主题下的主题默认字色(供「跟随主题」时的色块预览) */
+function themeDefaultColor(prefix){
+  const fallback = prefix === 'orig' ? '#aeb9c9' : '#e6edf7';
+  const v = getComputedStyle(document.documentElement).getPropertyValue(prefix === 'orig' ? '--orig-text' : '--trans-text').trim();
+  return /^#[0-9a-fA-F]{6}$/.test(v) ? v.toLowerCase() : fallback;
 }
 
+/** 同步一组字体行(原文/译文)的弹窗控件: 家族/字号全局,颜色取当前主题槽位 */
+function syncFontRow(prefix, g){
+  document.getElementById(prefix + 'Family').value = g.family;
+  document.getElementById(prefix + 'Size').value = String(g.size);
+  const follow = document.getElementById(prefix + 'Follow');
+  const color = document.getElementById(prefix + 'Color');
+  const stored = theme.colorForMode(g, currentMode);
+  follow.checked = !stored;                 // 空=跟随主题
+  color.disabled = !stored;
+  color.value = colorToHex(stored || themeDefaultColor(prefix));
+}
+
+function syncFontUI(font){
+  const f = theme.mergeFontSettings(font);
+  syncFontRow('fo', f.orig);
+  syncFontRow('ft', f.trans);
+}
+
+/**
+ * 从弹窗读回字体设置。
+ * 颜色槽位只写当前主题对应的那个(勾选「跟随主题」写空串),
+ * 其余主题的已存颜色原样保留,避免切一次主题保存就丢掉其它主题的自定义色。
+ */
 function readFontFromUI(){
-  return {
-    orig: {
-      family: document.getElementById('foFamily').value.trim(),
-      size: Number(document.getElementById('foSize').value) || 17,
-      color: document.getElementById('foColor').value,
-    },
-    trans: {
-      family: document.getElementById('ftFamily').value.trim(),
-      size: Number(document.getElementById('ftSize').value) || 17,
-      color: document.getElementById('ftColor').value,
-    },
+  const readRow = (which, prefix) => {
+    const prev = currentFonts ? currentFonts[which] : null;
+    const follow = document.getElementById(prefix + 'Follow').checked;
+    const color = follow ? '' : colorToHex(document.getElementById(prefix + 'Color').value);
+    const slot = currentMode === 'light' ? 'colorLight' : (currentMode === 'bw' ? 'colorBw' : 'color');
+    const out = {
+      family: document.getElementById(prefix + 'Family').value.trim(),
+      size: Number(document.getElementById(prefix + 'Size').value) || 17,
+      color: prev ? prev.color : '',
+      colorLight: prev ? prev.colorLight : '',
+      colorBw: prev ? prev.colorBw : '',
+    };
+    out[slot] = color;
+    return out;
   };
+  return { orig: readRow('orig', 'fo'), trans: readRow('trans', 'ft') };
 }
 
 function resetOrigFont(){
-  syncFontUI({ ...currentFonts, orig: { family: '', size: 17, color: '' } });
+  syncFontRow('fo', { family: '', size: 17, color: '', colorLight: '', colorBw: '' });
   previewFontFromUI();
 }
 function resetTransFont(){
-  syncFontUI({ ...currentFonts, trans: { family: '', size: 17, color: '' } });
+  syncFontRow('ft', { family: '', size: 17, color: '', colorLight: '', colorBw: '' });
   previewFontFromUI();
 }
 
@@ -205,7 +240,7 @@ function previewFontFromUI(){
 
 /* ---------------- 进度 / 撤销按钮 / 统计 ---------------- */
 
-function updateProgress(){ rdr.updateProgress(); updateStats(); syncEditorialMeta(); }
+function updateProgress(){ rdr.updateProgress(); updateStats(); syncEditorialMeta(); updateActiveTabProgress(); }
 
 // 字数统计: 总字符 / 已翻译字符 / 完成百分比(基于译文字符数)
 function updateStats(){
@@ -370,9 +405,9 @@ function gotoMatch(delta){
 }
 
 function replaceCurrent(){
-  if (matchIndex < 0 || !matches.length){ alert('没有可替换的匹配。'); return; }
+  if (matchIndex < 0 || !matches.length){ toastError('没有可替换的匹配。'); return; }
   const m = matches[matchIndex];
-  if (m.col === 'orig'){ alert('当前匹配位于原文中,替换仅作用于译文与名字。'); return; }
+  if (m.col === 'orig'){ toast('当前匹配位于原文中,替换仅作用于译文与名字。'); return; }
   const snap = proof.isEnabled() ? proof.snapshot() : null;
   model.pushUndo([m.i]);
   clearPushTimers();
@@ -395,7 +430,7 @@ function replaceCurrent(){
 async function replaceAll(){
   const q = $q.value;
   if (q === '' || $scope.value === 'orig'){
-    alert('请先输入查找内容,并确保搜索范围不是「仅原文」。');
+    toastError('请先输入查找内容,并确保搜索范围不是「仅原文」。');
     return;
   }
   const rep = $r.value;
@@ -412,7 +447,7 @@ async function replaceAll(){
     const c = s.countMatches(model.getParas(), q, sc, cs);
     grand = c.total + c.nameTotal;
   }
-  if (grand === 0){ alert('没有找到可替换的匹配。'); return; }
+  if (grand === 0){ toastError('没有找到可替换的匹配。'); return; }
   const label = (sc === 'name') ? '名字' : '译文';
   if (!confirm('将替换 ' + label + ' ' + grand + ' 处\n“' + q + '” → “' + rep + '”\n确定继续?')) return;
 
@@ -439,7 +474,7 @@ async function replaceAll(){
     rdr.refreshAllRows(); // 数据已写回 model,刷新已挂载行 DOM
     recomputeMatchesUI(true);
     updateProgress();
-    alert('已替换 ' + grand + ' 处。');
+    toast('已替换 ' + grand + ' 处。');
     return;
   }
   for (const d of (r.deltas || [])){
@@ -452,20 +487,20 @@ async function replaceAll(){
   rdr.refreshAllRows(); // 数据已写回 model,刷新已挂载行 DOM(否则前端不实时显示)
   recomputeMatchesUI(true);
   updateProgress();
-  alert('已替换 ' + grand + ' 处。');
+  toast('已替换 ' + grand + ' 处。');
 }
 
 function jumpToLine(){
   const v = document.getElementById('jumpInput').value.trim();
-  if (!v){ alert('请输入要跳转的行号/编号'); return; }
+  if (!v){ toastError('请输入要跳转的行号/编号'); return; }
   if (!_synced){ _synced = true; wkr.syncSearchShadow({ full: model.getParas() }); }
   wkr.searchJumpToIndex(v).then(idx => {
-    if (idx === -1){ alert('未找到编号为「' + v + '」的行'); return; }
+    if (idx === -1){ toastError('未找到编号为「' + v + '」的行'); return; }
     rdr.scrollRowIntoView(idx);
     rdr.renderWindow(true);
     rdr.focusIdx(idx);
     document.getElementById('jumpInput').value = '';
-  }).catch(e => alert('跳转失败: ' + e.message));
+  }).catch(e => toastError('跳转失败: ' + e.message));
 }
 
 // 跳到下一个未翻译的行(F2): 从当前行往后找第一个未翻译;到底则从头循环;全翻完提示
@@ -695,6 +730,8 @@ function renderTabs(){
     el.setAttribute('role', 'tab');
     el.setAttribute('aria-selected', String(t.key === active));
     el.setAttribute('aria-label', '打开文档 ' + t.name);
+    const row = document.createElement('div');
+    row.className = 'dt-row';
     const label = document.createElement('span');
     label.className = 'dt-label';
     label.textContent = t.name;
@@ -706,13 +743,64 @@ function renderTabs(){
     close.setAttribute('aria-label', '关闭文档 ' + t.name);
     close.title = '关闭';
     close.addEventListener('click', (e) => { e.stopPropagation(); closeDoc(t.key); });
+    row.append(label, close);
+    el.appendChild(row);
+
+    const prog = buildTabProgress(tabCounts(t));
+    if (prog) el.appendChild(prog);
+
     el.addEventListener('click', () => switchDoc(t.key));
     el.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); switchDoc(t.key); }
     });
-    el.append(label, close);
     bar.appendChild(el);
   }
+}
+
+// 文档标签分段进度条（规范 §7.5）—— 纯逻辑见 src/filestats.js
+function tabCounts(t){
+  if (t.key === tb.activeKey()){
+    return countStates(model.snapshotState().paras);
+  }
+  const snap = tb.getSnap(t.key);
+  return countStates(snap && snap.model ? snap.model.paras : null);
+}
+
+// 生成 `.dt-prog` 节点（分段条 + 百分比）。无数据时返回 null（不画条）。
+function buildTabProgress(counts){
+  if (!hasData(counts)) return null;
+  const prog = document.createElement('div');
+  prog.className = 'dt-prog' + (isComplete(counts) ? ' complete' : '');
+  const a11y = summaryText(counts);
+  prog.setAttribute('aria-label', a11y);
+  prog.title = a11y;
+
+  const bar = document.createElement('div');
+  bar.className = 'seg-bar';
+  for (const s of segments(counts)){
+    const seg = document.createElement('div');
+    seg.className = 'seg ' + s.key;
+    seg.style.flexGrow = String(s.ratio > 0 ? s.ratio : 0.0001);
+    bar.appendChild(seg);
+  }
+  const pct = document.createElement('span');
+  pct.className = 'dt-pct';
+  pct.textContent = percentText(counts);
+
+  prog.append(bar, pct);
+  return prog;
+}
+
+// 编辑中只刷新活动标签的进度条，避免整条重建导致标签条滚动复位 / 闪烁。
+function updateActiveTabProgress(){
+  const el = document.querySelector('.doc-tab.active');
+  if (!el) return;
+  const old = el.querySelector('.dt-prog');
+  if (old) old.remove();
+  const prog = buildTabProgress(tabCounts({ key: tb.activeKey() }));
+  if (!prog) return;
+  const row = el.querySelector('.dt-row');
+  if (row) row.after(prog); else el.appendChild(prog);
 }
 
 async function importWithPicker(){
@@ -739,7 +827,7 @@ function saveSuggestedName(){
 }
 
 async function saveDirect(){
-  if (!model.getParas().length){ alert('请先导入文本文件'); return; }
+  if (!model.getParas().length){ toastError('请先导入文本文件'); return; }
   await proof.flushSave(); // 先落盘校对数据(与源文件保持一致)
   await model.flushAutosave();
   const content = buildExport(model.getParas(), model.getNl(), model.getTrailingBlank());
@@ -782,7 +870,7 @@ async function saveDirect(){
 }
 
 async function exportFile(){
-  if (!model.getParas().length){ alert('请先导入文本文件'); return; }
+  if (!model.getParas().length){ toastError('请先导入文本文件'); return; }
   await proof.flushSave();
   const content = buildExport(model.getParas(), model.getNl(), model.getTrailingBlank());
   const outName = '译文_' + saveSuggestedName();
@@ -802,11 +890,11 @@ async function exportFile(){
 }
 
 async function restoreProgress(){
-  if (!model.getFilename()){ alert('请先导入文件'); return; }
+  if (!model.getFilename()){ toastError('请先导入文件'); return; }
   const saved = await fsx.savedState(model.getStateKey());
   if (!saved || !saved.paras || !saved.paras.length){
     const where = fsx.isTauri() && model.getFilePath() ? ('（' + fsx.progressPathDisplay(model.getFilePath()) + '）') : '';
-    alert('没有找到「' + model.getFilename() + '」的已保存进度' + where);
+    toastError('没有找到「' + model.getFilename() + '」的已保存进度' + where);
     return;
   }
   // 与导入恢复一致: 合并而非覆盖 —— 当前文件已有译文优先,只补未翻译的行
@@ -818,9 +906,14 @@ async function restoreProgress(){
   updateProgress(); // 恢复进度后刷新字数统计
 }
 
-function clearAll(){
+async function clearAll(){
   if (!model.getParas().length) return;
-  if (!confirm('确定清空当前文件的全部翻译内容？\n（人名/说话人译名会保留，只清空译文正文）')) return;
+  const ok = await showConfirm({
+    title: '清空当前文件的全部翻译内容',
+    message: '人名 / 说话人译名会保留，只清空译文正文。\n此操作可用 Ctrl+Z 撤销。',
+    confirmText: '清空', danger: true,
+  });
+  if (!ok) return;
   pushUndoAll();
   model.getParas().forEach(p => {
     p.translation = ''; // 只清译文正文;人名(nameTr)保留,清空翻译不连带删人名
@@ -835,11 +928,16 @@ function clearAll(){
 
 // 清除当前文件的已保存进度:删除该文件的进度记录,重新导入完全干净(无恢复提示)
 async function clearProgress(){
-  if (!model.getFilename()){ alert('请先导入文件'); return; }
-  if (!confirm('确定删除「' + model.getFilename() + '」的已保存翻译进度与校对数据？\n重新导入该文件时将全新开始,不会恢复任何内容。')) return;
+  if (!model.getFilename()){ toastError('请先导入文件'); return; }
+  const ok = await showConfirm({
+    title: '删除「' + model.getFilename() + '」的已保存进度与校对数据',
+    message: '重新导入该文件时将全新开始，不会恢复任何内容。\n此操作不可撤销。',
+    confirmText: '删除', danger: true,
+  });
+  if (!ok) return;
   await fsx.removeSavedState(model.getStateKey());
   await proof.clearForFile(); // 同时删除该文件的校对数据(批注/状态/修改记录)
-  alert('已清除「' + model.getFilename() + '」的已保存进度与校对数据。');
+  toast('已清除「' + model.getFilename() + '」的已保存进度与校对数据。');
 }
 
 /* ---------------- 术语表 UI ---------------- */
@@ -895,8 +993,9 @@ function glossRow(src, dst, onUpdate){
   const del = document.createElement('button');
   del.textContent = '✕';
   del.title = '删除「' + src + '」';
-  del.addEventListener('click', () => {
-    if (confirm('删除术语「' + src + '」?')) onUpdate(src, '');
+  del.addEventListener('click', async () => {
+    const ok = await showConfirm({ title: '删除术语「' + src + '」', message: '该术语将从当前术语表移除，无法撤销。', confirmText: '删除', danger: true });
+    if (ok) onUpdate(src, '');
   });
   s1.addEventListener('change', () => {
     const nk = s1.value.trim();
@@ -906,7 +1005,17 @@ function glossRow(src, dst, onUpdate){
     onUpdate(nk, dst);
   });
   s2.addEventListener('change', () => onUpdate(src, s2.value.trim()));
-  row.append(s1, s2, del);
+  const ins = document.createElement('button');
+  ins.type = 'button';
+  ins.className = 'gloss-insert';
+  ins.textContent = '插入';
+  ins.title = '把「' + dst + '」插入当前正在编辑的行';
+  ins.addEventListener('click', () => {
+    const idx = rdr.getFocusIdx();
+    if (idx < 0){ toastError('请先点选要插入译文的目标行'); return; }
+    insertTerm(idx, dst);
+  });
+  row.append(s1, s2, ins, del);
   return row;
 }
 
@@ -924,7 +1033,7 @@ function addGlossEntry(kind){
   const dstId = kind === 'name' ? 'nameAddDst' : 'termAddDst';
   const src = document.getElementById(srcId).value.trim();
   const dst = document.getElementById(dstId).value.trim();
-  if (!src || !dst){ alert('请填写原文与译文'); return; }
+  if (!src || !dst){ toastError('请填写原文与译文'); return; }
   const table = kind === 'name' ? glossData.names : glossData.terms;
   table[src] = dst;
   document.getElementById(srcId).value = '';
@@ -937,7 +1046,7 @@ function addGlossEntry(kind){
 async function importGlossCsvText(text){
   let g;
   try { g = toGlossary(parseCsv(text)); }
-  catch (e){ alert('CSV 解析失败: ' + e.message); return false; }
+  catch (e){ toastError('CSV 解析失败: ' + e.message); return false; }
   const nn = Object.keys(g.names).length;
   const tn = Object.keys(g.terms).length;
   if (!nn && !tn){
@@ -963,12 +1072,12 @@ async function glossImport(){
       return;
     }
     let obj;
-    try { obj = JSON.parse(await fsx.readTextFileSource(res.path)); } catch (e){ alert('无法解析 JSON: ' + e); return; }
+    try { obj = JSON.parse(await fsx.readTextFileSource(res.path)); } catch (e){ toastError('无法解析 JSON: ' + e); return; }
     glossData = { names: obj.names || {}, terms: obj.terms || {} };
     await gloss.saveGlossaryForProject(glossData);
     renderGlossTables();
     rdr.refreshAllRows();
-    alert('术语表已导入。');
+    toast('术语表已导入。');
     return;
   }
   const input = document.createElement('input');
@@ -987,8 +1096,8 @@ async function glossImport(){
       await gloss.saveGlossaryForProject(glossData);
       renderGlossTables();
       rdr.refreshAllRows();
-      alert('术语表已导入。');
-    } catch (e){ alert('无法解析: ' + e); }
+      toast('术语表已导入。');
+    } catch (e){ toastError('无法解析: ' + e); }
   };
   input.click();
 }
@@ -1017,10 +1126,10 @@ async function glossExportCsv(){
 }
 
 async function glossApply(){
-  if (!model.getParas().length){ alert('请先导入文本文件'); return; }
+  if (!model.getParas().length){ toastError('请先导入文本文件'); return; }
   const names = Object.keys(glossData.names).length;
   const terms = Object.keys(glossData.terms).length;
-  if (!names && !terms){ alert('术语表为空。'); return; }
+  if (!names && !terms){ toastError('术语表为空。'); return; }
   if (!confirm('把术语表应用到当前文件？\n（人名自动填充 ' + names + ' 项 · 词条批量替换译文 ' + terms + ' 项）\n替换前会确认,且不影响原文。')) return;
 
   pushUndoAll();
@@ -1041,7 +1150,7 @@ async function glossApply(){
   rdr.fullRender();
   recomputeMatchesUI(true);
   updateProgress(); // 应用术语表后刷新进度 + 字数统计
-  alert('已应用术语表:\n人名自动填充 ' + n + ' 行\n译文批量修正 ' + total + ' 行');
+  toast('已应用术语表:\n人名自动填充 ' + n + ' 行\n译文批量修正 ' + total + ' 行');
 }
 
 /* ================= 词典 / 快捷片段 ================= */
@@ -1172,8 +1281,9 @@ function dictSrcRow(src){
     del.className = 'toolbtn secondary';
     del.textContent = '✕';
     del.title = '删除该词典源';
-    del.addEventListener('click', () => {
-      if (!confirm('删除词典源「' + src.name + '」?')) return;
+    del.addEventListener('click', async () => {
+      const ok = await showConfirm({ title: '删除词典源「' + src.name + '」', message: '该词典源将被移除，相关查询缓存一并清除。', confirmText: '删除', danger: true });
+      if (!ok) return;
       dictSettings.sources = dictSettings.sources.filter(x => x.id !== src.id);
       sessionDictEntries.delete(src.id);
       const mp = mdxProviders.get(src.id);
@@ -1203,7 +1313,7 @@ async function addJsonDictSource(){
     if (!res) return;
     let raw;
     try { raw = await fsx.readTextFileSource(res.path); }
-    catch (e){ alert('无法读取文件: ' + e.message); return; }
+    catch (e){ toastError('无法读取文件: ' + e.message); return; }
     await installJsonDictSource(raw, res.path, res.name.replace(/\.json$/i, ''));
     return;
   }
@@ -1214,7 +1324,7 @@ async function addJsonDictSource(){
     const f = input.files[0];
     if (!f) return;
     try { await installJsonDictSource(await f.text(), null, f.name.replace(/\.json$/i, '')); }
-    catch (e){ alert('无法读取文件: ' + e.message); }
+    catch (e){ toastError('无法读取文件: ' + e.message); }
   };
   input.click();
 }
@@ -1223,7 +1333,7 @@ async function installJsonDictSource(raw, path, fallbackName){
   const parsed = dictx.parseDictJson(raw);
   if (!parsed){ alert('词典文件格式不合法:需要 galtrans-dict-v1 JSON(含 entries 字段),详见 docs/dictionary-plugins.md。'); return; }
   const count = Object.keys(parsed.entries).length;
-  if (!count){ alert('词典文件没有有效词条。'); return; }
+  if (!count){ toastError('词典文件没有有效词条。'); return; }
   const src = { id: dictSrcId(), type: 'json', name: parsed.name || fallbackName || 'JSON 词典', enabled: true };
   if (path) src.path = path; else src.session = true;
   sessionDictEntries.set(src.id, parsed.entries);
@@ -1354,12 +1464,12 @@ function closeDictHttpModal(){
 function readDictHttpForm(){
   const url = document.getElementById('dhUrl').value.trim();
   const name = document.getElementById('dhName').value.trim() || 'HTTP 词典';
-  if (!url || !url.includes('{word}')){ alert('URL 模板必须包含 {word} 占位。'); return null; }
+  if (!url || !url.includes('{word}')){ toastError('URL 模板必须包含 {word} 占位。'); return null; }
   let headers = {};
   const hraw = document.getElementById('dhHeaders').value.trim();
   if (hraw){
     try { headers = JSON.parse(hraw); }
-    catch (e){ alert('请求头不是合法 JSON: ' + e.message); return null; }
+    catch (e){ toastError('请求头不是合法 JSON: ' + e.message); return null; }
   }
   const pathOf = id => {
     const v = document.getElementById(id).value.trim();
@@ -1819,8 +1929,9 @@ function snipRow(k){
   del.className = 'toolbtn secondary';
   del.textContent = '✕';
   del.title = '删除该片段';
-  del.addEventListener('click', () => {
-    if (!confirm('删除片段「' + k + '」?')) return;
+  del.addEventListener('click', async () => {
+    const ok = await showConfirm({ title: '删除片段「' + k + '」', message: '该片段将从片段库移除，无法撤销。', confirmText: '删除', danger: true });
+    if (!ok) return;
     delete snippetData.merged[k];
     scheduleSnipPersist();
     renderSnipTable();
@@ -1846,7 +1957,7 @@ function snipRow(k){
 function addSnippet(){
   const k = document.getElementById('snipAddSrc').value.trim();
   const v = document.getElementById('snipAddDst').value;
-  if (!k || !v.trim()){ alert('请填写缩写与展开文本'); return; }
+  if (!k || !v.trim()){ toastError('请填写缩写与展开文本'); return; }
   snippetData.merged[k] = v;
   document.getElementById('snipAddSrc').value = '';
   document.getElementById('snipAddDst').value = '';
@@ -1916,7 +2027,13 @@ function currentParseFromUI(){
 
 function testParseRule(){
   const input = document.getElementById('setTestIn').value;
-  setParseConf(currentParseFromUI()); // 临时套用 UI 上的规则做测试
+  const cfg = currentParseFromUI();
+  const errors = validateParseConf(cfg);
+  if (errors.length){
+    document.getElementById('setTestOut').textContent = '规则错误：\n' + errors.map(e => '• ' + e).join('\n');
+    return;
+  }
+  setParseConf(cfg); // 临时套用 UI 上的规则做测试
   const pp = parsePrefix(input);
   // 提取编号(命名组优先;自动模式取前缀第一段)并做名字行判定测试
   let id = pp.named ? pp.id : '';
@@ -1925,7 +2042,7 @@ function testParseRule(){
     const sep = '[' + cfg.open.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + cfg.close.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ']';
     id = (pp.prefix.replace(new RegExp('^' + sep), '').split(new RegExp(sep))[0] || '').trim();
   }
-  const pats = currentParseFromUI().nameIdPatterns;
+  const pats = cfg.nameIdPatterns;
   const isName = id && pats.some(p => new RegExp(p, 'i').test(id));
   document.getElementById('setTestOut').textContent =
     '前缀: ' + (pp.prefix === '' ? '（无）' : pp.prefix) + '\n' +
@@ -1935,12 +2052,20 @@ function testParseRule(){
 }
 
 async function saveParseSettings(){
+  const nextParse = currentParseFromUI();
+  const errors = validateParseConf(nextParse);
+  if (errors.length){
+    document.getElementById('setTestOut').textContent = '规则错误：\n' + errors.map(e => '• ' + e).join('\n');
+    toastError('解析规则无效：' + errors[0]);
+    return false;
+  }
   const s = await loadSettings();
-  s.parse = currentParseFromUI();
+  s.parse = nextParse;
   await saveSettings(s);
   setParseConf(s.parse);
   closeParseSettings();
-  alert('解析规则已保存,重新导入文件后生效。');
+  toast('解析规则已保存,重新导入文件后生效。');
+  return true;
 }
 
 function cancelParseSettings(){
@@ -1955,23 +2080,27 @@ let recogState = null; // { profile, canonicalText }
 // 打开「格式/规则」弹窗时初始化识别区块(来源/报告清空)
 function initRecogSection(){
   const srcFile = document.getElementById('recogSrcFile');
+  const srcPaste = document.getElementById('recogSrcPaste');
   const hasFile = !!model.getRawText();
-  srcFile.checked = true;
-  document.getElementById('recogSrcPaste').checked = false;
-  document.getElementById('recogText').hidden = true;
-  document.getElementById('recogFileRow').hidden = true;
+  srcFile.checked = hasFile;
+  srcPaste.checked = !hasFile;
   document.getElementById('recogFileHint').textContent = '';
   document.getElementById('recogOut').textContent = '';
   setRecogActions(false);
   recogState = null;
   srcFile.disabled = !hasFile;
-  if (!hasFile) srcFile.parentElement.title = '请先导入文件,或改用「粘贴/选择文本」';
+  srcFile.parentElement.title = hasFile ? '' : '请先导入文件，或使用「外部文本」';
+  toggleRecogSource();
 }
 
-function setRecogActions(show){
-  for (const id of ['btnRecogApply', 'btnRecogLoad', 'btnRecogProfile', 'btnRecogCanon']){
+function setRecogActions(show, canCanonicalize = show){
+  for (const id of ['btnRecogApply', 'btnRecogProfile']){
     const el = document.getElementById(id);
     if (el) el.hidden = !show;
+  }
+  for (const id of ['btnRecogLoad', 'btnRecogCanon']){
+    const el = document.getElementById(id);
+    if (el) el.hidden = !show || !canCanonicalize;
   }
 }
 
@@ -2023,7 +2152,7 @@ async function runRecognize(){
     profile = await wkr.recogDetect(text, model.getFilename() || '粘贴文本');
   } catch (e){
     // worker 异常 → 回退主线程同步 detect
-    profile = recogDetect(text, model.getFilename() || '粘贴文本');
+    profile = enrichDetectionProfile(text, recogDetect(text, model.getFilename() || '粘贴文本'));
   }
   let report = renderReport(profile);
 
@@ -2040,14 +2169,16 @@ async function runRecognize(){
         ' 名字栏可用 ' + b.named + ' 无损还原 ' + (b.roundTrip === true ? '✓' : '✗ ' + b.roundTrip);
       recogState = { profile, canonicalText: canon };
     } catch (e){
-      recogState = { profile, canonicalText: recogCanonicalize(profile) };
+      const fallback = canonicalizeProfile(profile);
+      recogState = { profile, canonicalText: fallback.ok ? fallback.text : '' };
       report += '\n(编辑器模拟失败: ' + (e && e.message ? e.message : e) + ')';
+      if (!fallback.ok) report += '\n通用规范化已停用：存在无法安全归类的物理行。可下载档案检查，但不会提供可能丢数据的规范化文本。';
     }
   } else {
     recogState = null;
   }
   out.textContent = report;
-  setRecogActions(!!recogState && !!profile.marks);
+  setRecogActions(!!recogState && !!profile.marks, !!recogState?.canonicalText);
 }
 
 // 「应用为解析规则」: 把识别出的标记/正则/注释前缀/名字行模式写入规则字段并立即保存(与导入配置一致)
@@ -2059,8 +2190,8 @@ function applyRecogConfig(){
   document.getElementById('setRegex').value = cfg.regex || '';
   document.getElementById('setComments').value = (cfg.commentPrefixes || []).join(' ');
   document.getElementById('setNameIds').value = (cfg.nameIdPatterns || []).join(' ');
-  saveParseSettings().then(() => {
-    showToast('✅ 已应用为解析规则: 原文 ' + cfg.open + ' / 译文 ' + (cfg.close || '★') + '（重新导入原文件生效）');
+  saveParseSettings().then(saved => {
+    if (saved) showToast('✅ 已应用为解析规则: 原文 ' + cfg.open + ' / 译文 ' + (cfg.close || '★') + '（重新导入原文件生效）');
   });
 }
 
@@ -2560,7 +2691,7 @@ function updateBgPreview(dataUrl, fit){
     pv.textContent = '';
   } else {
     pv.style.backgroundImage = '';
-    pv.textContent = '未设置背景';
+    pv.innerHTML = '<span>NO BACKDROP</span><small>尚未设置背景</small>';
   }
 }
 
@@ -2575,7 +2706,7 @@ function previewBg(dataUrl){
 function onBgFileChange(){
   const f = document.getElementById('bgFile').files[0];
   if (!f) return;
-  if (f.size > MAX_BG_SIZE){ alert('图片过大（超过 4MB）。请压缩后再试。'); return; }
+  if (f.size > MAX_BG_SIZE){ toastError('图片过大（超过 4MB）。请压缩后再试。'); return; }
   const reader = new FileReader();
   reader.onload = () => {
     document.getElementById('bgFile').dataset.pending = reader.result; // 暂存,保存时才落盘
@@ -2730,10 +2861,19 @@ function mtSwitchTab(btn){
   document.getElementById('mtP1').classList.toggle('hidden', p !== 1);
 }
 function thSwitchTab(btn){
-  for (const b of document.querySelectorAll('#thTabs button')) b.classList.toggle('active', b === btn);
+  for (const b of document.querySelectorAll('#thTabs button')){
+    const active = b === btn;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-selected', String(active));
+    b.tabIndex = active ? 0 : -1;
+  }
   const p = Number(btn.dataset.thpage) || 0;
-  document.getElementById('thPage0').classList.toggle('hidden', p !== 0);
-  document.getElementById('thPage1').classList.toggle('hidden', p !== 1);
+  for (const [index, id] of [[0, 'thPage0'], [1, 'thPage1']]){
+    const panel = document.getElementById(id);
+    const hidden = p !== index;
+    panel.classList.toggle('hidden', hidden);
+    panel.setAttribute('aria-hidden', String(hidden));
+  }
 }
 
 function renderMTForm(providerId, conf){
@@ -2813,15 +2953,15 @@ function readMTFormConfig(){
 // 测试翻译一句
 async function testMT(){
   const text = document.getElementById('mtTestIn').value.trim();
-  if (!text){ alert('请先输入要测试的日文。'); return; }
+  if (!text){ toastError('请先输入要测试的日文。'); return; }
   const sel = document.getElementById('mtProviderSel').value;
   const cfg = readMTFormConfig();
   if (sel === 'sakura' && !cfg.host){
-    alert('请填写 Sakura / llama.cpp 服务地址（或点「检测端口」）。');
+    toastError('请填写 Sakura / llama.cpp 服务地址（或点「检测端口」）。');
     return;
   }
   if (sel === 'llm' && (!cfg.baseUrl || !cfg.model)){
-    alert('请填写接口地址与模型名。');
+    toastError('请填写接口地址与模型名。');
     return;
   }
   const out = document.getElementById('mtTestOut');
@@ -2831,7 +2971,7 @@ async function testMT(){
     const prev = await mt.getProviderConfig(sel);
     await mt.setProviderConfig(sel, cfg);
     try {
-      const result = await mt.translateText(sel, text, glossData);
+      const result = await mt.translateTextProtected(sel, text, glossData);
       out.textContent = '日文: ' + text + '\n译文: ' + result;
     } finally {
       await mt.setProviderConfig(sel, prev);
@@ -2845,11 +2985,11 @@ async function saveMTSettingsUI(){
   const sel = document.getElementById('mtProviderSel').value;
   const cfg = readMTFormConfig();
   if (sel === 'sakura' && !cfg.host){
-    alert('请填写 Sakura / llama.cpp 服务地址（或点「检测端口」自动查找）。');
+    toastError('请填写 Sakura / llama.cpp 服务地址（或点「检测端口」自动查找）。');
     return;
   }
   if (sel === 'llm' && (!cfg.baseUrl || !cfg.model)){
-    alert('请填写接口地址与模型名。');
+    toastError('请填写接口地址与模型名。');
     return;
   }
   await mt.setProviderConfig(sel, cfg);
@@ -2861,7 +3001,7 @@ async function saveMTSettingsUI(){
   refreshMTProviderOptions();
   updateMTButtons();
   document.getElementById('mtModal').classList.remove('show');
-  alert('已保存「' + (sel === 'sakura' ? 'Sakura 本地' : '通用大模型') + '」配置。\n顶部「翻译当前行」/「批量翻译」即可使用。');
+  toast('已保存「' + (sel === 'sakura' ? 'Sakura 本地' : '通用大模型') + '」配置。\n顶部「翻译当前行」/「批量翻译」即可使用。');
 }
 
 function closeMTSettings(){
@@ -2877,34 +3017,29 @@ function currentActiveIdx(){
 async function mtTranslateCurrent(){
   const i = currentActiveIdx();
   const p = model.getPara(i);
-  if (!p){ alert('请先导入文件'); return; }
+  if (!p){ toastError('请先导入文件'); return; }
   if (p.isName) return; // NAME 条目不机翻
-  model.pushUndo([i]);
   clearPushTimers();
-  let first = true;      // 流式第一块到达前保持原文可见
-  let lastPaint = 0;
-  const paint = () => {
-    const now = Date.now();
-    if (now - lastPaint > 120){ lastPaint = now; rdr.refreshRow(i); } // 节流刷新
-  };
   try {
-    const result = await mt.translateText($mtProvider.value, p.content, glossData, (chunk) => {
-      if (first){ p.translation = ''; first = false; }
-      p.translation = (p.translation || '') + chunk;
-      paint();
-    });
-    // 清理返回: 去首尾「」防双括号,再按行类型包回
+    // 取完整结果（非流式），交给比对面板由译者裁定是否采用
+    const result = await mt.translateTextProtected($mtProvider.value, p.content, glossData);
     const cleaned = stripBrackets(String(result).trim());
-    p.translation = p.brackets ? ('「' + cleaned + '」') : cleaned;
+    const finalText = p.brackets ? ('「' + cleaned + '」') : cleaned;
+    const ok = await showMtCompare({ orig: p.content, result: finalText });
+    if (!ok){
+      rdr.refreshRow(i);
+      toast('已放弃机翻结果');
+      return;
+    }
+    model.pushUndo([i]);
+    p.translation = finalText;
     model.recalcDone(p);
     model.scheduleAutosave();
     rdr.refreshRow(i);
     updateProgress();
   } catch (e){
-    // 流式中途失败: 保留已输出的部分译文
-    if (first) p.translation = '';
     rdr.refreshRow(i);
-    alert(e.message || '翻译失败');
+    toastError(e.message || '翻译失败');
   }
 }
 
@@ -2914,7 +3049,7 @@ async function mtTranslateBatch(){
   paras.forEach((p, i) => {
     if (!p.isName && !p.done) pending.push(i);
   });
-  if (!pending.length){ alert('没有未翻译的行。'); return; }
+  if (!pending.length){ toastError('没有未翻译的行。'); return; }
   if (!confirm('将批量翻译 ' + pending.length + ' 个未翻译的行（串行调用本地模型，可能需要几分钟）。\n开始吗？')) return;
 
   model.pushUndo(pending);
@@ -2928,7 +3063,7 @@ async function mtTranslateBatch(){
     const p = paras[i];
     fnameEl.textContent = '🔄 批量机翻中 ' + (k + 1) + ' / ' + pending.length + ' …';
     try {
-      const res = await mt.translateText($mtProvider.value, p.content, glossData);
+      const res = await mt.translateTextProtected($mtProvider.value, p.content, glossData);
       // 清理返回内容: 去掉首尾「」(防止模型自带括号导致「「…」」双括号),再按行类型包回
       const cleaned = stripBrackets(String(res).trim());
       p.translation = p.brackets ? ('「' + cleaned + '」') : cleaned;
@@ -2944,9 +3079,9 @@ async function mtTranslateBatch(){
   recomputeMatchesUI(true);
   updateProgress();
   if (failed.length){
-    alert('批量翻译完成：成功 ' + ok + ' 行，失败 ' + failed.length + ' 行。\n失败原因示例：' + failed[0].err);
+    toastError('批量翻译完成：成功 ' + ok + ' 行，失败 ' + failed.length + ' 行。\n失败原因示例：' + failed[0].err);
   } else {
-    alert('批量翻译完成：' + ok + ' 行。');
+    toast('批量翻译完成：' + ok + ' 行。');
   }
 }
 
@@ -3032,6 +3167,60 @@ function setSidebarWidth(sb, width){
   sb.style.width = w + 'px';
   // The editorial layout is Grid-based, so the track token, not only the element width, controls the visible panel width.
   document.documentElement.style.setProperty('--context-w', w + 'px');
+}
+
+/**
+ * 段落行右键菜单接入。
+ * 全部动作复用既有函数,本函数不实现任何业务逻辑。
+ * 译文 textarea 上不接管右键(见 rowmenu.js 顶部设计说明),保留原生粘贴/输入法候选。
+ */
+function initRowMenu(){
+  const list = document.getElementById('list');
+  if (!list) return;
+
+  bindRowContextMenu({
+    listEl: list,
+    getCtx: (i) => {
+      const p = model.getPara(i);
+      const prov = mt.getProvider($mtProvider.value);
+      return {
+        index: i,
+        isName: !!(p && p.isName),
+        hasTranslation: !!(p && (p.isName ? p.nameTr : transValue(p))),
+        proofMode: proof.isEnabled(),
+        canUndo: model.canUndo(),
+        mtReady: !!(prov && prov.isConfigured()),
+      };
+    },
+    handlers: {
+      copyOrigToTrans: (i) => {
+        const p = model.getPara(i);
+        if (!p || p.isName) return;
+        // stripBrackets 幂等: 原文带「」时去掉,transInputHandler 会按行类型包回
+        transInputHandler(i, stripBrackets(p.content));
+        const r = rdr.getRow(i);
+        if (r) r.trans.value = transValue(p);
+      },
+      copyOrig: (i) => {
+        const p = model.getPara(i);
+        if (!p) return;
+        rdr.copyText(p.isName ? p.name : p.content);
+      },
+      mtRow: (i) => {
+        rdr.focusIdx(i);          // mtTranslateCurrent 取 currentActiveIdx(),需先聚焦
+        mtTranslateCurrent();
+      },
+      clearRow: (i) => {
+        transInputHandler(i, '');
+        const r = rdr.getRow(i);
+        if (r) r.trans.value = '';
+      },
+      proofApprove: (i) => { const r = rdr.getRow(i); if (r && r.btnApprove) r.btnApprove.click(); },
+      proofIssue:   (i) => { const r = rdr.getRow(i); if (r && r.btnIssue)   r.btnIssue.click(); },
+      proofNotes:   (i) => { const r = rdr.getRow(i); if (r && r.btnNotes)   r.btnNotes.click(); },
+      undo: () => doUndo(),
+    },
+  });
 }
 
 function initSidebarResize(){
@@ -3220,7 +3409,7 @@ async function pickFolder(){
     try {
       dir = await fsx.pickBrowserDir();
     } catch (e){
-      alert(e.message);
+      toastError(e.message);
       return;
     }
     if (!dir) return;
@@ -3231,7 +3420,7 @@ async function pickFolder(){
   try {
     buildFileTree(entries);
   } catch (e){
-    alert('无法读取文件夹: ' + e.message);
+    toastError('无法读取文件夹: ' + e.message);
   }
 }
 
@@ -3249,9 +3438,9 @@ function buildFileTree(entries){
       const item = document.createElement('div');
       item.className = 'tree-item tree-dir collapsed';
       const caret = document.createElement('span');
-      caret.className = 'caret'; caret.textContent = '▾';
+      caret.className = 'caret';           // 形状由 CSS ::before 画，不写字形字符（§7.2）
       const label = document.createElement('span');
-      label.className = 'lbl'; label.textContent = '📁 ' + en.name;
+      label.className = 'lbl'; label.textContent = en.name;
       const children = document.createElement('div');
       children.className = 'tree-children collapsed';
       item.append(caret, label);
@@ -3267,9 +3456,10 @@ function buildFileTree(entries){
       const item = document.createElement('div');
       item.className = 'tree-item tree-file';
       const spacer = document.createElement('span');
-      spacer.style.width = '14px';
+      spacer.className = 'tree-file-dot';       // 12px = caret 宽，保证文本左缘与目录对齐
+      spacer.style.width = '12px';
       const label = document.createElement('span');
-      label.className = 'fname'; label.textContent = '📄 ' + en.name;
+      label.className = 'fname'; label.textContent = en.name;
       item.append(spacer, label);
       item.title = en.path || en.name;
       item.addEventListener('click', async () => {
@@ -3284,7 +3474,7 @@ function buildFileTree(entries){
           } else {
             await openDoc({ path: en.path }, en.name);
           }
-        } catch (err){ alert('无法打开文件:' + err.message); }
+        } catch (err){ toastError('无法打开文件:' + err.message); }
       });
       parentEl.appendChild(item);
       roots.push(item);
@@ -3318,6 +3508,19 @@ function initEvents(){
   });
   document.getElementById('foReset').addEventListener('click', resetOrigFont);
   document.getElementById('ftReset').addEventListener('click', resetTransFont);
+  // 「跟随主题」勾选: 勾上=颜色槽位清空(用主题默认色),取消=恢复为当前主题默认色值供编辑
+  for (const p of ['fo', 'ft']){
+    document.getElementById(p + 'Follow').addEventListener('change', (e) => {
+      const color = document.getElementById(p + 'Color');
+      if (e.target.checked){
+        color.disabled = true;
+        color.value = colorToHex(themeDefaultColor(p));
+      } else {
+        color.disabled = false;
+      }
+      previewFontFromUI();
+    });
+  }
   // 字体/字号/颜色实时预览(输入即生效,保存才落盘)
   for (const id of ['foFamily', 'foSize', 'foColor', 'ftFamily', 'ftSize', 'ftColor']){
     document.getElementById(id).addEventListener('input', previewFontFromUI);
@@ -3390,7 +3593,21 @@ function initEvents(){
   document.getElementById('btnMTSettings').addEventListener('click', openMTSettings);
   document.getElementById('mtProviderSel').addEventListener('change', mtSelChanged);
   document.querySelectorAll('#mtTabs button').forEach(b => b.addEventListener('click', () => mtSwitchTab(b)));
-  document.querySelectorAll('#thTabs button').forEach(b => b.addEventListener('click', () => thSwitchTab(b)));
+  const themeTabs = Array.from(document.querySelectorAll('#thTabs button'));
+  themeTabs.forEach((b, index) => {
+    b.addEventListener('click', () => thSwitchTab(b));
+    b.addEventListener('keydown', (e) => {
+      let next = null;
+      if (e.key === 'ArrowRight') next = themeTabs[(index + 1) % themeTabs.length];
+      else if (e.key === 'ArrowLeft') next = themeTabs[(index - 1 + themeTabs.length) % themeTabs.length];
+      else if (e.key === 'Home') next = themeTabs[0];
+      else if (e.key === 'End') next = themeTabs[themeTabs.length - 1];
+      if (!next) return;
+      e.preventDefault();
+      thSwitchTab(next);
+      next.focus();
+    });
+  });
   document.getElementById('btnMtTest').addEventListener('click', testMT);
   document.getElementById('mtTestIn').addEventListener('keydown', (e) => {
     if (e.key === 'Enter'){ e.preventDefault(); testMT(); }
@@ -3499,10 +3716,10 @@ function initEvents(){
         await openDoc(f, f.name);
         return;
       } catch (err){
-        alert('无法读取拖入的文件: ' + err.message);
+        toastError('无法读取拖入的文件: ' + err.message);
       }
     }
-    alert('拖拽仅支持本机文件。桌面版也可用「导入文本」选择文件。');
+    toastError('拖拽仅支持本机文件。桌面版也可用「导入文本」选择文件。');
   });
 
   // 桌面版: 拖拽文件路径由 Rust 窗口事件下发(Webview 拦截了 HTML5 drop)
@@ -3513,10 +3730,10 @@ function initEvents(){
         if (!paths || !paths.length) return;
         const p = String(paths[0]);
         if (!/\.(txt|ks|ks\.txt)$/i.test(p)) {
-          alert('仅支持打开 .txt / .ks 文本文件。');
+          toastError('仅支持打开 .txt / .ks 文本文件。');
           return;
         }
-        openDoc({ path: p }, p.split(/[\\/]/).pop() || p).catch(err => alert('无法打开拖入的文件: ' + err.message));
+        openDoc({ path: p }, p.split(/[\\/]/).pop() || p).catch(err => toastError('无法打开拖入的文件: ' + err.message));
       });
     }).catch(() => {});
   }
@@ -3610,6 +3827,10 @@ async function init(){
   initMT();
   initEvents();
   initSidebarResize(); // 侧边栏拖拽调宽(恢复上次宽度)
+  initPalette();       // 命令面板 Ctrl+Shift+P(触发现有按钮,不重写业务)
+  initRowMenu();       // 段落行右键菜单(译文框保留原生菜单)
+  const emptyImport = document.getElementById('emptyImport');
+  if (emptyImport) emptyImport.addEventListener('click', importWithPicker); // 空状态页导入入口
   syncSidebarTop();
   updateUndoButtons();
   setSidebar(true);

@@ -9,7 +9,7 @@ import {
   normalizeApiUrl, buildGptBody, parseGptResponse, parseSseLine, sseTextToChunks,
   DEFAULT_LLM_SYSTEM, buildLlmSystemPrompt, buildLlmUserPrompt, buildLlmMessages,
   detectSakuraPromptVersion, buildGlossaryText, buildSakuraMessagesV,
-  migrateMtSettings,
+  migrateMtSettings, registerProvider, translateTextProtected,
 } from '../src/mt.js';
 
 /* ---------------- URL 归一化 ---------------- */
@@ -77,6 +77,32 @@ test('sseTextToChunks: 完整流拼接与 [DONE] 截断', () => {
   assert.deepEqual(sseTextToChunks(text), ['你', '好']);
   // 无 [DONE] 也能收尾
   assert.deepEqual(sseTextToChunks('data: {"choices":[{"delta":{"content":"a"}}]}\n\n'), ['a']);
+});
+
+test('translateTextProtected: provider 只看到占位符，返回后恢复控制标签', async () => {
+  let received = '';
+  registerProvider({
+    id: 'test-protected', name: 'test', isConfigured: () => true,
+    async translate(text){
+      received = text;
+      return text.replace('原文', '译文');
+    },
+  });
+  const result = await translateTextProtected('test-protected', '原文[r][np]', null);
+  assert.equal(received.includes('[r]'), false);
+  assert.equal(received.includes('[np]'), false);
+  assert.equal(result, '译文[r][np]');
+});
+
+test('translateTextProtected: provider 破坏占位符时拒绝结果', async () => {
+  registerProvider({
+    id: 'test-broken-token', name: 'test', isConfigured: () => true,
+    async translate(text){ return text.replace(/⟦[^⟧]+⟧/, ''); },
+  });
+  await assert.rejects(
+    () => translateTextProtected('test-broken-token', '原文[r]', null),
+    /破坏了脚本控制标签/
+  );
 });
 
 /* ---------------- 通用大模型提示词 ---------------- */

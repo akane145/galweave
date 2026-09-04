@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Galweave P2/P3 视觉验收页</title>
+<link rel="stylesheet" href="../src/style.css">
+<style>
+  /* 仅用于本页的排版骨架，不参与验收 */
+  body{ margin:0; padding:0 24px 80px; background:var(--bg-void); }
+  .page{ max-width:1080px; margin:0 auto; }
+  .page-hd{ padding:24px 0 8px; border-bottom:1px solid var(--border-hair); margin-bottom:24px; }
+  .page-hd h1{ margin:0 0 4px; color:var(--text-hi); font-size:var(--fs-xl); }
+  .page-hd p{ margin:0; color:var(--text-dim); font-size:var(--fs-sm); }
+  section{ margin:32px 0; }
+  h2{ margin:0 0 4px; color:var(--text-hi); font-size:var(--fs-lg); }
+  .note{ margin:0 0 12px; color:var(--text-dim); font-size:var(--fs-sm); line-height:1.7; }
+  .row{ display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
+  .swatches{ display:flex; flex-wrap:wrap; gap:8px; }
+  .demo-box{ padding:16px; border:1px solid var(--border-hair); border-radius:var(--r-md); background:var(--bg-base); }
+  .ctlbar{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+  /* 形状编码演示：脱离 .para 结构也要能看，用同样的类名 */
+  .shape-demo{ display:inline-flex; flex-direction:column; align-items:center; gap:6px; min-width:72px; }
+  .shape-demo .num{ display:block; position:relative; width:40px; height:34px; text-align:right; }
+  .shape-demo .num::after{ position:absolute; right:0; top:12px; }
+  .shape-demo span{ color:var(--text-dim); font-size:var(--fs-2xs); }
+</style>
+</head>
+<body>
+<div class="page">
+
+<div class="page-hd">
+  <h1>P2 / P3 视觉验收页</h1>
+  <p>直接引 <code>src/style.css</code>，DOM 严格对齐真实结构。密度三档按钮在页首，切换后整页生效。</p>
+</div>
+
+<div class="ctlbar">
+  <strong style="color:var(--text-mid);font-size:var(--fs-sm);align-self:center;margin-right:4px">密度：</strong>
+  <button onclick="document.documentElement.removeAttribute('data-density')">默认 cozy</button>
+  <button onclick="document.documentElement.setAttribute('data-density','compact')">compact</button>
+  <button onclick="document.documentElement.setAttribute('data-density','loose')">loose</button>
+  <span style="width:16px"></span>
+  <strong style="color:var(--text-mid);font-size:var(--fs-sm);align-self:center;margin-right:4px">主题：</strong>
+  <button onclick="document.documentElement.setAttribute('data-theme','dark')">dark</button>
+  <button onclick="document.documentElement.setAttribute('data-theme','light')">light</button>
+  <button onclick="document.documentElement.setAttribute('data-theme','bw')">bw</button>
+</div>
+
+<!-- ═══ 1. 侧栏术语表（P2-1）═══ -->
+<section>
+  <h2>1. 侧栏术语表（P2-1）</h2>
+  <p class="note">Tab 应为<strong>底部 2px 下划线</strong>而非实心填充；词条行高 32px，输入框与 ✕ 按钮<strong>顶底必须齐平</strong>（这是 <code>--row-h</code> 压制 <code>button</code> 全局 min-height 的目的）；分区标题为 overline 小字。</p>
+  <div class="demo-box">
+    <div class="side-tabs" role="tablist">
+      <button class="side-tab active">项目</button>
+      <button class="side-tab">术语</button>
+      <button class="side-tab">词典</button>
+      <button class="side-tab">校对</button>
+    </div>
+    <div style="margin-top:16px">
+      <div class="gloss-sec-title">人名表（日文原名 → 中文译名，自动应用）</div>
+      <div class="gloss-add-row">
+        <input type="text" placeholder="日文原名">
+        <input type="text" placeholder="中文译名">
+        <button>＋</button>
+      </div>
+      <div class="gloss-table" id="termTable">
+        <div class="gloss-row"><input type="text" value="藤丸"><input type="text" value="藤丸"><button>✕</button></div>
+        <div class="gloss-row"><input type="text" value="マシュ"><input type="text" value="玛修"><button>✕</button></div>
+      </div>
+      <div class="gloss-sec-title">词条表（原文命中高亮，点击插入译文）</div>
+      <div class="gloss-table">
+        <div class="gloss-row"><input type="text" value="聖剣"><input type="text" value="圣剑"><button>✕</button></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 2. 状态 pill + 四态形状编码（P2-2）═══ -->
+<section>
+  <h2>2. 状态 pill + 四态形状编码（P2-2）</h2>
+  <p class="note">pill 为胶囊形，高 18px。<strong>形状编码是色觉障碍下的唯一区分手段</strong>：红色盲下「有问题 ↔ 已定稿」的色差 ΔE 仅 15.8，必须靠 ○◐▲✓ 区分。形状全部用 CSS 画，不用字符。</p>
+  <div class="demo-box">
+    <p class="note" style="margin-bottom:8px">批注类型 pill：</p>
+    <div class="swatches">
+      <span class="pr-tag pr-tag-issue">问题</span>
+      <span class="pr-tag pr-tag-suggestion">建议</span>
+      <span class="pr-tag pr-tag-question">疑问</span>
+      <span class="pr-tag pr-tag-note">备注</span>
+      <span class="pr-badge show">3</span>
+    </div>
+    <p class="note" style="margin:16px 0 8px">四态形状（落在行号列 <code>.num::after</code>）：</p>
+    <div class="row">
+      <div class="shape-demo para">
+        <div class="num"></div><span>未翻译 ○</span>
+      </div>
+      <div class="shape-demo para pr-on pr-pending">
+        <div class="num"></div><span>待校对 ◐</span>
+      </div>
+      <div class="shape-demo para pr-on pr-issue">
+        <div class="num"></div><span>有问题 ▲</span>
+      </div>
+      <div class="shape-demo para pr-on pr-approved">
+        <div class="num"></div><span>已定稿 ✓</span>
+      </div>
+    </div>
+    <p class="note" style="margin:16px 0 0">↑ 把显示器调成灰度，形状仍应能区分四态。</p>
+  </div>
+</section>
+
+<!-- ═══ 3. 字节数指示器（P2-3）═══ -->
+<section>
+  <h2>3. 字节数指示器（P2-3）</h2>
+  <p class="note">四段阈值：&lt;70% 常态 / 70–90% 提亮 / 90–100% 琥珀+色条 / &gt;100% 朱橙+<strong>延迟 400ms 呼吸 3 次</strong>。指示器常态隐藏，鼠标悬停该行或该行为当前行时显示。点击「模拟超限」观察呼吸——它<strong>只改透明度，不位移、不改尺寸</strong>。</p>
+  <div class="ctlbar">
+    <button onclick="setBytes(60)">60 / 120（ok）</button>
+    <button onclick="setBytes(100)">100 / 120（mid）</button>
+    <button onclick="setBytes(115)">115 / 120（near）</button>
+    <button onclick="setBytes(128)">128 / 120（over → 呼吸）</button>
+  </div>
+  <div class="demo-box">
+    <div class="para active">
+      <div class="num">1</div>
+      <div class="body">
+        <div class="orig-cell"><span class="orig-name">藤丸</span><div class="orig">これはテストです</div></div>
+        <div class="translation-block">
+          <div class="row-input">
+            <textarea class="trans" rows="1">这是测试。</textarea>
+          </div>
+          <div class="byte-meter" id="bm" data-level="ok">
+            <b class="byte-num" id="bn">24</b><span class="byte-total">/ 120</span><span class="byte-enc">UTF8</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+  function setBytes(n){
+    const bm = document.getElementById('bm'), bn = document.getElementById('bn');
+    const r = n / 120;
+    const lv = r > 1 ? 'over' : r >= .9 ? 'near' : r >= .7 ? 'mid' : 'ok';
+    bm.dataset.level = lv; bn.textContent = String(n);
+    bm.title = n + ' / 120 字节（UTF-8）' + (n > 120 ? ' · 超出 ' + (n - 120) + ' 字节' : '');
+    bm.classList.remove('breathe');
+    if (lv === 'over') setTimeout(() => { void bm.offsetWidth; bm.classList.add('breathe'); }, 400);
+  }
+  </script>
+</section>
+
+<!-- ═══ 4. 控件六态（P2-4）═══ -->
+<section>
+  <h2>4. 控件六态（P2-4）</h2>
+  <p class="note">焦点环已由 <code>outline</code> 改为 <code>box-shadow</code> 外发光（用 Tab 键走一遍，不应出现与相邻行粘连的方角描边）。禁用态现在覆盖全部控件——此前只有 button 有，输入框禁用后外观不变。</p>
+  <div class="demo-box">
+    <div class="row" style="margin-bottom:12px">
+      <button>默认</button>
+      <button class="secondary">次要</button>
+      <button disabled>禁用</button>
+      <button class="secondary" disabled>次要禁用</button>
+    </div>
+    <div class="row">
+      <input type="text" placeholder="输入框 hover 看边框" value="">
+      <input type="text" value="只读" readonly>
+      <input type="text" value="禁用" disabled>
+      <select><option>下拉</option><option>选项二</option></select>
+      <select disabled><option>禁用下拉</option></select>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 5. 浮层与状态（P3-1）═══ -->
+<section>
+  <h2>5. 浮层与状态（P3-1）</h2>
+  <p class="note">模态/Toast/菜单/命令面板的样式已就位。<strong>右键菜单与命令面板只交付了视觉层与 DOM 约定，JS 交互未接</strong>——需要 master 定交互与快捷键。</p>
+  <div class="ctlbar">
+    <button onclick="document.getElementById('msk').classList.add('show')">打开模态</button>
+    <button onclick="document.getElementById('msk').classList.remove('show')">关闭</button>
+    <button onclick="toast('已保存 glossary.json')">Toast 成功</button>
+    <button onclick="toast('导入失败：格式无法识别', true)">Toast 错误</button>
+    <button onclick="document.getElementById('menu').style.display = document.getElementById('menu').style.display==='block'?'none':'block'">右键菜单</button>
+    <button onclick="document.getElementById('pal').style.display = document.getElementById('pal').style.display==='flex'?'none':'flex'">命令面板</button>
+  </div>
+  <div class="demo-box">
+    <div class="swatches" style="align-items:flex-start">
+      <div class="menu" id="menu" style="display:none;position:relative">
+        <div class="menu-item">复制原文 <kbd>Ctrl+C</kbd></div>
+        <div class="menu-item">粘贴为译文 <kbd>Ctrl+V</kbd></div>
+        <div class="menu-sep"></div>
+        <div class="menu-item">标记为有问题 <kbd>Ctrl+2</kbd></div>
+        <div class="menu-item" disabled>删除该行</div>
+      </div>
+      <div class="empty-state" style="flex:1;min-width:240px;padding:32px 16px">
+        <div class="empty-icon"></div>
+        <div class="empty-title">尚未打开任何文件</div>
+        <div class="empty-desc">选择项目文件夹后，这里的场景树会列出全部脚本文档。</div>
+        <div class="empty-action"><button>选择文件夹…</button></div>
+      </div>
+      <div style="min-width:180px">
+        <p class="note" style="margin-bottom:8px">加载态：</p>
+        <div class="skeleton" style="height:12px;width:140px;margin-bottom:8px"></div>
+        <div class="skeleton" style="height:12px;width:100px;margin-bottom:12px"></div>
+        <span class="spinner"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-mask" id="msk" onclick="if(event.target===this)this.classList.remove('show')">
+    <div class="modal">
+      <h3>设置</h3>
+      <div class="modal-tabs">
+        <button class="active">机翻</button><button>词典</button><button>外观</button>
+      </div>
+      <p class="note">模态背景用 <code>--ov-scrim</code>，圆角 <code>--r-lg</code>，入场为 8px 上浮 + 缩放。</p>
+      <div class="row"><button onclick="document.getElementById('msk').classList.remove('show')">关闭</button></div>
+    </div>
+  </div>
+
+  <div class="palette-mask" id="pal" style="display:none" onclick="if(event.target===this)this.style.display='none'">
+    <div class="palette">
+      <input class="palette-input" placeholder="输入命令…">
+      <div class="palette-list">
+        <div class="palette-item" aria-selected="true">打开项目文件夹<span class="palette-hint">Ctrl+O</span></div>
+        <div class="palette-item">导出为 TXT<span class="palette-hint">Ctrl+E</span></div>
+        <div class="palette-item">重新解析当前文档<span class="palette-hint">F5</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast-demo"></div>
+  <script>
+  let tTimer = null;
+  function toast(msg, isErr){
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast-demo' + (isErr ? ' error' : '');
+    // 复用 #toast 的真实样式：把它的类补回去
+    t.id = 'toast';
+    void t.offsetWidth;
+    t.classList.add('show');
+    clearTimeout(tTimer);
+    tTimer = setTimeout(() => t.classList.remove('show'), 2200);
+  }
+  </script>
+</section>
+
+<!-- ═══ 6. 滚动条与 z-index（P3-2）═══ -->
+<section>
+  <h2>6. 滚动条与层级（P3-2）</h2>
+  <p class="note">滚动条统一为 10px 细轨、拇指内缩（<code>background-clip:content-box</code>）；z-index 已从 13 种散值收敛到 <code>--z-*</code> 九档。下面的滚动区可验证样式。</p>
+  <div class="demo-box" style="height:140px;overflow-y:auto">
+    <div style="height:600px;color:var(--text-dim);font-size:var(--fs-sm);line-height:2">
+      滚动我 —— 验证滚动条样式。<br>（此处为占位内容，重复若干行以产生滚动）<br>
+      <script>for(let i=1;i<=20;i++)document.write('占位行 ' + i + '<br>');</script>
+    </div>
+  </div>
+</section>
+
+</div>
+</body>
+</html>

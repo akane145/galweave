@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 import {
   parsePrefix, stripBrackets, transValue, makePara, parseFile,
   buildStarPrefix, buildExport, scanTerms, setParseConf, getParseConf, parseConf,
-  buildOrigHighlights, mergeRanges, migrateNameTranslations, mergeSavedState
+  buildOrigHighlights, mergeRanges, migrateNameTranslations, mergeSavedState,
+  validateParseConf
 } from '../src/parsers.js';
 import { detect } from '../src/recognize.js';
 import {
@@ -41,6 +42,20 @@ test('parsePrefix: 内联说话人 / TEXT / 空说话人 / NAME / 非标准行',
   assert.deepEqual(parsePrefix('☆0000☆☆変わり続ける未来'), { prefix: '☆0000☆☆', content: '変わり続ける未来', id: '0000', name: '', named: false });
   assert.deepEqual(parsePrefix('☆NAME|4☆ティナ'), { prefix: '☆NAME|4☆', content: 'ティナ', id: 'NAME|4', name: '', named: false });
   assert.deepEqual(parsePrefix('普通的一行'), { prefix: '', content: '普通的一行', id: '', name: '', named: false });
+});
+
+test('validateParseConf: 拒绝相同标记与非法正则', () => {
+  assert.deepEqual(validateParseConf({
+    open: '☆', close: '★', regex: '^(.+?)(.*)$', nameIdPatterns: ['^NAME', 'N$']
+  }), []);
+
+  const errors = validateParseConf({
+    open: '☆', close: '☆', regex: '([', nameIdPatterns: ['^NAME', '[0-9']
+  });
+  assert.equal(errors.length, 3);
+  assert.match(errors[0], /不能相同/);
+  assert.match(errors[1], /前缀正则/);
+  assert.match(errors[2], /名字行编号正则/);
 });
 
 test('makePara: 字段与 done 计算', () => {

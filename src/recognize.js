@@ -604,6 +604,11 @@ export function renderReport(profile) {
   const names = Object.keys(st.nameValues || {});
   const off = profile.idOffset;
   const offsetLine = off && off.systematic ? `  - 编号偏移: 译文 = 原文 +${off.offset}（${off.matched}/${off.total} 对一致,已自动放行,不视为问题）` : '';
+  const moduleLabels = { dialogue: '对白', narration: '旁白', speaker: '名字', title: '标题', directive: '指令', 'named-text': '有名文本' };
+  const moduleCounts = profile.modules?.counts || null;
+  const moduleLine = moduleCounts
+    ? `模块: ${Object.entries(moduleCounts).map(([kind, count]) => `${moduleLabels[kind] || kind} ${count}`).join('  ')}  低置信 ${profile.modules.lowConfidence || 0}`
+    : '';
   const ruleLine = [
     `  - 注释前缀: ${(profile.commentPrefixes || []).join('、') || '（无）'}`,
     `  - 名字行编号: ${(profile.nameIdPatterns || []).join('、') || '（内置默认）'}`,
@@ -614,6 +619,7 @@ export function renderReport(profile) {
     `结构: 编号 ${st.idShape}  说话人来源 ${st.nameSource}  编辑器名字栏 ${profile.editable.nameField ? '可用' : '不可用'}`,
     `统计: 段落 ${s.blocks}  成对 ${s.paired}  原文独有 ${s.origOnly}  译文独有 ${s.transOnly}`,
     `分类: 对话 ${st.lineKinds.dialogue}  旁白/正文 ${st.lineKinds.narration}  有名文本 ${st.lineKinds.namedText}  名字行 ${st.lineKinds.nameEntry}  控制行 ${st.lineKinds.control}  间隔 ${st.lineKinds.separator}`,
+    ...(moduleLine ? [moduleLine] : []),
     `人名${names.length ? ` (${names.length})` : ''}: ${names.slice(0, 20).join('、') || '未检测到'}`,
     `可复用规则:`,
     ...ruleLine,

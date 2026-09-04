@@ -84,6 +84,25 @@ export function getParseConf(){
   };
 }
 
+/** 校验解析配置，返回可直接展示给用户的错误文案；不修改当前配置。 */
+export function validateParseConf(conf){
+  const c = conf && typeof conf === 'object' ? conf : {};
+  const errors = [];
+  if (c.open && c.close && c.open === c.close){
+    errors.push('原文标记与译文标记不能相同。');
+  }
+  if (typeof c.regex === 'string' && c.regex.trim()){
+    try { new RegExp(c.regex); }
+    catch (e){ errors.push('自定义前缀正则无法编译。'); }
+  }
+  const patterns = Array.isArray(c.nameIdPatterns) ? c.nameIdPatterns : [];
+  for (let i = 0; i < patterns.length; i++){
+    try { new RegExp(patterns[i], 'i'); }
+    catch (e){ errors.push('第 ' + (i + 1) + ' 个名字行编号正则无法编译。'); }
+  }
+  return errors;
+}
+
 // 拆出“前缀/编号/说话人”与正文内容。
 // 自动模式(默认): ☆0003☆桐吾☆「ありがとう」 -> id=0003 name=桐吾 content=「ありがとう」
 // 自定义正则: 命名捕获组 (?<id>…)(?<name>…)?(?<content>…) 优先;
