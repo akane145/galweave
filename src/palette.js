@@ -78,7 +78,7 @@ export function clampIndex(index, len) {
 
 /** @type {{group:string, id:string, title:string, hint?:string}[]} */
 export const COMMANDS = [
-  { group: '文件', id: 'btnRailImport', title: '导入文本' },
+  { group: '文件', id: 'btnImport', title: '导入文本' },
   { group: '文件', id: 'btnSave', title: '下载译文副本' },
   { group: '文件', id: 'btnSaveFile', title: '写回原文件' },
   { group: '文件', id: 'btnClearProgress', title: '清除当前文件进度' },
@@ -107,7 +107,7 @@ export const COMMANDS = [
   { group: '词典', id: 'btnDictAddMdx', title: '加载 MDX 词典' },
   { group: '词典', id: 'btnDictAddHttp', title: '配置 HTTP 词典' },
 
-  { group: '视图与设置', id: 'btnSidebar', title: '打开 / 收起上下文' },
+  { group: '视图与设置', id: 'btnSidebar', title: '打开 / 收起侧边栏' },
   { group: '视图与设置', id: 'btnParseSet', title: '解析规则' },
   { group: '视图与设置', id: 'btnThemeModal', title: '主题与字体' },
   { group: '视图与设置', id: 'btnMTSettings', title: '机翻配置' },

@@ -912,8 +912,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "galtrans"
-version = "5.2.0"
+name = "galweave"
+version = "5.3.1"
 dependencies = [
  "base64 0.22.1",
  "encoding_rs",

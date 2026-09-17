@@ -1,12 +1,12 @@
 [package]
-name = "galtrans"
-version = "5.2.0"
+name = "galweave"
+version = "5.3.1"
 description = "Galweave 视觉小说日译中辅助翻译工具"
-authors = ["galtrans"]
+authors = ["Galweave"]
 edition = "2021"
 
 [lib]
-name = "galtrans_lib"
+name = "galweave_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

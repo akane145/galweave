@@ -237,9 +237,25 @@ export async function openFileDialog(filters){
   return null; // 浏览器走 <input type=file>
 }
 
-/** 选择文件夹。返回路径或 null(取消)。 */
-export async function pickDirDialog(){
+/**
+ * 选择多个文件。返回 [{ path, name }](取消或浏览器端返回 [])。
+ * 浏览器端没有等价的一次多选原生对话框,调用方走 <input type=file multiple>。
+ */
+export async function openFilesDialog(filters){
   if (isTauri()){
+    const { open } = await tauriDialog();
+    const res = await open({ multiple: true, filters: filters || [{ name: '文本文件', extensions: ['txt', 'ks'] }] });
+    if (!res) return [];
+    const list = Array.isArray(res) ? res : [res];
+    return list
+      .filter(Boolean)
+      .map(p => ({ path: String(p), name: String(p).split(/[\\/]/).pop() || String(p) }));
+  }
+  return [];
+}
+
+/** 选择文件夹。返回路径或 null(取消)。 */
+export async function pickDirDialog(){  if (isTauri()){
     const { open } = await tauriDialog();
     const res = await open({ directory: true });
     return res || null;
@@ -345,7 +361,9 @@ function legacyProgressFilePath(key){ return key + PROGRESS_SUFFIX; }
 export function progressPathDisplay(sourcePath){ return dirOf(sourcePath) + '/.galweave/' + basenameOf(sourcePath) + PROGRESS_SUFFIX; }
 
 function normalizeParas(paras){
-  return paras.map(p => ({ orig: p.orig, translation: p.translation || '', nameTr: p.nameTr || '' }));
+  // src 是"译文来源"归因（mt/tm/human），供进度统计面板估算机翻占比。
+  // 旧进度文件没有这个字段 → 存回空串，读回时按"人工/未知"计，不影响兼容性。
+  return paras.map(p => ({ orig: p.orig, translation: p.translation || '', nameTr: p.nameTr || '', src: p.src || '' }));
 }
 
 // 桌面端: 读 .galweave/<name>.progress.json;旧位置回退 + 自动迁移;不存在/损坏返回 undefined
@@ -471,7 +489,6 @@ export async function removeSavedState(name){
 }
 
 /* 校对数据(浏览器版): IndexedDB,键 'proof:<文件名>' */
-
 export async function proofState(name){
   return await idbGet('proof:' + name);
 }
@@ -480,4 +497,50 @@ export async function saveProofState(name, data){
 }
 export async function removeProofState(name){
   await idbDel('proof:' + name);
+}
+
+/* ---------------- 通用键值 + 文件删除（翻译记忆 / 历史快照用） ---------------- */
+
+/** 通用读（浏览器版 IndexedDB；桌面版走文件接口，不用这个） */
+export async function kvGet(key){ return await idbGet(key); }
+/** 通用写 */
+export async function kvPut(key, val){ await idbPut(key, val); }
+/** 通用删 */
+export async function kvDel(key){ await idbDel(key); }
+
+/**
+ * 删除任意路径的文件（桌面版走 Rust remove_file 命令）。
+ * 浏览器版返回 false —— 调用方据此降级（如历史快照改用 IndexedDB）。
+ */
+export async function removeFile(path){
+  if (!isTauri() || !path) return false;
+  try {
+    const { invoke } = await tauriCore();
+    await invoke('remove_file', { path });
+    return true;
+  } catch (e) { return false; }
+}
+
+/**
+ * 读取某源文件所在目录下 `.galweave/` 里的数据文件。
+ * 例：tmPathDisplay('C:/game/story.ks') → 'C:/game/.galweave/tm.json'
+ * 纯字符串拼接，不做 I/O；供 UI 显示与调用方拼路径。
+ */
+export function galweavePath(sourcePath, fileName){
+  if (!isAbsPath(sourcePath)) return '';
+  return dirOf(sourcePath) + '/.galweave/' + fileName;
+}
+
+/** 读 `.galweave/<fileName>`（桌面版）；失败/不存在返回 null */
+export async function readGalweaveFile(sourcePath, fileName){
+  const p = galweavePath(sourcePath, fileName);
+  if (!p) return null;
+  try { return await readTextFileSource(p); } catch (e) { return null; }
+}
+
+/** 写 `.galweave/<fileName>`（桌面版）；失败返回 false */
+export async function writeGalweaveFile(sourcePath, fileName, content){
+  const p = galweavePath(sourcePath, fileName);
+  if (!p) return false;
+  try { await writeTextFileSource(p, content); return true; } catch (e) { return false; }
 }

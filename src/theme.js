@@ -76,3 +76,60 @@ export function colorForMode(group, mode){
   const v = m === 'light' ? g.colorLight : (m === 'bw' ? g.colorBw : g.color);
   return (typeof v === 'string' && v.trim()) ? v.trim() : '';
 }
+
+/* ---------------- 阅读密度（规范 §6.2） ---------------- */
+
+/**
+ * 三档密度。取值必须与 style.css 的 `:root[data-density="…"]` 对齐
+ * （见 src/style.css「密度三档」段）：
+ *   compact 紧凑 / cozy 标准（= 不设 data-density 的默认值）/ loose 宽松
+ * 规范 §6.2 里写的是 compact/default/relaxed，实现落地时改成了 cozy/loose，
+ * 此处以**代码为准**，文档同步已更正。
+ */
+export const DENSITY_MODES = ['compact', 'cozy', 'loose'];
+
+/** 归一化密度：非法值回退 cozy（默认档） */
+export function normalizeDensity(mode){
+  return DENSITY_MODES.includes(mode) ? mode : 'cozy';
+}
+
+/** 密度中文名（设置项 UI 用） */
+export function densityLabel(mode){
+  switch (normalizeDensity(mode)){
+    case 'compact': return '紧凑';
+    case 'loose': return '宽松';
+    default: return '标准';
+  }
+}
+
+/**
+ * 密度的 CSS 属性值：cozy 是 :root 默认值，**不下发属性**（避免多一层无意义的选择器匹配）。
+ * 返回 null 表示调用方应 removeAttribute('data-density')。
+ */
+export function densityAttr(mode){
+  const m = normalizeDensity(mode);
+  return m === 'cozy' ? null : m;
+}
+
+/* ---------------- 文本区透明度 ---------------- */
+
+/** 文本区透明度默认值：0 = 实色（与未引入该项前的渲染一致） */
+export const TEXT_AREA_TRANSPARENCY_DEFAULT = 0;
+
+/**
+ * 归一化文本区透明度：0–100 的整数百分比（0 = 实色，100 = 完全透出背景）。
+ * 非法/越界值回退或钳位，保证下发到 CSS 的永远是合法百分比。
+ */
+export function normalizeTextAreaTransparency(v){
+  const n = Number(v);
+  if (!Number.isFinite(n)) return TEXT_AREA_TRANSPARENCY_DEFAULT;
+  return Math.min(100, Math.max(0, Math.round(n)));
+}
+
+/**
+ * 透明度(0=实色) → CSS 不透明度百分比(100%=实色)，写入 --text-area-alpha。
+ * 两者互为补数：UI 用「透明度」表述更直观，CSS 用 opacity 语义。
+ */
+export function textAreaAlpha(transparency){
+  return (100 - normalizeTextAreaTransparency(transparency)) + '%';
+}

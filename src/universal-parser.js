@@ -12,6 +12,230 @@ import {
 
 export const DOCUMENT_VERSION = 1;
 
+/* ---------------- 镜像格式（dc4ph 文本导出） ---------------- */
+
+// D.C.4 系文本导出: 每条消息 = #0x 地址头 + 两份相同正文的装饰行(★◎ 001 ◎★//正文 / ★◎ 001 ◎★正文)。
+// 两份正文恒等(镜像),编辑器只呈现一条记录;还原时同一 payload 写回两份镜像行,保持格式不变式。
+// 装饰对 = 两个符号字符 A B,编号两侧按 A B … B A 镜像排列。
+const MIRROR_HEADER_RE = /^#0x([0-9A-Fa-f]+)$/;
+const MIRROR_LINE_RE = /^(\p{So})(\p{So})[ \t]*(\d{3})[ \t]*\2\1(\/\/)?([\s\S]*)$/u;
+
+function isMirrorHeader(content){
+  return MIRROR_HEADER_RE.test(content.trim());
+}
+
+/** 扫描物理行确认镜像形状: 头-斜线行-普通行 三连结构完整、且无任何其他非空行。
+    允许尾部截断(最后一条消息缺普通行,常见于中断的文本导出)。 */
+function detectMirrorShape(contents){
+  let state = 'idle'; // idle → 'want-slash' → 'want-plain'
+  let headers = 0;
+  let completed = 0;
+  let pair = null;
+  let other = 0;
+  for (const content of contents){
+    if (!content.trim()) continue;
+    if (isMirrorHeader(content)){
+      if (state !== 'idle') other += 1;
+      else { headers += 1; state = 'want-slash'; }
+      continue;
+    }
+    const match = content.match(MIRROR_LINE_RE);
+    if (!match){ other += 1; state = 'idle'; continue; }
+    if (state === 'want-slash' && match[4]){
+      pair = { open: match[1], close: match[2], num: match[3] };
+      state = 'want-plain';
+      continue;
+    }
+    if (state === 'want-plain' && !match[4] && pair &&
+        match[1] === pair.open && match[2] === pair.close && match[3] === pair.num){
+      completed += 1;
+      pair = null;
+      state = 'idle';
+      continue;
+    }
+    other += 1;
+    state = 'idle';
+  }
+  const trailingIncomplete = state === 'want-plain' && headers === completed + 1;
+  const clean = other === 0 && headers >= 1 && completed >= 1 &&
+    (headers === completed || trailingIncomplete);
+  return {
+    detected: clean,
+    open: pair?.open || '★',
+    close: pair?.close || '◎',
+    shape: 'mirror-dc4ph',
+  };
+}
+
+/** 解析镜像格式的 / 行正文: 装饰后紧跟的单个 // 是结构标记,剥除;之后全部是正文。 */
+function mirrorBody(match){
+  const tail = match[5] || '';
+  return match[4] && tail.startsWith('//') ? tail.slice(2) : tail;
+}
+
+/** 单条消息 → 一条记录。
+    斜线行(//)是原文行;普通行是译文行 —— 未翻译时预填原文(与原文相同),
+    已翻译时内容不同,直接作为已有译文走标准成对流程。
+    未翻译记录的译文行位置记入 record.translationSlot,供还原时写入译文。 */
+function buildMirrorRecord(slashLine, plainLine, pendingControls, nextOccurrence){
+  const a = slashLine.content.match(MIRROR_LINE_RE);
+  const b = plainLine.content.match(MIRROR_LINE_RE);
+  const slashBody = mirrorBody(a);
+  const plainBody = mirrorBody(b);
+  const slashBodyStart = slashLine.content.length - slashBody.length;
+  const plainBodyStart = plainLine.content.length - plainBody.length;
+  const source = {
+    id: a[3],
+    text: slashBody,
+    explicitSpeaker: '',
+    bracketSpeaker: '',
+    bracketStyle: '',
+    layout: 'plain',
+    tokens: tokenizeInline(slashBody),
+    diagnostics: [],
+    spans: { text: { start: slashBodyStart, end: slashLine.content.length }, speaker: null },
+    raw: slashLine.content,
+    line: slashLine.number,
+  };
+  const record = {
+    key: `${a[3]}#${nextOccurrence(a[3])}`,
+    id: a[3],
+    source,
+    translation: null,
+    controls: pendingControls.splice(0),
+    lineSpan: { start: slashLine.number, end: plainLine.number },
+  };
+  if (plainBody !== slashBody){
+    record.translation = {
+      id: b[3],
+      text: plainBody,
+      explicitSpeaker: '',
+      bracketSpeaker: '',
+      bracketStyle: '',
+      layout: 'plain',
+      tokens: tokenizeInline(plainBody),
+      diagnostics: [],
+      spans: { text: { start: plainBodyStart, end: plainLine.content.length }, speaker: null },
+      raw: plainLine.content,
+      line: plainLine.number,
+    };
+  } else {
+    record.translationSlot = {
+      line: plainLine.number,
+      body: plainBody,
+      raw: plainLine.content,
+      spans: { text: { start: plainBodyStart, end: plainLine.content.length } },
+    };
+  }
+  return record;
+}
+
+function makeOccurrenceCounter(){
+  const counts = new Map();
+  return id => {
+    const next = (counts.get(id) || 0) + 1;
+    counts.set(id, next);
+    return next;
+  };
+}
+
+function parseMirrorDocument(source, lines, mirrorShape, options){
+  const prefixes = commentPrefixes(options.profile);
+  const records = [];
+  const issues = [];
+  const pendingControls = [];
+  const nextOccurrence = makeOccurrenceCounter();
+  let i = 0;
+  while (i < lines.length){
+    const line = lines[i];
+    if (!line.content.trim()){ i += 1; continue; }
+    if (isMirrorHeader(line.content)){
+      pendingControls.push(line.content);
+      i += 1;
+      continue;
+    }
+    const match = line.content.match(MIRROR_LINE_RE);
+    if (match){
+      const slash = line;
+      let k = i + 1;
+      while (k < lines.length && !lines[k].content.trim()) k += 1;
+      const plain = lines[k];
+      const plainMatch = plain ? plain.content.match(MIRROR_LINE_RE) : null;
+      if (!match[4] ||
+          !plainMatch ||
+          plainMatch[1] !== match[1] || plainMatch[2] !== match[2] || plainMatch[3] !== match[3]){
+        records.push({
+          key: `${match[3]}#${nextOccurrence(match[3])}`,
+          id: match[3],
+          source: null, // 结构不完整,规范化阶段会拒绝,不会丢正文
+          translation: null,
+          controls: pendingControls.splice(0),
+          lineSpan: { start: line.number, end: line.number },
+          mismatch: true,
+        });
+        issues.push({ type: 'mirror-incomplete', line: line.number, detail: line.content.slice(0, 80) });
+        i += 1;
+        continue;
+      }
+      const record = buildMirrorRecord(slash, plain, pendingControls, nextOccurrence);
+      records.push(record);
+      i = k + 1;
+      continue;
+    }
+    issues.push({ type: 'unmarked-line', line: line.number, detail: line.content });
+    i += 1;
+  }
+  if (pendingControls.length) issues.push({ type: 'orphan-control', line: lines.length, detail: pendingControls.join('\n') });
+
+  const wellFormed = records.filter(record => record.source);
+  // master 确认的镜像格式分类规则: 带「」= 对话,否则 = 旁白;不做无标记说话人推断
+  classifyRecords(wellFormed, { noSpeakerInference: true });
+  const kinds = {};
+  for (const record of wellFormed) kinds[record.kind] = (kinds[record.kind] || 0) + 1;
+  const tokenRoles = [...new Set(wellFormed.flatMap(record => record.source.tokens)
+    .filter(token => token.protected).map(token => token.role))];
+  const ids = wellFormed.map(record => record.id);
+
+  return {
+    version: DOCUMENT_VERSION,
+    file: options.file || options.profile?.file || '',
+    raw: source,
+    lines,
+    records,
+    issues,
+    format: {
+      version: 1,
+      framing: {
+        shape: mirrorShape.shape,
+        openPair: mirrorShape.open + mirrorShape.close,
+        closePair: mirrorShape.close + mirrorShape.open,
+        sourceMark: mirrorShape.open,
+        targetMark: '',
+        boundary: 'header-pair',
+        preserveBlankLines: true,
+      },
+      commentPrefixes: prefixes.slice(),
+      id: { shape: detectIdShape(ids) },
+      pairing: {
+        strategy: 'mirror-pairs',
+        offset: 0,
+        matched: wellFormed.length,
+        total: wellFormed.length,
+        systematic: false,
+      },
+      grammar: { selected: 'mirror-pair', candidates: [{ id: 'mirror-pair', score: 1 }] },
+      protectedTokenRoles: tokenRoles,
+    },
+    stats: {
+      records: wellFormed.length,
+      paired: wellFormed.filter(record => record.translation).length,
+      sourceOnly: wellFormed.filter(record => !record.translation).length,
+      kinds,
+      lowConfidence: wellFormed.filter(record => record.confidence < 0.8).length,
+    },
+  };
+}
+
 const TOKEN_RE = /(<r>|\[(?:n|r|np)\]|%(?:p(?:-?\d+)?|f[^;\r\n]*);|\\{1,2}n|\[[^\]\r\n,]+,\d+\])/giu;
 
 function tokenRole(value){
@@ -80,9 +304,25 @@ function occurrenceCount(text, value){
   return count;
 }
 
+/** 错误里带上 token 的角色与原值，调用方才能说清「丢的是换行还是命令」。 */
+function tokenError(code, token){
+  const error = { code, placeholder: token ? token.placeholder : '' };
+  if (token){
+    error.role = token.role;
+    error.value = token.value;
+  }
+  return error;
+}
+
 /**
- * 恢复机翻结果中的受保护 token。任何缺失、重复、重排或未知占位符都会失败，
- * 调用方不得在失败时写入译文。
+ * 恢复机翻结果中的受保护 token。
+ *
+ * 严格性分级（2026-09-11 调整）：
+ *   - **命令类**（`%p…;` / `%f…;` / 未知命令）、未知占位符、重复、重排 —— 任何异常都失败，
+ *     调用方不得写入译文（丢命令会改脚本行为，必须人工确认）。
+ *   - **换行类**（`<r>` / `[n]` / `[r]` / 字面量 `\n`）**丢失**时可自动回填：按源顺序插到
+ *     「下一个存活占位符」之前，没有下一个存活占位符则补在末尾。
+ *     理由：译文断行本来就要随中文长度重排，译者常需要挪动断点，不该因此整行作废。
  */
 export function restoreProtectedTokens(translatedText, mask){
   const text = typeof translatedText === 'string' ? translatedText : '';
@@ -99,22 +339,55 @@ export function restoreProtectedTokens(translatedText, mask){
   }
 
   const positions = [];
-  for (const token of mask.tokens){
+  const recoverable = new Set(); // token 下标：丢失但可回填的换行
+  mask.tokens.forEach((token, index) => {
     const count = occurrenceCount(text, token.placeholder);
-    if (count === 0) errors.push({ code: 'missing', placeholder: token.placeholder });
-    else if (count > 1) errors.push({ code: 'duplicate', placeholder: token.placeholder });
+    if (count === 0){
+      if (token.role === 'line-break') recoverable.add(index);
+      else errors.push(tokenError('missing', token));
+      positions.push(-1);
+      return;
+    }
+    if (count > 1) errors.push(tokenError('duplicate', token));
     positions.push(text.indexOf(token.placeholder));
-  }
-  const present = positions.filter(position => position >= 0);
-  if (present.some((position, index) => index > 0 && position < present[index - 1])){
-    errors.push({ code: 'reordered', placeholder: '' });
+  });
+
+  let lastPosition = -1;
+  for (let k = 0; k < mask.tokens.length; k++){
+    const position = positions[k];
+    if (position < 0) continue;
+    if (position < lastPosition){
+      errors.push(tokenError('reordered', mask.tokens[k]));
+      break;
+    }
+    lastPosition = position;
   }
   if (errors.length) return { ok: false, text: null, errors };
 
-  let restored = text;
-  for (const token of mask.tokens){
-    restored = restored.replace(token.placeholder, token.value);
+  // 丢失的换行按源顺序回填：锚点为「下一个存活占位符」，无锚点则补在末尾
+  const before = new Map();
+  const tail = [];
+  for (const index of recoverable){
+    let anchor = -1;
+    for (let k = index + 1; k < mask.tokens.length; k++){
+      if (positions[k] >= 0){ anchor = k; break; }
+    }
+    if (anchor < 0){ tail.push(mask.tokens[index].value); continue; }
+    if (!before.has(anchor)) before.set(anchor, []);
+    before.get(anchor).push(mask.tokens[index].value);
   }
+
+  let restored = '';
+  let cursor = 0;
+  for (let k = 0; k < mask.tokens.length; k++){
+    const position = positions[k];
+    if (position < 0) continue;
+    restored += text.slice(cursor, position);   // 先补占位符之间的正文，再回填换行
+    if (before.has(k)) restored += before.get(k).join('');
+    restored += mask.tokens[k].value;
+    cursor = position + mask.tokens[k].placeholder.length;
+  }
+  restored += text.slice(cursor) + tail.join('');
   return { ok: true, text: restored, errors: [] };
 }
 
@@ -130,6 +403,12 @@ export function splitPhysicalLines(text){
     if (!match[2]) break;
   }
   return lines;
+}
+
+/** 轻量探测: 文本是否为镜像格式(供导入层在直接打开时自动走规范化,不依赖用户注释设置)。 */
+export function isMirrorFormatText(text){
+  const lines = splitPhysicalLines(typeof text === 'string' ? text : '');
+  return detectMirrorShape(lines.map(line => line.content)).detected;
 }
 
 function commentPrefixes(profile){
@@ -228,18 +507,18 @@ function looksLikeInferredSpeaker(record, next){
   return hasDialogueQuote(next.source.text) && !next.source.explicitSpeaker && !next.source.bracketSpeaker;
 }
 
-function baseKind(record, next){
+function baseKind(record, next, flags = {}){
   const id = record.id || '';
   if (/R$/iu.test(id)) return 'directive';
   if (isNameRowId(id)) return 'speaker';
   if (/^(?:标题|標題|title)$/iu.test(record.source.explicitSpeaker)) return 'title';
   if (hasDialogueQuote(record.source.text)) return 'dialogue';
-  if (looksLikeInferredSpeaker(record, next)) return 'speaker';
+  if (!flags.noSpeakerInference && looksLikeInferredSpeaker(record, next)) return 'speaker';
   if (record.source.explicitSpeaker || record.source.bracketSpeaker) return 'named-text';
   return 'narration';
 }
 
-function classifyRecords(records){
+function classifyRecords(records, flags = {}){
   let activeSpeaker = null;
   const speakerText = value => {
     const match = String(value || '').match(/^【([\s\S]*)】$/u);
@@ -247,7 +526,7 @@ function classifyRecords(records){
   };
   for (let i = 0; i < records.length; i++){
     const record = records[i];
-    record.kind = baseKind(record, records[i + 1]);
+    record.kind = baseKind(record, records[i + 1], flags);
     record.confidence = 0.94;
     record.diagnostics = [
       ...(record.source.diagnostics || []),
@@ -334,6 +613,11 @@ export function parseDocument(text, options = {}){
   const source = typeof text === 'string' ? text : '';
   const lines = splitPhysicalLines(source);
   const contents = lines.map(line => line.content);
+  const mirrorShape = detectMirrorShape(contents);
+  const forceMirror = options.profile?.structure?.shape === 'mirror-dc4ph';
+  if (mirrorShape.detected || forceMirror){
+    return parseMirrorDocument(source, lines, mirrorShape, options);
+  }
   let detected = options.profile?.marks || detectMarks(contents);
   if (!detected.close){
     const adjacent = inferAdjacentMarks(contents);
@@ -458,6 +742,20 @@ export function renderDocument(document, edits = {}){
     if (value === undefined) return;
     const side = record[sideName];
     if (!side){
+      // 镜像格式未翻译记录没有译文侧对象: 译文写入译文槽(普通行),原文行(//)不动
+      if (sideName === 'translation' && record.translationSlot){
+        if (typeof value !== 'string'){
+          errors.push({ code: 'invalid-edit', recordKey: record.key, side: sideName });
+          return;
+        }
+        if (!sameValues(protectedValues(record.source.text), protectedValues(value))){
+          errors.push({ code: 'protected-token-mismatch', recordKey: record.key, side: sideName });
+          return;
+        }
+        const slot = record.translationSlot;
+        replacements.push({ line: slot.line, start: slot.spans.text.start, end: slot.spans.text.end, value });
+        return;
+      }
       errors.push({ code: 'missing-side', recordKey: record.key, side: sideName });
       return;
     }
@@ -534,7 +832,7 @@ export function canonicalizeDocument(document){
     return { ok: false, text: null, errors: [{ code: 'invalid-document', line: 0 }], map: [] };
   }
   const unsupported = (document.issues || []).filter(issue =>
-    ['unmarked-line', 'translation-only', 'orphan-control'].includes(issue.type)
+    ['unmarked-line', 'translation-only', 'orphan-control', 'mirror-incomplete'].includes(issue.type)
   );
   if (unsupported.length){
     return {
@@ -569,10 +867,19 @@ function sideSpeaker(side){
 }
 
 /** 将编辑后的 ☆/★ 文本按 occurrence key 定点写回原 document。 */
+/** 旁白约定: 原文正文以全角空格开头(游戏缩进) → 译文自动补齐,译文已带则不重复。 */
+function ensureMirrorIndent(sourceText, text){
+  if (sourceText && sourceText.startsWith('　') && text && !text.startsWith('　')){
+    return '　' + text;
+  }
+  return text;
+}
+
 export function restoreCanonicalDocument(document, canonicalText){
   if (!document || !Array.isArray(document.records)){
     return { ok: false, text: null, errors: [{ code: 'invalid-document', recordKey: '', side: '' }] };
   }
+  const mirrorDoc = document?.format?.framing?.shape === 'mirror-dc4ph';
   const canonical = parseDocument(canonicalText, {
     profile: { marks: { open: '☆', close: '★' }, commentPrefixes: document.format?.commentPrefixes },
     file: document.file,
@@ -600,12 +907,24 @@ export function restoreCanonicalDocument(document, canonicalText){
       errors.push({ code: 'controls-modified', recordKey: original.key, side: '' });
       continue;
     }
+    const slotRecord = original.translationSlot;
     if (!!current.translation !== !!original.translation){
-      errors.push({
-        code: original.translation ? 'translation-removed' : 'translation-added',
-        recordKey: original.key,
-        side: 'translation',
-      });
+      if (original.translation || !slotRecord){
+        errors.push({
+          code: original.translation ? 'translation-removed' : 'translation-added',
+          recordKey: original.key,
+          side: 'translation',
+        });
+        continue;
+      }
+      // 镜像格式未翻译记录: 允许新增译文,写入译文槽(普通行);原文行(//)保留原文
+      if (current.translation.id !== original.source.id){
+        errors.push({ code: 'translation-id-modified', recordKey: original.key, side: 'translation' });
+        continue;
+      }
+      edits[original.key] = {
+        translationText: mirrorDoc ? ensureMirrorIndent(original.source.text, current.translation.text) : current.translation.text,
+      };
       continue;
     }
     if (!original.translation) continue;
@@ -613,7 +932,9 @@ export function restoreCanonicalDocument(document, canonicalText){
       errors.push({ code: 'translation-id-modified', recordKey: original.key, side: 'translation' });
       continue;
     }
-    const edit = { translationText: current.translation.text };
+    const edit = {
+      translationText: mirrorDoc ? ensureMirrorIndent(original.source.text, current.translation.text) : current.translation.text,
+    };
     if (original.translation.spans.speaker){
       edit.translationSpeaker = sideSpeaker(current.translation);
     } else if (sideSpeaker(current.translation)){

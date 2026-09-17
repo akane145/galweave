@@ -33,9 +33,20 @@ export function sjisBytes(str){
   return n;
 }
 
+/** 支持的计数口径（顺序 = 设置项下拉顺序） */
+export const ENCODINGS = ['utf8', 'sjis'];
+
+/**
+ * 归一化口径：只接受 'sjis'（不区分大小写），其余一律回退 'utf8'。
+ * 持久化读回时可能拿到 null / 旧值 / 大小写不一致的字符串，统一收口在这里。
+ */
+export function normalizeEncoding(enc){
+  return String(enc == null ? '' : enc).trim().toLowerCase() === 'sjis' ? 'sjis' : 'utf8';
+}
+
 /** 按口径分派。enc: 'utf8' | 'sjis' */
 export function byteCount(str, enc){
-  return enc === 'sjis' ? sjisBytes(str) : utf8Bytes(str);
+  return normalizeEncoding(enc) === 'sjis' ? sjisBytes(str) : utf8Bytes(str);
 }
 
 /**
@@ -66,5 +77,28 @@ export function formatByteTitle(bytes, limit, enc){
 
 /** 口径后缀（规范：用 --fs-2xs 标注 SJIS / UTF8） */
 export function encodingLabel(enc){
-  return enc === 'sjis' ? 'SJIS' : 'UTF8';
+  return normalizeEncoding(enc) === 'sjis' ? 'SJIS' : 'UTF8';
+}
+
+/** 口径在设置项里的说明文案（含字节口径差异，避免用户照着错口径改稿） */
+export function encodingName(enc){
+  return normalizeEncoding(enc) === 'sjis'
+    ? 'Shift-JIS（全角 2 字节）'
+    : 'UTF-8（中文 3 字节）';
+}
+
+/** 字数上限的可选范围（规范 §8.3 的文本框容量；Q3 未定前用 NScripter 常见值 120 兜底） */
+export const BYTE_LIMIT_MIN = 20;
+export const BYTE_LIMIT_MAX = 4000;
+export const BYTE_LIMIT_DEFAULT = 120;
+
+/**
+ * 归一化字数上限。
+ * 非数字 / 非正数 → 0，语义是"未配置上限"（指示器隐藏，不误报）；
+ * 合法值钳到 [BYTE_LIMIT_MIN, BYTE_LIMIT_MAX] 并取整。
+ */
+export function normalizeByteLimit(v){
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(BYTE_LIMIT_MAX, Math.max(BYTE_LIMIT_MIN, Math.round(n)));
 }

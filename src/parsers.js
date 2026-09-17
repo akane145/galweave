@@ -8,6 +8,8 @@
      约定 B(新): 正则含命名捕获组 (?<id>…)(?<name>…)?(?<content>…) → 直接取编号/说话人/正文
    - commentPrefixes: 注释/元信息行前缀(如 #NOTTRANS 的 #),整行跳过不参与原文/译文
    - nameIdPatterns: 名字行编号判定正则(如 ^NAME、^[0-9A-Fa-f]+N$),命中即按名字行处理 */
+import { isMirrorFormatText } from './universal-parser.js';
+
 export const DEFAULT_COMMENT_PREFIXES = ['#', ';', '//', '%'];
 export const DEFAULT_NAME_ID_PATTERNS = ['^NAME', '^[0-9A-Fa-f]+N$'];
 
@@ -147,6 +149,28 @@ export function transValue(p){
   return p.brackets ? stripBrackets(p.translation) : p.translation;
 }
 
+// 译文是否只是“原文的占位副本”(与原文实质相同)。
+// 镜像格式(dc4ph)未翻译时译文行预填原文,这类行导出后与原文件逐字节相同 —— 等于没译,
+// 因此状态/统计口径一律按“未译”处理(与 mergeSavedState.fileHasTrans、proof.analyzeRow 同源)。
+export function isPlaceholderTrans(p){
+  if (!p || p.isName) return false;
+  const tv = transValue(p);
+  if (!tv.trim()) return false;
+  const content = p.content || '';
+  return tv === (p.brackets ? stripBrackets(content) : content);
+}
+
+// 段落“是否已翻译”的唯一口径(解析、编辑后重算、进度恢复三处共用,避免口径分裂)。
+// NAME 行: 名字框非空即已翻译(自动确认,与既有 UX 一致)。
+// 镜像行: 译文非空且不是原文占位 —— 预填原文的行导出后仍是原文,不能算已译。
+// 其余格式: 沿用既有口径(译文非空即已译)。
+export function computeDone(p){
+  if (!p) return false;
+  if (p.isName) return (p.nameTr || '').trim() !== '';
+  if (!transValue(p).trim()) return false;
+  return p.mirror ? !isPlaceholderTrans(p) : true;
+}
+
 // 名字行判定: 编号命中配置的名字行正则(如 NAME|n、N 后缀) —— 正文本身就是说话人,
 // 编辑器按名字行处理(名字栏可编辑、自动已翻译)。
 export function isNameRowId(id){
@@ -201,9 +225,102 @@ export function makePara(orig, translation, nameTr){
   };
 }
 
+/* ---------- 镜像格式(dc4ph 文本导出)原生解析 ----------
+   master 确认的规则: 原文行带 //(★◎ 前缀 + 编号 + ◎★ 后缀),译文行没有 //;
+   未翻译时译文行预填原文;#0x 地址头是结构行,不参与正文。
+   编辑器直接按原格式解析与写回,全程不做任何格式转换。 */
+
+const MIRROR_RAW_LINE_RE = /^( *)(\p{So})(\p{So})[ \t]*(\d{3})[ \t]*\3\2(\/\/)?([\s\S]*)$/u;
+
+function mirrorBodyMatch(match){
+  const tail = match[6] || '';
+  return match[5] && tail.startsWith('//') ? tail.slice(2) : tail;
+}
+
+// 一条消息(// 原文行 + 普通译文行 + 若干 #0x 头) → 段落数据对象;mirror 记录译文行前缀与原内容供原样写回
+function makeMirrorPara(slashLine, plainLine, headerComments){
+  const m = slashLine.match(MIRROR_RAW_LINE_RE);
+  const p = plainLine.match(MIRROR_RAW_LINE_RE);
+  const body = mirrorBodyMatch(m);
+  const plainBody = mirrorBodyMatch(p);
+  const slashPrefix = slashLine.slice(0, slashLine.length - body.length);
+  const plainPrefix = plainLine.slice(0, plainLine.length - plainBody.length);
+  // 译文栏预填原文: 与文件里的译文行保持原样,用户可直接在此基础上改,不改即原样写回。
+  // 两份正文相同时是“未翻译”的预填占位 —— 行状态按未翻译计(computeDone),不虚增进度。
+  let tr = plainBody;
+  // 原文或译文首尾带「」时锁定括号:存储统一为包含「」(与 makePara 口径一致)
+  const brackets = (body.startsWith('「') && body.endsWith('」')) ||
+                   (tr.startsWith('「') && tr.endsWith('」'));
+  if (brackets && tr !== '' && !(tr.startsWith('「') && tr.endsWith('」'))){
+    tr = '「' + tr + '」';
+  }
+  const para = {
+    orig: slashLine,
+    prefix: slashPrefix,
+    content: body,
+    id: m[4],
+    name: '',
+    segs: [m[4]],
+    isName: false,
+    nameWrap: false,
+    nameTr: '',
+    translation: tr,
+    brackets,
+    done: false, // 统一由 computeDone 计算(镜像预填占位 = 未翻译)
+    // 译文行(无 //)还原信息: 前缀 + 未翻译时的原内容
+    // indent: 旁白约定 —— 原文行以全角空格开头(游戏缩进),导出时译文行自动补齐
+    mirror: { plainPrefix, plainBody, indent: body.startsWith('　') },
+    ...(headerComments.length ? { comments: headerComments.slice() } : {}),
+  };
+  para.done = computeDone(para);
+  return para;
+}
+
+// 镜像格式整文件解析: 与 parseFile 同构的 { paras, nl, trailingBlank }
+function parseMirrorFile(text){
+  const nl = text.indexOf('\r') >= 0 ? '\r\n' : '\n';
+  const raw = text.split(/\r?\n/);
+  const paras = [];
+  const isHeader = ln => /^#0x[0-9A-Fa-f]+$/.test(ln.trim());
+  let comments = [];
+  for (let i = 0; i < raw.length; i++){
+    const ln = raw[i];
+    if (ln.trim() === '') continue;
+    if (isHeader(ln)){ comments.push(ln); continue; }
+    const m = ln.match(MIRROR_RAW_LINE_RE);
+    if (m && m[5]){ // // 行 = 原文行;其后第一条非空行是译文行
+      let j = i + 1;
+      while (j < raw.length && raw[j].trim() === '') j += 1;
+      const plain = raw[j] || '';
+      const pm = plain.match(MIRROR_RAW_LINE_RE);
+      if (pm && pm[4] === m[4]){
+        paras.push(makeMirrorPara(ln, plain, comments));
+        comments = [];
+        i = j;
+        continue;
+      }
+    }
+    // 镜像文件不应出现的行: 原样作为无编号段落保留,不丢内容
+    paras.push({
+      orig: ln, prefix: '', content: ln, id: '', name: '', segs: [],
+      isName: false, nameWrap: false, nameTr: '', translation: '',
+      brackets: false, done: false,
+      ...(comments.length ? { comments: comments.slice() } : {}),
+    });
+    comments = [];
+  }
+  const n = raw.length;
+  const trailingBlank = n >= 2 && raw[n - 1] === '' && raw[n - 2] === '' && paras.length > 0;
+  return { paras, nl, trailingBlank };
+}
+
 // 把文件文本解析成段落(空行分隔,每段最多两行:☆原文 + ★已有译文)
 // 返回 { paras, nl } ; nl 为文件换行风格('\n' 或 '\r\n')
 export function parseFile(text){
+  // 镜像格式(dc4ph 等): 原生解析,// 行=原文行、普通行=译文行,不做格式转换
+  if (isMirrorFormatText(text)){
+    return parseMirrorFile(text);
+  }
   const nl = text.indexOf('\r') >= 0 ? '\r\n' : '\n';
   const raw = text.split(/\r?\n/);
   const blocks = [];
@@ -260,9 +377,15 @@ export function buildStarPrefix(p){
 export function buildExport(paras, nl, trailingBlank){
   const lines = [];
   for (const p of paras){
-    if (p.comments?.length) lines.push(...p.comments); // 注释行(如 #NOTTRANS)还原回原文行之前
+    if (p.comments?.length) lines.push(...p.comments); // 注释行(如 #NOTTRANS/#0x 头)还原回原文行之前
     lines.push(p.orig); // 原文行原样保留
-    if (p.isName){
+    if (p.mirror){
+      // 镜像格式(dc4ph): 译文行(无 //)写译文;未翻译时保留原译文行内容(预填原文)
+      let tr = transValue(p).trim() !== '' ? p.translation : p.mirror.plainBody;
+      // 旁白约定: 原文行以全角空格开头(游戏缩进) → 译文行自动补齐,译文已带则不重复
+      if (p.mirror.indent && tr !== '' && !tr.startsWith('　')) tr = '　' + tr;
+      lines.push(p.mirror.plainPrefix + tr);
+    } else if (p.isName){
       // 名字条目:始终输出 ★ 行,保证两行结构;名字未改时保留原名
       // 【名】 包裹的名字:导出时自动还原括号
       const nm = (p.nameTr || p.name);
@@ -364,13 +487,14 @@ export function mergeSavedState(fresh, saved){
       let tr = q.translation;
       if (p.brackets && !(tr.startsWith('「') && tr.endsWith('」'))) tr = '「' + tr + '」';
       out.translation = tr;
+      out.src = q.src || '';   // 归因随译文一起恢复（否则统计面板的机翻占比会在重启后归零）
     }
     // 名字: 文件 ★ 行已指定(≠原文)则保留;否则用进度里的译名
     if (p.nameTr === p.name && q.nameTr && q.nameTr !== q.name){
       out.nameTr = q.nameTr;
     }
-    // 同步已翻译状态(与 makePara 的 done 口径一致)
-    out.done = out.isName ? (out.nameTr || '').trim() !== '' : transValue(out).trim() !== '';
+    // 同步已翻译状态(与 makePara / 编辑后重算共用 computeDone 口径)
+    out.done = computeDone(out);
     return out;
   });
 }

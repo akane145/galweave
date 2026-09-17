@@ -6,6 +6,8 @@ import assert from 'node:assert/strict';
 import {
   normalizeThemeMode, nextThemeMode, themeButtonIcon,
   defaultFontSettings, mergeFontSettings, colorForMode,
+  DENSITY_MODES, normalizeDensity, densityLabel, densityAttr,
+  TEXT_AREA_TRANSPARENCY_DEFAULT, normalizeTextAreaTransparency, textAreaAlpha,
 } from '../src/theme.js';
 
 test('normalizeThemeMode: 合法/非法回退', () => {
@@ -91,4 +93,66 @@ test('colorForMode: 按模式取对应槽位,空串/非法回退', () => {
   assert.equal(colorForMode(null, 'dark'), '');
   // 非对象/空值安全
   assert.equal(colorForMode(undefined, 'light'), '');
+});
+
+/* ---------------- 阅读密度（规范 §6.2） ---------------- */
+
+test('DENSITY_MODES: 取值必须与 style.css 的 data-density 选择器对齐', () => {
+  assert.deepEqual(DENSITY_MODES, ['compact', 'cozy', 'loose']);
+});
+
+test('normalizeDensity: 合法值透传，非法/空回退 cozy（默认档）', () => {
+  assert.equal(normalizeDensity('compact'), 'compact');
+  assert.equal(normalizeDensity('cozy'), 'cozy');
+  assert.equal(normalizeDensity('loose'), 'loose');
+  // 规范 §6.2 原文写的是 default / relaxed，实现落地改名为 cozy / loose：
+  // 旧值不应被静默接受成"合法档"，而是回到默认，避免下发不存在的选择器值。
+  assert.equal(normalizeDensity('default'), 'cozy');
+  assert.equal(normalizeDensity('relaxed'), 'cozy');
+  assert.equal(normalizeDensity('啥'), 'cozy');
+  assert.equal(normalizeDensity(null), 'cozy');
+  assert.equal(normalizeDensity(undefined), 'cozy');
+});
+
+test('densityLabel: 中文档位名', () => {
+  assert.equal(densityLabel('compact'), '紧凑');
+  assert.equal(densityLabel('cozy'), '标准');
+  assert.equal(densityLabel('loose'), '宽松');
+  assert.equal(densityLabel('非法'), '标准');   // 先归一化再取名
+});
+
+test('densityAttr: cozy 不下发属性（返回 null），其余返回自身', () => {
+  assert.equal(densityAttr('compact'), 'compact');
+  assert.equal(densityAttr('loose'), 'loose');
+  assert.equal(densityAttr('cozy'), null);
+  assert.equal(densityAttr('default'), null);   // 归一化后即 cozy
+  assert.equal(densityAttr(undefined), null);
+});
+
+test('normalizeTextAreaTransparency: 钳到 0–100 整数,非法值回退默认 0', () => {
+  assert.equal(TEXT_AREA_TRANSPARENCY_DEFAULT, 0);
+  assert.equal(normalizeTextAreaTransparency(0), 0);
+  assert.equal(normalizeTextAreaTransparency(45), 45);
+  assert.equal(normalizeTextAreaTransparency(100), 100);
+  assert.equal(normalizeTextAreaTransparency(150), 100);
+  assert.equal(normalizeTextAreaTransparency(-20), 0);
+  assert.equal(normalizeTextAreaTransparency(45.6), 46);   // 取整
+  assert.equal(normalizeTextAreaTransparency('30'), 30);   // 表单值是字符串
+  assert.equal(normalizeTextAreaTransparency(''), 0);      // Number('')=0 —— 空输入视为实色
+  assert.equal(normalizeTextAreaTransparency('abc'), 0);
+  assert.equal(normalizeTextAreaTransparency(null), 0);
+  assert.equal(normalizeTextAreaTransparency(undefined), 0);
+  assert.equal(normalizeTextAreaTransparency(NaN), 0);
+  assert.equal(normalizeTextAreaTransparency(Infinity), 0);
+});
+
+test('textAreaAlpha: 与透明度互为补数,默认下发 100% 保持旧渲染', () => {
+  assert.equal(textAreaAlpha(0), '100%');    // 默认: 实色,不改变既有外观
+  assert.equal(textAreaAlpha(100), '0%');    // 完全透出背景图
+  assert.equal(textAreaAlpha(35), '65%');
+  assert.equal(textAreaAlpha('35'), '65%');
+  assert.equal(textAreaAlpha(999), '0%');    // 先钳位再取补
+  assert.equal(textAreaAlpha(-5), '100%');
+  assert.equal(textAreaAlpha(undefined), '100%');
+  assert.equal(textAreaAlpha('abc'), '100%');
 });

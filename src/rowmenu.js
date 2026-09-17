@@ -27,6 +27,7 @@ import { openMenu, closeMenu, isMenuOpen } from './contextmenu.js';
  *   proofMode     是否处于校对模式（决定校对三项可用性）
  *   canUndo       是否可撤销
  *   mtReady       机翻是否就绪（有 provider）
+ *   tmHit         翻译记忆命中时的建议译文摘要（有值才启用「套用翻译记忆」）
  * @returns {Array} 菜单项数组，形如 { label, hint?, action?, disabled?, sep? }
  */
 export function rowMenuItems(ctx) {
@@ -47,6 +48,11 @@ export function rowMenuItems(ctx) {
 
   items.push({ sep: true });
 
+  items.push({
+    label: c.tmHit ? ('套用记忆：' + c.tmHit) : '套用翻译记忆',
+    action: 'applyTm',
+    disabled: !c.tmHit,
+  });
   items.push({
     label: '机翻本行',
     hint: 'Ctrl+Enter',
@@ -79,6 +85,11 @@ export function rowMenuItems(ctx) {
 
   items.push({ sep: true });
 
+  items.push({
+    label: '历史版本…',
+    action: 'history',
+    disabled: false,
+  });
   items.push({
     label: '撤销',
     hint: 'Ctrl+Z',

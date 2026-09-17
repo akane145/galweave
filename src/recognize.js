@@ -195,7 +195,8 @@ export function detectNameIdPatterns(ids){
 }
 
 // 返回统计来源使用的名字行判定模式(检测结果优先;未检测到则回退内置默认,保证档案明确可复用)
-function namePatternsFor(detected, ids){
+// 第二形参是历史遗留:两个调用点都传了它,但判定规则如注释所述只用 detected,故保留签名、标 _ 不启用
+function namePatternsFor(detected, _ids){
   if (detected && detected.length) return detected;
   return DEFAULT_NAME_ID_PATTERNS.slice();
 }
@@ -344,10 +345,178 @@ export function detectIdOffset(rows, closeMarker){
   return { offset: best, matched: bestN, total };
 }
 
+/* ---------------- 镜像格式(dc4ph 文本导出) ---------------- */
+
+// D.C.4 系文本导出: 每条消息 = #0x 地址头 + 两份相同正文的装饰行(★◎ 001 ◎★//正文 / ★◎ 001 ◎★正文)。
+// 正交数据缺译文槽: 编辑器规范化后每消息一行 ☆;还原时同一个 payload 写回两份镜像行。
+const MIRROR_HEADER_RE = /^#0x([0-9A-Fa-f]+)$/;
+const MIRROR_LINE_RE = /^(\p{So})(\p{So})[ \t]*(\d{3})[ \t]*\2\1(\/\/)?([\s\S]*)$/u;
+
+function mirrorBody(match){
+  const tail = match[5] || '';
+  return match[4] && tail.startsWith('//') ? tail.slice(2) : tail;
+}
+
+// 按 头-斜线行-普通行 三连扫描;全部非空行严格符合且无其他内容才算镜像格式。
+// 允许尾部截断(最后一条消息缺普通行,常见于中断的文本导出)。
+function detectMirrorShapeLegacy(lines){
+  let state = 'idle';
+  let headers = 0;
+  let completed = 0;
+  let pair = null;
+  let other = 0;
+  for (const line of lines){
+    const content = line.trim();
+    if (!content) continue;
+    if (MIRROR_HEADER_RE.test(content)){
+      if (state !== 'idle') other += 1;
+      else { headers += 1; state = 'want-slash'; }
+      continue;
+    }
+    const match = content.match(MIRROR_LINE_RE);
+    if (!match){ other += 1; state = 'idle'; continue; }
+    if (state === 'want-slash' && match[4]){
+      pair = { open: match[1], close: match[2], num: match[3] };
+      state = 'want-plain';
+      continue;
+    }
+    if (state === 'want-plain' && !match[4] && pair &&
+        match[1] === pair.open && match[2] === pair.close && match[3] === pair.num){
+      completed += 1;
+      pair = null;
+      state = 'idle';
+      continue;
+    }
+    other += 1;
+    state = 'idle';
+  }
+  const trailingIncomplete = state === 'want-plain' && headers === completed + 1;
+  return other === 0 && headers >= 1 && completed >= 1 && (headers === completed || trailingIncomplete);
+}
+
+// 镜像格式专用 detect 分支(报告友好;worker 端仍会经 universal 层增强语义记录)
+// master 确认的语义: // 行 = 原文行,普通行 = 译文行(未翻译时预填原文);
+// 带「」= 对话,否则 = 旁白;普通行内容与原文不同即视为已有译文。
+function detectMirrorFormat(text, lines, file) {
+  const { nl, leadingBlank, trailing } = splitText(text);
+  const rows = [];
+  const issues = [];
+  let separators = 0;
+  let index = 0;
+  while (index < lines.length){
+    const line = lines[index];
+    if (!line.trim()){ index += 1; continue; }
+    if (MIRROR_HEADER_RE.test(line.trim())){
+      rows.push({ sequence: rows.length, kind: 'control', source: line, translation: '', lines: [line], id: '' });
+      index += 1;
+      continue;
+    }
+    const slash = lines[index];
+    const plain = lines[index + 1] || '';
+    const m = slash.match(MIRROR_LINE_RE);
+    const p = plain.match(MIRROR_LINE_RE);
+    if (!m || !m[4] || !p || p[1] !== m[1] || p[2] !== m[2] || p[3] !== m[3]){
+      issues.push({ type: 'mirror-incomplete', detail: `镜像行结构不完整: ${slash.slice(0, 80)}` });
+      index += 1;
+      continue;
+    }
+    const body = mirrorBody(m);
+    const plainBody = mirrorBody(p);
+    const translated = plainBody !== body;
+    const row = {
+      sequence: rows.length,
+      kind: 'row',
+      id: m[3],
+      nameEntry: false,
+      sourceLine: slash,
+      translationLine: translated ? plain : '',
+      source: body,
+      sourceExtra: '',
+      translation: translated ? plainBody : '',
+      translationExtra: '',
+      name: '',
+      sourceName: '',
+      translationName: '',
+      marker: m[1],
+      translationMarker: '',
+      segments: [m[3], body],
+      bracketSpeaker: false,
+      bracketStyle: '[[]]',
+      explicitNameSegment: false,
+      original: { source: slash, translation: plain },
+      controls: [],
+      lineKind: '',
+      mirrorPrefixes: {
+        slash: slash.slice(0, slash.length - body.length),
+        plain: plain.slice(0, plain.length - plainBody.length),
+      },
+    };
+    row.lineKind = classify(row);
+    rows.push(row);
+    index += 2;
+  }
+  for (const line of lines) if (isBlank(line)) separators += 1;
+  const dataRows = rows.filter((row) => row.kind === 'row');
+  const ids = dataRows.map((row) => row.id);
+  const dialogue = dataRows.filter((row) => row.lineKind === 'dialogue').length;
+  const narration = dataRows.filter((row) => row.lineKind === 'narration').length;
+  const control = rows.filter((row) => row.kind === 'control').length;
+  return {
+    version: 1,
+    tool: 'recognize-format',
+    file: file || '',
+    encoding: 'utf-8',
+    nl,
+    leadingBlank,
+    trailing,
+    marks: { open: '★', close: '', pairs: 0, confidence: 1 },
+    commentPrefixes: ['#'],
+    nameIdPatterns: namePatternsFor([], ids),
+    idOffset: { offset: 0, matched: 0, total: 0, systematic: false },
+    structure: {
+      shape: 'mirror-dc4ph',
+      idShape: detectIdShape(ids),
+      idRegex: idRegex(detectIdShape(ids)),
+      nameSource: 'none',
+      nameSlot: 'none',
+      nameSlotLabel: '',
+      lineKinds: { dialogue, narration, namedText: 0, nameEntry: 0, control, separator: separators },
+      tags: {},
+      nameValues: {},
+    },
+    rowTypes: {
+      nameRows: 0,
+      nameSuffixN: 0,
+      speakerRows: 0,
+      controlRows: control,
+      separatorRows: separators,
+      commentPrefixes: ['#'],
+    },
+    stats: {
+      blocks: rows.length,
+      paired: dataRows.filter((row) => row.translationLine).length,
+      origOnly: dataRows.filter((row) => !row.translationLine).length,
+      transOnly: 0,
+    },
+    issues,
+    parseConfig: {
+      open: '★', close: '', regex: '', commentPrefixes: ['#'], nameIdPatterns: [],
+    },
+    editable: {
+      nameField: false,
+      note: '镜像格式(★◎ 前缀 ◎★ 后缀): // 行为原文行,普通行为译文行(未翻译时预填原文);「」为对话,其余为旁白。',
+    },
+    rows,
+  };
+}
+
 /* ---------------- 识别主流程 ---------------- */
 
 export function detect(text, file = '') {
   const { lines, nl, leadingBlank, trailing } = splitText(text);
+  if (detectMirrorShapeLegacy(lines)){
+    return detectMirrorFormat(text, lines, file);
+  }
   const marks = detectMarks(lines);
   // 注释前缀 / 名字行编号模式: 从数据中检测,写入规则档案供编辑器/下次导入复用
   const commentPrefixes = detectCommentPrefixes(lines);
@@ -558,8 +727,39 @@ function replaceContent(originalLine, content, marker, name = null, bracketSpeak
     : `${prefix}${marker}${parsed.id}${marker}${restoredContent}`;
 }
 
+// 镜像格式还原: // 行(原文行)保留原文,译文行(普通行)写入译文;未翻译时普通行保留原内容
+function restoreMirror(profile, canonicalText) {
+  const canonicalRows = parseCanonicalRows(canonicalText);
+  const out = [];
+  let rowIndex = 0;
+  for (const row of profile.rows || []) {
+    if (row.kind !== 'row') {
+      if (row.source) out.push(row.source); // 控制行(#0x 地址头)原样
+      continue;
+    }
+    const current = canonicalRows[rowIndex] || null;
+    const prefixes = row.mirrorPrefixes || { slash: '', plain: '' };
+    const sourcePayload = current?.source?.content || row.source;
+    const plainPayload = current?.translation?.content || row.translation || row.source;
+    out.push(prefixes.slash + sourcePayload);
+    out.push(prefixes.plain + plainPayload);
+    out.push('');
+    rowIndex += 1;
+  }
+  while (out.length && out[out.length - 1] === '') out.pop();
+  const nl = profile.nl || '\n';
+  const trailing = profile.trailing !== undefined ? profile.trailing : (profile.trailingBlank ? 1 : 0);
+  let text = out.join(nl) + nl.repeat(trailing);
+  const lead = profile.leadingBlank || 0;
+  if (lead > 0) text = nl.repeat(lead) + text;
+  return text;
+}
+
 // 用识别档案(profile)把规范化文本还原回原格式
 export function restore(profile, canonicalText) {
+  if (profile?.structure?.shape === 'mirror-dc4ph'){
+    return restoreMirror(profile, canonicalText);
+  }
   const canonicalRows = parseCanonicalRows(canonicalText);
   const out = [];
   let rowIndex = 0;

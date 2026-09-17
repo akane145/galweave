@@ -31,9 +31,8 @@
     </div>
     <div class="header-actions">
       <button type="button" id="btnProof" class="header-proof" title="开启/关闭校对模式(状态管理/批注/修改记录)" aria-pressed="false">校对</button>
-      <button type="button" id="btnSidebar" class="header-tool" aria-pressed="false" title="打开或收起上下文">上下文</button>
+      <button type="button" id="btnSidebar" class="header-tool" aria-pressed="false" title="打开或收起侧边栏">侧边栏</button>
       <button type="button" id="btnCommandPanel" class="header-more" aria-haspopup="menu" aria-expanded="false" aria-controls="utilityPanel" title="打开辅助工具">更多</button>
-      <button type="button" id="btnHeaderSave" class="header-save" title="保存到原文件">保存</button>
     </div>
   </header>
 
@@ -42,6 +41,7 @@
     <span class="utility-menu-label">辅助工具</span>
     <button type="button" id="btnParseSet" class="header-tool" role="menuitem" title="格式识别与解析规则">解析规则</button>
     <button type="button" id="btnThemeModal" class="header-tool" role="menuitem" title="主题、背景与字体设置">主题与字体</button>
+    <button type="button" id="btnStats" class="header-tool" role="menuitem" title="翻译进度、日速度与预计完成时间">翻译统计</button>
   </div>
 
   <div id="commandStrip" class="command-strip" data-panel="project" aria-label="当前工作模式工具">
@@ -51,7 +51,14 @@
         <button id="btnImport">导入文本</button>
         <input type="file" id="fileInput" accept=".txt,.ks,.ks.txt,text/plain" hidden>
         <button id="btnSaveFile" title="直接写回导入的原文件">保存原文件</button>
+        <button id="btnSaveAll" title="把所有已打开文本写回各自原文件（仅未保存的）">保存全部</button>
         <button id="btnSave" title="下载一份译文副本">导出译文</button>
+        <select id="exportFormat" class="export-format" title="导出译文的格式">
+          <option value="original">原格式</option>
+          <option value="bilingual">双语对照 TXT</option>
+          <option value="target">纯译文 TXT</option>
+          <option value="csv">对照 CSV</option>
+        </select>
       </div>
       <div class="tool-group" data-command-panel="project" aria-label="进度操作">
         <span class="tool-label">进度</span>
@@ -113,11 +120,12 @@
 
 <div id="main">
   <aside id="storyRail" aria-label="故事与文档导航">
-    <div class="rail-topline"><span>PROJECT</span><button type="button" id="btnRailImport" title="导入文本">导入</button></div>
+    <div class="rail-topline"><span>PROJECT</span></div>
     <div class="rail-project">
       <span class="rail-overline">CURRENT SCRIPT</span>
       <strong id="railFilename">未打开文档</strong>
       <span id="railProgress">等待导入</span>
+      <div id="railProgressBar" class="rail-progress hidden"></div>
     </div>
     <div class="rail-section-head"><span>STORY</span><span>OPEN</span></div>
     <div id="tabs" class="tab-strip" role="tablist" aria-label="已打开的文档"></div>
@@ -160,16 +168,14 @@
     <div id="list" role="list">
     <div id="empty">
       <div class="empty-state">
-        <div class="empty-icon" aria-hidden="true"></div>
         <div class="empty-title">从一句对白开始</div>
         <div class="empty-desc">导入一份 Galgame 脚本，或将文本直接拖入工作台。<br>每一段对白都会在这里成为可阅读、可翻译的稿页。</div>
-        <div class="empty-action"><button type="button" class="btn-import" id="emptyImport">导入脚本</button></div>
       </div>
     </div>
   </div>
   </section>
 
-  <aside id="sidebar" aria-label="当前文本上下文">
+  <aside id="sidebar" aria-label="侧边栏">
     <div id="sbResize" title="拖动调整侧边栏宽度（双击复位）"></div>
     <div class="side-head">
       <div class="context-title"><span class="rail-overline">CONTEXT</span><span id="sideTitle">当前对白</span></div>
@@ -178,7 +184,7 @@
         <button id="side-tab-glossary" class="side-tab" data-tab="glossary" role="tab" aria-selected="false" aria-controls="panel-glossary" title="人物与术语">术语</button>
         <button id="side-tab-dict" class="side-tab" data-tab="dict" role="tab" aria-selected="false" aria-controls="panel-dict" title="词典查询">词典</button>
         <button id="side-tab-proof" class="side-tab" data-tab="proof" role="tab" aria-selected="false" aria-controls="panel-proof" title="校对与批注">校对</button>
-        <button id="btnSidebarClose" type="button" aria-label="收起上下文" title="收起上下文">收起</button>
+        <button id="btnSidebarClose" type="button" aria-label="收起侧边栏" title="收起侧边栏">收起</button>
       </div>
     </div>
     <div class="context-focus" aria-live="polite">
@@ -241,6 +247,7 @@
             <button id="btnDictLookup" class="toolbtn">查询</button>
           </div>
           <label class="check-label" title="精确/前缀无结果时按「词条包含查询词」模糊匹配"><input type="checkbox" id="dictFuzzy"> 包含匹配（模糊）</label>
+          <div id="dictHistory" class="dict-history hidden" aria-label="最近查询"></div>
           <div id="dictResults" class="dict-results"></div>
           <div class="side-hint">在原文或译文里选中词，点弹出的「📖 查词」也能查询；查询会并发所有已启用的词典源。勾选「包含匹配」可在无精确命中时做包含式模糊搜索。</div>
         </div>
@@ -283,10 +290,15 @@
     <!-- 校对面板 -->
     <div class="side-panel hidden" id="panel-proof" role="tabpanel" aria-labelledby="side-tab-proof">
       <div class="side-body">
+        <div class="proof-log-toolbar">
+          <button type="button" id="btnExportProofReport" class="secondary toolbtn" title="汇总当前脚本的原文、修改前译文、当前译文和批注；桌面版直接保存到 Obsidian 库">导出校对意见</button>
+          <span class="side-hint">当前脚本 · 原文 / 旧译 / 改译 / 意见</span>
+        </div>
         <div class="proof-view-tabs">
           <button class="proof-view-tab active" data-pv="anno">📌 批注总览</button>
           <button class="proof-view-tab" data-pv="missing">⚠ 漏翻/异常 <em id="pvMissingCount">0</em></button>
           <button class="proof-view-tab" data-pv="log">📋 修改记录</button>
+          <button class="proof-view-tab" data-pv="mtdiff">🤖 机翻对比 <em id="pvMtCount">0</em></button>
         </div>
 
         <!-- 批注总览 -->
@@ -310,9 +322,23 @@
         <div class="proof-view hidden" id="pv-log">
           <div class="proof-log-toolbar">
             <button id="btnLogRefresh" class="secondary toolbtn" title="重新读取修改记录">刷新</button>
-            <span class="side-hint">校对模式下记录译文/译名改动（最多 500 条，显示最新 50 条）</span>
+            <span class="side-hint">完整保留所有修改对比：最初文本 → 最新文本，同一句的中途输入自动合并。</span>
           </div>
           <div id="proofLogList" class="proof-list"></div>
+        </div>
+
+        <!-- 机翻对比（ROADMAP P2-7）：机翻基线 vs 人工定稿 -->
+        <div class="proof-view hidden" id="pv-mtdiff">
+          <div class="proof-log-toolbar">
+            <button id="btnMtDiffRefresh" class="secondary toolbtn" title="重新读取机翻基线并重算差异">刷新</button>
+            <button id="btnMtDiffReset" class="secondary toolbtn" title="清空机翻基线（不改动译文）">清空基线</button>
+          </div>
+          <div id="mtDiffSummary" class="mt-diff-summary"></div>
+          <div class="gloss-sec-title">改动模式</div>
+          <div id="mtDiffCats" class="proof-list"></div>
+          <div class="gloss-sec-title">改动明细（点击跳行）</div>
+          <div id="mtDiffList" class="proof-list"></div>
+          <div class="side-hint">机翻写入时会在此留一份基线；此后的人工改动都在「机翻 → 定稿」之间算差异。条目右侧「用机翻」可回滚到原机翻（可 Ctrl+Z 撤销）。清空基线只是抹掉参照，不动译文。</div>
         </div>
       </div>
     </div>
@@ -565,6 +591,11 @@
                 <input type="range" id="bgOpacity" min="0.5" max="0.98" step="0.01">
                 <small>数值越高，背景越收敛、文字越清晰</small>
               </div>
+              <div class="field opacity-field">
+                <div class="field-label-row"><label for="textAreaOpacity">文本区透明度</label><output id="textAreaOpacityVal" for="textAreaOpacity"></output></div>
+                <input type="range" id="textAreaOpacity" min="0" max="100" step="1">
+                <small>让对白行透出背景图；0% 为实色（默认），数值越高背景越明显</small>
+              </div>
               <div class="field">
                 <label for="bgFit">画面填充</label>
                 <select id="bgFit">
@@ -576,6 +607,22 @@
                 </select>
               </div>
             </div>
+          </div>
+        </section>
+
+        <section class="settings-section density-section" aria-labelledby="densityTitle">
+          <div class="settings-section-heading compact">
+            <span class="settings-section-index">03</span>
+            <div><h4 id="densityTitle">阅读密度</h4><p>只调整列表行高与控件高度，不改字号、不改 8px 网格。</p></div>
+          </div>
+          <div class="field">
+            <label for="densitySelect">行高档位</label>
+            <select id="densitySelect">
+              <option value="compact">紧凑 — 校对扫描 / 双屏并排</option>
+              <option value="cozy">标准 — 默认</option>
+              <option value="loose">宽松 — 长文精翻 / 外接大屏</option>
+            </select>
+            <small>切换会立即预览；点「保存外观」后才会记住。</small>
           </div>
         </section>
       </div>
@@ -610,6 +657,50 @@
             </article>
           </div>
           <p class="settings-caption">颜色按主题分别记忆；切换夜读、昼笺或墨影时，会自动使用各自的颜色槽位。</p>
+        </section>
+
+        <section class="settings-section" aria-labelledby="fontLibraryTitle">
+          <div class="settings-section-heading compact">
+            <span class="settings-section-index">02</span>
+            <div><h4 id="fontLibraryTitle">自定义字体</h4><p>导入字体文件或指定字体文件夹，收录的字体族会进入上方「字体族」候选。</p></div>
+          </div>
+          <div class="font-lib">
+            <div class="font-lib-head">
+              <small id="fontLibSummary" class="font-lib-summary">尚未导入字体文件</small>
+              <div class="font-lib-actions">
+                <button type="button" id="btnFontImport" class="toolbtn secondary nowrap" title="选择一个或多个字体文件（ttf / otf / ttc / woff / woff2）">导入字体文件</button>
+                <button type="button" id="btnFontFolder" class="toolbtn secondary nowrap" title="指定一个字体文件夹，整目录收录为可选用字体">指定字体文件夹</button>
+                <button type="button" id="btnFontRefresh" class="toolbtn secondary nowrap" title="重新扫描已指定的字体文件夹，拾取新增字体">重新扫描</button>
+                <button type="button" id="btnFontClear" class="toolbtn secondary nowrap" title="清空已导入的全部自定义字体">清空</button>
+              </div>
+            </div>
+            <p id="fontFolderPath" class="font-lib-path">未指定字体文件夹</p>
+            <ul id="fontLibList" class="font-lib-list"></ul>
+            <p class="font-lib-hint">桌面版只记录字体路径、不复制文件；浏览器版把字体存入本机数据库。</p>
+          </div>
+          <input type="file" id="fontFileInput" class="hidden" multiple
+                 accept=".ttf,.otf,.ttc,.otc,.woff,.woff2">
+        </section>
+
+        <section class="settings-section byte-encoding-section" aria-labelledby="byteEncodingTitle">
+          <div class="settings-section-heading compact">
+            <span class="settings-section-index">03</span>
+            <div><h4 id="byteEncodingTitle">字数校验口径</h4><p>译文行右下角的字节数按哪种编码计算。</p></div>
+          </div>
+          <div class="field">
+            <label for="byteEncSelect">字节计数口径</label>
+            <select id="byteEncSelect">
+              <option value="utf8">UTF-8 — 中文 3 字节 / 日文假名 3 字节</option>
+              <option value="sjis">Shift-JIS — 全角 2 字节（多数 galgame 引擎口径）</option>
+            </select>
+            <small>同一句话两种口径能差出一倍。指示器上的 <b>UTF8 / SJIS</b> 后缀即当前口径。</small>
+          </div>
+          <div class="field">
+            <div class="field-label-row"><label for="byteLimitInput">每行字数上限</label><output id="byteLimitVal" for="byteLimitInput"></output></div>
+            <input type="number" id="byteLimitInput" min="20" max="4000" step="1" placeholder="留空 = 不校验">
+            <small>按当前口径的字节数计。留空或填 0 = 关闭超限提示（指示器隐藏）。默认 120 是 NScripter 常见文本框容量。</small>
+          </div>
+          <p class="settings-caption">目标引擎确定后把上限改成该引擎的文本框规格即可；口径与上限互不影响。</p>
         </section>
       </div>
     </div>

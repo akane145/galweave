@@ -7,7 +7,6 @@ import { debounce, throttle } from '../src/debounce.js';
 import { handleMessage } from '../src/workers/search.worker.js';
 import { handleMessage as recogHandle } from '../src/workers/recognize.worker.js';
 import { replaceAllInParasDeltas } from '../src/search-remote.js';
-import { computeMatches } from '../src/search.js';
 
 /* ---------------- debounce / throttle ---------------- */
 

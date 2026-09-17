@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { utf8Bytes, sjisBytes, byteCount, usageLevel, formatByteTitle, encodingLabel } from '../src/bytes.js';
+import { utf8Bytes, sjisBytes, byteCount, usageLevel, formatByteTitle, encodingLabel, normalizeEncoding, encodingName, ENCODINGS, normalizeByteLimit, BYTE_LIMIT_MIN, BYTE_LIMIT_MAX, BYTE_LIMIT_DEFAULT } from '../src/bytes.js';
 
 test('utf8Bytes：ASCII 1 字节 / 中文 3 字节 / 日文假名 3 字节', () => {
   assert.equal(utf8Bytes('abc'), 3);
@@ -77,4 +77,53 @@ test('encodingLabel', () => {
   assert.equal(encodingLabel('sjis'), 'SJIS');
   assert.equal(encodingLabel('utf8'), 'UTF8');
   assert.equal(encodingLabel(), 'UTF8');
+});
+
+test('normalizeEncoding：只认 sjis，其余（含大小写/空白/非法值）回退 utf8', () => {
+  assert.equal(normalizeEncoding('sjis'), 'sjis');
+  assert.equal(normalizeEncoding('SJIS'), 'sjis');        // 持久化读回可能大小写不一致
+  assert.equal(normalizeEncoding(' sjis '), 'sjis');
+  assert.equal(normalizeEncoding('utf8'), 'utf8');
+  assert.equal(normalizeEncoding('utf-8'), 'utf8');       // 常见误写不认，回退默认
+  assert.equal(normalizeEncoding(''), 'utf8');
+  assert.equal(normalizeEncoding(null), 'utf8');
+  assert.equal(normalizeEncoding(undefined), 'utf8');
+  assert.equal(normalizeEncoding(0), 'utf8');
+  assert.equal(normalizeEncoding({}), 'utf8');
+});
+
+test('encodingLabel：非法值走与 normalizeEncoding 相同的回退路径', () => {
+  assert.equal(encodingLabel('SJIS'), 'SJIS');
+  assert.equal(encodingLabel('啥'), 'UTF8');
+  assert.equal(encodingLabel(null), 'UTF8');
+});
+
+test('encodingName：给出中文说明，两种口径文案不同', () => {
+  assert.equal(encodingName('sjis'), 'Shift-JIS（全角 2 字节）');
+  assert.equal(encodingName('utf8'), 'UTF-8（中文 3 字节）');
+  assert.equal(encodingName('啥'), 'UTF-8（中文 3 字节）');
+});
+
+test('ENCODINGS 顺序即设置项下拉顺序，且与 normalizeEncoding 的合法集合一致', () => {
+  assert.deepEqual(ENCODINGS, ['utf8', 'sjis']);
+  for (const e of ENCODINGS) assert.equal(normalizeEncoding(e), e);
+});
+
+test('normalizeByteLimit: 0 / 负数 / 非法 → 0（"不校验"），合法值钳位取整', () => {
+  assert.equal(normalizeByteLimit(0), 0);
+  assert.equal(normalizeByteLimit(-5), 0);
+  assert.equal(normalizeByteLimit(''), 0);
+  assert.equal(normalizeByteLimit(null), 0);
+  assert.equal(normalizeByteLimit(undefined), 0);
+  assert.equal(normalizeByteLimit('abc'), 0);
+  assert.equal(normalizeByteLimit(NaN), 0);
+});
+
+test('normalizeByteLimit: 合法值钳到 [20, 4000] 并取整', () => {
+  assert.equal(normalizeByteLimit(120), 120);
+  assert.equal(normalizeByteLimit('120'), 120);
+  assert.equal(normalizeByteLimit(120.6), 121);
+  assert.equal(normalizeByteLimit(1), BYTE_LIMIT_MIN);      // 下限 20
+  assert.equal(normalizeByteLimit(999999), BYTE_LIMIT_MAX); // 上限 4000
+  assert.equal(BYTE_LIMIT_DEFAULT, 120);
 });

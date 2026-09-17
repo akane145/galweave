@@ -4,7 +4,7 @@
 //   - 四类批注: 问题/建议/疑问/备注;新增未解决的「问题/疑问」批注 → 该行自动标「有问题」,
 //     全部解决 → 自动回「待校对」
 //   - 已通过行再次发生文本变化 → 旧通过状态失效(回到待校对)
-//   - 修改记录: 校对模式下记录译文/译名整句改动(编辑/撤销/重做/还原/批量),最新在前,最多 500 条
+//   - 修改记录: 每行每字段仅保留首次修改前与最新文本,最新在前
 //   - 持久化: 桌面 <源文件>.proof.json;浏览器 IndexedDB(键 'proof:<文件名>')
 // 本模块不直接操作 DOM;行刷新/统计刷新通过 setProofUI 注入的回调完成(便于单元测试)。
 
@@ -16,7 +16,6 @@ export const STATUS = { PENDING: 'pending', APPROVED: 'approved', ISSUE: 'issue'
 export const ANNO_TYPES = { issue: '问题', suggestion: '建议', question: '疑问', note: '备注' };
 export const CHANGE_SOURCES = { edit: '编辑', undo: '撤销', redo: '重做', restore: '还原', batch: '批量' };
 
-const CHANGE_LIMIT = 500;
 const SETTLE_MS = 1200;      // 整句结算延迟(与 Galweave 一致)
 const SAVE_DEBOUNCE = 400;   // 校对数据脏写防抖
 
@@ -47,6 +46,7 @@ export let proofKeys = { approve: 'q', issue: 'w', annotate: 'a', nextIssue: '',
 export function defaultKeys(){ return { approve: 'q', issue: 'w', annotate: 'a', nextIssue: '', toggleMode: '' }; }
 export function isEnabled(){ return enabled; }
 export function setEnabled(v){
+  if (!v) settleAll();
   enabled = !!v;
   if (!enabled) clearSettleTimers();
 }
@@ -170,11 +170,8 @@ export function settleInput(i){
   if (s.timer) clearTimeout(s.timer);
   const p = model.getPara(i);
   if (!p) return;
-  if (s.beforeT === p.translation){
-    if (s.beforeN !== p.nameTr) recordChange(i, 'nameTr', s.beforeN, p.nameTr, 'edit');
-  } else {
-    recordChange(i, 'translation', s.beforeT, p.translation, 'edit');
-  }
+  recordChange(i, 'translation', s.beforeT, p.translation, 'edit');
+  recordChange(i, 'nameTr', s.beforeN, p.nameTr, 'edit');
 }
 
 export function clearSettleTimers(){
@@ -182,17 +179,37 @@ export function clearSettleTimers(){
   settleMap.clear();
 }
 
+function settleAll(){
+  for (const i of [...settleMap.keys()]) settleInput(i);
+}
+
 export function recordChange(i, field, before, after, source){
   if (!enabled || before === after) return false;
   const p = model.getPara(i);
   if (!p) return false;
-  changes.unshift({
-    id: 'c_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+  const index = changes.findIndex(c => c.paraId === p.orig && c.line === i + 1 && c.field === field);
+  const previous = index >= 0 ? changes[index] : null;
+  if (previous) {
+    before = previous.before;
+    changes.splice(index, 1);
+  }
+  if (before !== after) changes.unshift({
+    id: previous?.id || 'c_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
     paraId: p.orig, line: i + 1, field, before, after, at: Date.now(), source,
   });
-  if (changes.length > CHANGE_LIMIT) changes.length = CHANGE_LIMIT;
   scheduleSave();
   return true;
+}
+
+// 兼容旧版逐次日志：存储顺序最新在前，保留最早 before 和最新 after。
+function mergeChanges(entries){
+  const merged = new Map();
+  for (const c of entries){
+    const key = JSON.stringify([c.paraId, c.line, c.field]);
+    if (merged.has(key)) merged.get(key).before = c.before;
+    else merged.set(key, { ...c });
+  }
+  return [...merged.values()].filter(c => c.before !== c.after);
 }
 
 // 批量操作(替换/术语应用/撤销/重做/还原)前调用: 快照 {orig: {t, n}}
@@ -208,15 +225,9 @@ export function recordDiff(snap, source){
   model.getParas().forEach((p, i) => {
     const s = snap.get(p.orig);
     if (!s) return;
-    if (s.t === p.translation){
-      if (s.n !== p.nameTr){
-        recordChange(i, 'nameTr', s.n, p.nameTr, source);
-        demoteApproved(i);
-      }
-    } else {
-      recordChange(i, 'translation', s.t, p.translation, source);
-      demoteApproved(i);
-    }
+    recordChange(i, 'translation', s.t, p.translation, source);
+    recordChange(i, 'nameTr', s.n, p.nameTr, source);
+    if (s.t !== p.translation || s.n !== p.nameTr) demoteApproved(i);
   });
 }
 
@@ -224,7 +235,8 @@ export function recordDiff(snap, source){
 export function restoreChange(id){
   const c = changes.find(x => x.id === id);
   if (!c) return null;
-  const idx = model.getParas().findIndex(p => p.orig === c.paraId);
+  const idx = model.getPara(c.line - 1)?.orig === c.paraId
+    ? c.line - 1 : model.getParas().findIndex(p => p.orig === c.paraId);
   if (idx === -1) return { missing: true };
   const p = model.getPara(idx);
   const current = c.field === 'translation' ? p.translation : p.nameTr;
@@ -275,7 +287,8 @@ export function analyzeRow(p){
   const orig = p.content || '';
   const tv = transValue(p);
   if (!tv.trim()) return { kind: 'missing' };
-  if (p.translation === p.content) return { kind: 'placeholder' };
+  // 镜像格式(dc4ph)未翻译时译文栏预填原文 —— 那是系统占位,不是用户照抄,按"漏翻"报更准
+  if (p.translation === p.content) return { kind: p.mirror ? 'missing' : 'placeholder' };
   const r = tv.length / (orig.length || 1);
   if (r < RATIO_MIN || r > RATIO_MAX) return { kind: 'ratio', ratio: +r.toFixed(2) };
   return null;
@@ -304,6 +317,7 @@ export function analyzeRows(paras){
 
 // 收集可持久化的校对数据(proof.json 内容): 批注按 orig 索引 + 修改记录
 export function collect(){
+  settleAll();
   const annotations = {};
   for (const p of model.getParas()){
     if (p.pr && (p.pr.status !== STATUS.PENDING || (p.pr.annotations && p.pr.annotations.length))){
@@ -315,7 +329,7 @@ export function collect(){
 
 function applyData(data){
   if (!data) return;
-  if (Array.isArray(data.changes)) changes = data.changes;
+  if (Array.isArray(data.changes)) changes = mergeChanges(data.changes);
   if (data.annotations){
     for (const [orig, pr] of Object.entries(data.annotations)){
       const p = model.getParas().find(x => x.orig === orig);
@@ -401,6 +415,7 @@ export function resetState(){
 
 /** 捕获校对内存状态(changes/proof 句柄)。行级 p.pr 已随 paras 快照携带。 */
 export function snapshotState(){
+  settleAll();
   return { changes, proofPath, proofKey, activeForFile };
 }
 
@@ -408,7 +423,7 @@ export function snapshotState(){
 export function restoreState(s){
   clearSettleTimers();
   if (!s) return;
-  changes = Array.isArray(s.changes) ? s.changes : [];
+  changes = Array.isArray(s.changes) ? mergeChanges(s.changes) : [];
   proofPath = s.proofPath || null;
   proofKey = s.proofKey || '';
   activeForFile = !!s.activeForFile;

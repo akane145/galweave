@@ -5,11 +5,7 @@ import assert from 'node:assert/strict';
 
 import * as tb from '../src/tabdock.js';
 
-function fresh(){
-  // 重置模块内部状态: 通过重新导入不可行,这里直接提供隔离——用 tb 提供的 API 无法清空,
-  // 因此每个测试用不同路径避免相互影响,并测试相对自洽的序列。
-  return null;
-}
+// 模块内部状态无法重置(没有清空 API),因此每个测试用不同路径避免相互影响。
 
 test('open: 同路径聚焦已有标签,不新建重复', () => {
   const k1 = tb.open('/a/b.txt', 'b.txt');

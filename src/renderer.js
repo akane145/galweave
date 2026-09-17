@@ -7,7 +7,7 @@ import { transValue, buildOrigHighlights } from './parsers.js';
 import { getParas } from './model.js';
 import { createRowHeightModel } from './virtuallist.js';
 import { currentToken } from './suggest.js';
-import { byteCount, usageLevel, formatByteTitle, encodingLabel } from './bytes.js';
+import { byteCount, usageLevel, formatByteTitle, encodingLabel, normalizeEncoding } from './bytes.js';
 import { rowStatusInfo } from './rowstatus.js';
 
 const ROW_MAX = 400;    // textarea 最大高度(px)
@@ -16,7 +16,8 @@ const PIN_LIMIT = 60;   // 焦点行距窗口超过此行数才允许卸载(避�
 
 /* ---------------- 状态 ---------------- */
 
-let rows = {};          // i -> { el, num, pid, origName, orig, nameInput, trans, bOpen, bClose, copy }
+let rows = {};         // ⚠️ 对象映射不是数组：遍历用 Object.values(rows)，for...of 会炸掉 init（2026-09-10 踩过）
+                       // i -> { el, num, pid, origName, orig, nameInput, trans, bOpen, bClose, copy }
 
 const list = document.getElementById('list');
 const emptyEl = document.getElementById('empty');
@@ -70,7 +71,7 @@ export function setRendererState(partial){ Object.assign(state, partial); }
 /* ---------------- 原文 HTML: 术语高亮 + 搜索高亮 合并 ---------------- */
 
 export function renderOrigHTML(i, p, matches, terms){
-  const c = p.content;
+  const c = String(p?.content || '');
   const units = buildOrigHighlights(i, c, matches, terms);
   if (!units.length) return esc(c);
   let html = '', last = 0;
@@ -82,8 +83,7 @@ export function renderOrigHTML(i, p, matches, terms){
     else html += seg;
     last = u.to;
   }
-  html += esc(c.slice(last));
-  return html;
+  return html + esc(c.slice(last));
 }
 
 /* ---------------- 窗口化渲染核心 ---------------- */
@@ -504,7 +504,7 @@ function buildRow(i){
     if (hit && state.onTermClick) state.onTermClick(i, hit.getAttribute('data-dst') || '');
   });
 
-  rows[i] = { el: row, num, pid, origName, orig, nameInput, trans: input, bOpen, bClose, copy: copyBtn, inputRow, translationBlock, speakerPlate, prBadge, btnApprove, btnIssue, btnNotes, notes, notesType, notesInput, notesList, proofRow, byteMeter, byteNum, byteTotal, byteEnc, statusPill, rsGlyph, rsLabel };
+  rows[i] = { el: row, num, pid, origCaption, origName, orig, nameInput, trans: input, bOpen, bClose, copy: copyBtn, inputRow, translationBlock, transCaption, speakerPlate, prBadge, btnApprove, btnIssue, btnNotes, notes, notesType, notesInput, notesList, proofRow, byteMeter, byteNum, byteTotal, byteEnc, statusPill, rsGlyph, rsLabel };
   // 原文阅读层 → 译者角色名牌 + 译文创作层 → 校对上下文。
   speakerPlate.append(nameInput);
   inputRow.append(input, copyBtn, statusPill);
@@ -657,7 +657,19 @@ export function syncRow(i){
   r.btnNotes.setAttribute('aria-expanded', String(shouldOpen));
   r.el.style.display = state.filterShowRow(i) ? '' : 'none';
   autoResize(r.trans);
+  syncOriginalWrapWidth(r);
   measureRow(i); // 行高可能已变(译文增高/批注增减),同步高度模型与占位
+}
+
+// 原文文本与译文 textarea 使用同一个可用宽度，保证两列在相同位置换行。
+function syncOriginalWrapWidth(r){
+  if (!r?.orig || !r.trans || r.el.style.display === 'none') return;
+  const origRect = r.orig.getBoundingClientRect();
+  const transRect = r.trans.getBoundingClientRect();
+  if (transRect.width <= 0) return;
+  r.orig.style.width = transRect.width + 'px';
+  r.orig.style.position = 'relative';
+  r.orig.style.left = (transRect.left - origRect.left) + 'px';
 }
 
 /** 校对模式开关联动: 开启时让有批注的行默认展开批注框(关闭时不再自动展开) */
@@ -978,7 +990,7 @@ function renderSuggest(i, ta){
    不用抖动：抖动在输入过程中打断肌肉记忆，且在 2000+ 行虚拟滚动里触发布局重排。
    只在停止输入 400ms 后对超限行做 3 次呼吸，且不位移、不改尺寸。 */
 
-// 上限读自 CSS 变量 --byte-limit，读一次缓存。Q3 目标引擎确定后只需改 CSS，JS 不动。
+// 上限读自 CSS 变量 --byte-limit，读一次缓存。设置项改动后由 setByteLimit() 失效缓存。
 let _byteLimit = null;
 function byteLimit(){
   if (_byteLimit === null){
@@ -988,11 +1000,38 @@ function byteLimit(){
   return _byteLimit;
 }
 
-// 计数口径：默认 UTF-8。Shift-JIS 口径待 Q3 引擎规格确认后接设置项（bytes.js 已支持两种）。
+/** 当前字数上限（0 = 未配置，指示器隐藏），供设置界面回填 */
+export function getByteLimit(){
+  return byteLimit();
+}
+
+/**
+ * 设置字数上限。写回 :root 的 `--byte-limit`（保持"上限的唯一来源"仍在 CSS 变量），
+ * 失效读缓存后重算所有已挂载行。
+ *
+ * ⚠️ `limit = 0` 是**显式"不校验"**，必须写成内联 `--byte-limit:0` 而**不能** removeProperty ——
+ * 移除内联覆盖会退回样式表里的 120，用户选了"关闭超限提示"却又被重新开启。
+ * 非数字 / 负数视为无效输入，直接不动。
+ */
+export function setByteLimit(limit){
+  const n = Number(limit);
+  if (!Number.isFinite(n) || n < 0) return;
+  document.documentElement.style.setProperty('--byte-limit', String(Math.round(n)));
+  _byteLimit = null;
+  for (const r of Object.values(rows)) if (r && r.byteMeter) { r.byteMeter.classList.remove("breathe"); updateByteMeter(r); }
+}
+
+// 计数口径：默认 UTF-8，可在「主题与字体 → 文本排印」切换为 Shift-JIS（设置项持久化）。
 let _byteEnc = 'utf8';
+
+/** 当前计数口径（'utf8' | 'sjis'），供设置界面回填用 */
+export function getByteEncoding(){
+  return _byteEnc;
+}
+
 export function setByteEncoding(enc){
-  _byteEnc = enc === 'sjis' ? 'sjis' : 'utf8';
-  for (const r of rows) if (r) { r.byteMeter.classList.remove('breathe'); updateByteMeter(r); }
+  _byteEnc = normalizeEncoding(enc);
+  for (const r of Object.values(rows)) if (r && r.byteMeter) { r.byteMeter.classList.remove("breathe"); updateByteMeter(r); }
 }
 
 function updateByteMeter(r){

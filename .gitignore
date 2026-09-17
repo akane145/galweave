@@ -44,3 +44,17 @@ scripts/snappy_*.ps1
 *.bak
 .DS_Store
 *.log
+
+# Superdesign 临时文件(设计过程产物,不入库)
+.superdesign/tmp/
+
+# 本地任务、截图与个人资料
+.shots/
+.superdesign/
+.workbuddy/
+MEMORY.md
+tasks/
+obsidian-export.json
+test text/dc4ph/
+vscode-extension/.mimosa/
+vscode-extension/dist/

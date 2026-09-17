@@ -1,7 +1,6 @@
 // workers-client.js — Worker 调度器(主线程侧)
 // 为 search/recognize 两个 worker 提供统一调用接口;
 // 生产/测试都能用(node 下 useRealWorker=false 走同步 in-process 处理器)。
-import * as fsx from './fs.js';
 
 let searchW = null, recogW = null;
 let nextId = 1;

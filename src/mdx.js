@@ -28,6 +28,16 @@ export function srcToResourceKey(src){
   return String(src || '').replace(/^[\\/]+/, '');
 }
 
+/**
+ * 发音引用 → MDD 资源 key: 先剥 `sound://` 协议头再去前导斜杠。
+ * 词条里常见 `<a href="sound://s00012345.aac">`(如大词泉),若不剥协议头,
+ * key 会带着 `sound://` 去 mdd 查询,Rust 侧 mdd_key_variants 只裁斜杠 → 永远查不到。
+ * data-sound 里已存裸 key 时本函数同样兼容。
+ */
+export function soundResourceKey(src){
+  return srcToResourceKey(String(src || '').replace(/^sound:\/\//i, ''));
+}
+
 /** 是否为需要 MDD 解析的本地资源 src(http/data/blob 等外部资源不需要) */
 export function isMddResourceSrc(src){
   return !!String(src || '') && !/^(https?:|data:|blob:|about:)/i.test(src);
@@ -600,6 +610,87 @@ export function createTauriMdd(cfg){
         handle = null;
       }
     },
+  };
+}
+
+/* ================= 分卷 MDD 与磁盘资源兜底(桌面版) ================= */
+
+/** 分卷 MDD 候选路径: X.mdd + X.1.mdd … X.9.mdd(大词泉 DJS.mdd + DJS.1.mdd 这类拆分包)。 */
+export function mddPartPaths(mdxPath){
+  const base = String(mdxPath || '');
+  if (!/\.mdx$/i.test(base)) return [];
+  const out = [base.replace(/\.mdx$/i, '.mdd')];
+  for (let n = 1; n <= 9; n++) out.push(base.replace(/\.mdx$/i, '.' + n + '.mdd'));
+  return out;
+}
+
+/**
+ * 组合多个资源源: 按顺序逐个尝试,第一个命中的返回;单个源抛错视为未命中继续。
+ * 接口与 createTauriMdd 完全一致(resource/resourceB64/dispose),可无缝替换单个 mdd。
+ */
+export function createCompositeMdd(parts){
+  const list = (Array.isArray(parts) ? parts : []).filter(Boolean);
+  return {
+    name: list.map(p => p.name).join(' + '),
+    parts: list,
+    async resourceB64(key){
+      for (const p of list){
+        try {
+          const b64 = await p.resourceB64(key);
+          if (b64) return b64;
+        } catch (e){ /* 单个源失败 → 试下一个 */ }
+      }
+      return null;
+    },
+    async resource(key){
+      for (const p of list){
+        try {
+          const buf = await p.resource(key);
+          if (buf) return buf;
+        } catch (e){ /* 同上 */ }
+      }
+      return null;
+    },
+    dispose(){ for (const p of list){ try { if (p.dispose) p.dispose(); } catch (e) { /* 忽略 */ } } },
+  };
+}
+
+/** 资源 key 的磁盘候选相对路径: 先按完整相对路径,再退回文件名。拒绝空段与穿越(./ ..)。 */
+export function diskResourceKeyCandidates(key){
+  const s = String(key || '').replace(/\\/g, '/').replace(/^[\\/]+/, '');
+  const segs = s.split('/').filter(Boolean);
+  if (!segs.length || segs.some(x => x === '.' || x === '..')) return [];
+  const full = segs.join('/');
+  const base = segs[segs.length - 1];
+  return (base && base !== full) ? [full, base] : [full];
+}
+
+/**
+ * 磁盘资源兜底: 词条/样式引用的相对文件若与 mdx 同目录或其子目录
+ * (如 古語大辞典的 KogoGaiji.ttf、小学馆解包出的 image/**),mdd 里查不到时从这里读。
+ * readB64 由调用方注入(桌面版 fsx.readFileB64),保持本模块可单测、不依赖 Tauri。
+ */
+export function createDiskResourceMdd(cfg){
+  const name = cfg.name || '磁盘资源';
+  const dir = String(cfg.dir || '').replace(/[\\/]+$/, '');
+  const readB64 = cfg.readB64 || null;
+  return {
+    name,
+    async resourceB64(key){
+      if (!readB64 || !dir) return null;
+      for (const cand of diskResourceKeyCandidates(key)){
+        try {
+          const b64 = await readB64(dir + '/' + cand);
+          if (b64) return b64;
+        } catch (e){ /* 文件不存在/读不了 → 试下一个候选 */ }
+      }
+      return null;
+    },
+    async resource(key){
+      const b64 = await this.resourceB64(key);
+      return b64 ? fsx.base64ToArrayBuffer(b64) : null;
+    },
+    dispose(){},
   };
 }
 

@@ -62,8 +62,9 @@ export function toGlossary(rows){
   return out;
 }
 
-/** 字段转义: 含逗号/引号/换行时加引号并把 " 翻倍 */
-function csvField(s){
+/** 字段转义: 含逗号/引号/换行时加引号并把 " 翻倍。
+ *  导出模块（src/exporter.js）复用此函数，避免两处转义规则分叉。 */
+export function csvField(s){
   s = String(s == null ? '' : s);
   return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }

@@ -115,6 +115,115 @@ export async function saveFontSettings(font){
   await saveSettings(s);
 }
 
+/* ---------------- 自定义字体库(导入文件 / 指定文件夹) ---------------- */
+
+/**
+ * 读取自定义字体库 → { folder, folderName, files }(未设置返回 null)。
+ * 归一化/去重由 fonts.mergeFontLibrary 负责;这里只负责取原始数据。
+ * 浏览器端字体字节存在 IndexedDB(fontloader),这里只存元数据。
+ */
+export async function loadFontLibrary(){
+  const s = await loadSettings();
+  return (s.ui && s.ui.fontLibrary) || null;
+}
+
+/** 保存自定义字体库到 settings.ui.fontLibrary */
+export async function saveFontLibrary(lib){
+  const s = await loadSettings();
+  if (!s.ui) s.ui = {};
+  s.ui.fontLibrary = lib;
+  await saveSettings(s);
+}
+
+/* ---------------- 文本区透明度 ---------------- */
+
+/**
+ * 读取文本区透明度（0–100，0 = 实色）。
+ * 未设置返回 null，由 theme.normalizeTextAreaTransparency 兜底默认值。
+ * 存 settings.ui.textAreaTransparency。
+ */
+export async function loadTextAreaTransparency(){
+  const s = await loadSettings();
+  const v = s.ui ? Number(s.ui.textAreaTransparency) : NaN;
+  return Number.isFinite(v) ? v : null;
+}
+
+/** 保存文本区透明度到 settings.ui.textAreaTransparency */
+export async function saveTextAreaTransparency(v){
+  const s = await loadSettings();
+  if (!s.ui) s.ui = {};
+  s.ui.textAreaTransparency = v;
+  await saveSettings(s);
+}
+
+/* ---------------- 界面偏好(阅读密度 / 字节计数口径) ---------------- */
+
+/**
+ * 读取阅读密度(compact/cozy/loose)。未设置返回 null,由调用方决定默认档。
+ * 存 settings.ui.density,校验与回退在 theme.normalizeDensity 里统一做。
+ */
+export async function loadDensity(){
+  const s = await loadSettings();
+  return (s.ui && s.ui.density) || null;
+}
+
+/** 保存阅读密度到 settings.ui.density */
+export async function saveDensity(mode){
+  const s = await loadSettings();
+  if (!s.ui) s.ui = {};
+  s.ui.density = mode;
+  await saveSettings(s);
+}
+
+/**
+ * 读取字节计数口径(utf8/sjis)。未设置返回 null(默认 utf8)。
+ * 存 settings.ui.byteEncoding,校验与回退在 bytes.normalizeEncoding 里统一做。
+ */
+export async function loadByteEncoding(){
+  const s = await loadSettings();
+  return (s.ui && s.ui.byteEncoding) || null;
+}
+
+/** 保存字节计数口径到 settings.ui.byteEncoding */
+export async function saveByteEncoding(enc){
+  const s = await loadSettings();
+  if (!s.ui) s.ui = {};
+  s.ui.byteEncoding = enc;
+  await saveSettings(s);
+}
+
+/**
+ * 读取字数上限。未设置返回 null（调用方用 bytes.BYTE_LIMIT_DEFAULT）。
+ * 存 settings.ui.byteLimit；0 / 非法值语义是"不设上限"，由 bytes.normalizeByteLimit 判。
+ */
+export async function loadByteLimit(){
+  const s = await loadSettings();
+  return (s.ui && Number.isFinite(Number(s.ui.byteLimit))) ? Number(s.ui.byteLimit) : null;
+}
+
+/** 保存字数上限到 settings.ui.byteLimit */
+export async function saveByteLimit(limit){
+  const s = await loadSettings();
+  if (!s.ui) s.ui = {};
+  s.ui.byteLimit = limit;
+  await saveSettings(s);
+}
+
+/* ---------------- 词典历史 ---------------- */
+
+/** 读取查词历史 → [{word,at,source}]（未设置返回 []） */
+export async function loadDictHistory(){
+  const s = await loadSettings();
+  return Array.isArray(s.dictHistory) ? s.dictHistory : [];
+}
+
+/** 保存查词历史列表 */
+export async function saveDictHistory(list){
+  const s = await loadSettings();
+  s.dictHistory = Array.isArray(list) ? list : [];
+  await saveSettings(s);
+}
+
 /* ---------------- 词典收藏 ---------------- */
 
 /** 读取词典收藏 → [{word,reading,source,at}](未设置返回 []) */

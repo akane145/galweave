@@ -9,6 +9,9 @@ const PROFILES = [
   { id: 'kodansha', match: /講談社|日本語大辞典/i, css: [], tokens: {} },
   { id: 'nihongo-shinjiten', match: /日本语新辞典/i, css: [], tokens: {} },
   { id: 'nlb', match: /(^|[\\/])NLB([\\/]|$)/i, css: [], tokens: {} },
+  { id: 'dajici', match: /大词泉|DJS([\\/.]|$)/i, css: [], tokens: {} },
+  { id: 'kougo-kenkyusha', match: /研究社|kougo/i, css: [], tokens: {} },
+  { id: 'kogo-kadokawa', match: /古語大辞典|KogoGaiji/i, css: [], tokens: {} },
   { id: 'default', match: /.*/, css: [], tokens: {} },
 ];
 

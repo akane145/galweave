@@ -1,7 +1,7 @@
 // model.js — 数据模型 / 撤销重做 / 自动保存
 // paras 是全部模块共享的数据;所有写操作只碰 translation / nameTr,原文 orig 永不修改。
 
-import { transValue } from './parsers.js';
+import { computeDone } from './parsers.js';
 import { saveState } from './fs.js';
 
 const UNDO_LIMIT = 100;
@@ -50,14 +50,10 @@ export function setFileInfo(info){
 export function setRawText(t){ rawText = t || ''; }
 export function getRawText(){ return rawText; }
 
-/** 计算段落的“是否已翻译”状态并写回 p.done */
+/** 计算段落的“是否已翻译”状态并写回 p.done
+    口径与 parsers.computeDone 完全同源(镜像格式的预填原文占位算未翻译)。 */
 export function recalcDone(p){
-  if (p.isName){
-    // NAME 行: 名字框有内容(原文名/译名)即已翻译,自动确认;清空名字框才回到未翻译
-    p.done = (p.nameTr || '').trim() !== '';
-  } else {
-    p.done = transValue(p).trim() !== '';
-  }
+  p.done = computeDone(p);
   return p.done;
 }
 

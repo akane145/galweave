@@ -10,7 +10,7 @@ import {
   toggleApprove, toggleIssue, addAnnotation, resolveAnnotation, deleteAnnotation,
   demoteApproved, recordChange, snapshot, recordDiff, restoreChange,
   stats, rowPassesFilter, getChanges, collect, setKeys, proofKeys, defaultKeys,
-  analyzeRow, analyzeRows,
+  analyzeRow, analyzeRows, noteInput, settleInput, restoreState, snapshotState,
 } from '../src/proof.js';
 
 function paras3(){
@@ -124,7 +124,7 @@ test('recordDiff: 快照对比记录改动并让已通过失效', () => {
   assert.equal(statusOf(1), STATUS.PENDING, '译名变化 → 已通过失效');
 });
 
-test('restoreChange: 还原到修改前并记录「还原」来源', () => {
+test('restoreChange: 还原到最初文本后移除差异', () => {
   model.setParas(paras3());
   resetState();
   setEnabled(true);
@@ -137,11 +137,57 @@ test('restoreChange: 还原到修改前并记录「还原」来源', () => {
   assert.ok(r && r.idx === 0);
   assert.equal(p0.translation, '判断标准是有趣', '已还原');
   const changes2 = getChanges();
-  assert.equal(changes2[0].source, 'restore', '还原本身也记录');
-  assert.equal(changes2[0].before, '改后的译文');
-  assert.equal(changes2[0].after, '判断标准是有趣');
+  assert.equal(changes2.length, 0);
   assert.equal(restoreChange('no-such-id'), null, '找不到的修改记录');
   assert.equal(model.canUndo(), true, '还原可撤销');
+});
+
+test('反复输入和跨标签恢复仅保留最初文本与最终文本', () => {
+  model.setParas(paras3());
+  resetState();
+  setEnabled(true);
+  for (const text of ['中', '中途输入', '最终文本']) {
+    noteInput(0);
+    model.getPara(0).translation = text;
+    settleInput(0);
+    restoreState(structuredClone(snapshotState()));
+  }
+  assert.equal(getChanges().length, 1);
+  assert.equal(getChanges()[0].before, '判断标准是有趣');
+  assert.equal(collect().changes[0].after, '最终文本');
+});
+
+test('旧记录合并，译文和译名独立保留', () => {
+  model.setParas(paras3());
+  resetState();
+  setEnabled(true);
+  const base = { paraId: model.getPara(0).orig, line: 1, field: 'translation', at: 1 };
+  restoreState({ changes: [
+    { ...base, id: 'new', before: '中间', after: '最终' },
+    { ...base, id: 'old', before: '最初', after: '中间' },
+  ] });
+  assert.equal(getChanges().length, 1);
+  assert.equal(getChanges()[0].before, '最初');
+  noteInput(0);
+  model.getPara(0).translation = '最终译文';
+  model.getPara(0).nameTr = '最终译名';
+  settleInput(0);
+  assert.equal(getChanges().length, 2);
+});
+
+test('保存和关闭校对时结算最后输入', () => {
+  model.setParas(paras3());
+  resetState();
+  setEnabled(true);
+  noteInput(0);
+  model.getPara(0).translation = '保存前输入';
+  assert.equal(collect().changes[0]?.after, '保存前输入');
+  noteInput(0);
+  model.getPara(0).translation = '关闭前输入';
+  setEnabled(false);
+  assert.equal(getChanges().length, 1);
+  assert.equal(getChanges()[0].before, '判断标准是有趣');
+  assert.equal(getChanges()[0].after, '关闭前输入');
 });
 
 /* ---------------- 统计 / 过滤 ---------------- */
@@ -183,6 +229,19 @@ test('collect: 只收集非默认状态的批注数据,含修改记录', () => {
 });
 
 /* ---------------- 快捷键配置 ---------------- */
+
+test('超过 500 行的修改全部保留，恢复后仍保留首次文本', () => {
+  model.setParas(Array.from({ length: 650 }, (_, i) => makePara(`☆${i}☆☆原文${i}`, `初始${i}`)));
+  resetState();
+  setEnabled(true);
+  for (let i = 0; i < 650; i++) recordChange(i, 'translation', `初始${i}`, `修改${i}`, 'edit');
+  assert.equal(collect().changes.length, 650);
+  restoreState(structuredClone(snapshotState()));
+  recordChange(0, 'translation', '修改0', '最终0', 'edit');
+  assert.equal(getChanges().length, 650);
+  assert.equal(getChanges()[0].before, '初始0');
+  assert.equal(getChanges()[0].after, '最终0');
+});
 
 test('快捷键: 默认值与自定义', () => {
   resetState();

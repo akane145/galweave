@@ -7,9 +7,12 @@ import assert from 'node:assert/strict';
 
 import {
   normalizeApiUrl, buildGptBody, parseGptResponse, parseSseLine, sseTextToChunks,
-  DEFAULT_LLM_SYSTEM, buildLlmSystemPrompt, buildLlmUserPrompt, buildLlmMessages,
+  buildLlmSystemPrompt, buildLlmUserPrompt, buildLlmMessages,
   detectSakuraPromptVersion, buildGlossaryText, buildSakuraMessagesV,
-  migrateMtSettings, registerProvider, translateTextProtected,
+  migrateMtSettings, registerProvider, translateTextProtected, translateLinesBatched,
+  stripControlChars,
+  BATCH_MODES, BATCH_SIZE_MIN, BATCH_SIZE_MAX, BATCH_SIZE_DEFAULT,
+  normalizeBatchMode, normalizeBatchSize, buildBatchUserText, parseNumberedLines,
 } from '../src/mt.js';
 
 /* ---------------- URL 归一化 ---------------- */
@@ -94,15 +97,68 @@ test('translateTextProtected: provider 只看到占位符，返回后恢复控�
   assert.equal(result, '译文[r][np]');
 });
 
-test('translateTextProtected: provider 破坏占位符时拒绝结果', async () => {
+test('translateTextProtected: 换行标签被模型吃掉时自动回填，不再整行作废', async () => {
   registerProvider({
-    id: 'test-broken-token', name: 'test', isConfigured: () => true,
+    id: 'test-drop-break', name: 'test', isConfigured: () => true,
+    async translate(text){ return text.replace(/⟦[^⟧]+⟧/, ''); },
+  });
+  // 译文重排断行是常态：末尾的换行标签丢失 → 补回末尾
+  assert.equal(await translateTextProtected('test-drop-break', '原文[r]', null), '原文[r]');
+});
+
+test('translateTextProtected: 命令类标签丢失仍然拒绝，并指明是哪个控制符', async () => {
+  registerProvider({
+    id: 'test-drop-cmd', name: 'test', isConfigured: () => true,
     async translate(text){ return text.replace(/⟦[^⟧]+⟧/, ''); },
   });
   await assert.rejects(
-    () => translateTextProtected('test-broken-token', '原文[r]', null),
-    /破坏了脚本控制标签/
+    () => translateTextProtected('test-drop-cmd', '原文%p100;', null),
+    /定位命令 %p100;/
   );
+});
+
+/* ---------------- 控制字符清洗（传输边界，双向） ---------------- */
+
+test('stripControlChars: 删换行/制表/零宽/BOM/行分隔符/替换符，不碰引擎标签与占位符', () => {
+  const src = 'あ\nい\tう\rえ\u200Bお\uFEFFか\u2028き\uFFFDく';
+  assert.equal(stripControlChars(src), 'あいうえおかきく');
+  // 引擎标签是普通可见字符，不是控制字符 —— 不能被误删
+  const bs = String.fromCharCode(92); // 反斜杠
+  assert.equal(stripControlChars('A' + bs + 'nB'), 'A' + bs + 'nB');
+  assert.equal(stripControlChars('<r>[n][r][np]%p100;'), '<r>[n][r][np]%p100;');
+  // 占位符本体不含控制字符，原样保留
+  assert.equal(stripControlChars('⟦GWCTRL:0⟧'), '⟦GWCTRL:0⟧');
+  assert.equal(stripControlChars(null), '');
+  assert.equal(stripControlChars(undefined), '');
+});
+
+test('translateTextProtected: 传输前清洗输入，采纳前清洗输出', async () => {
+  let received = '';
+  registerProvider({
+    id: 'test-sanitize-in', name: 'test', isConfigured: () => true,
+    // 模拟模型在译文里夹带换行与零宽字符
+    async translate(text){ received = text; return '译\n文' + '\u200B' + text.replace('原文', ''); },
+  });
+  // 原文里混入真实换行 / 制表 / 零宽字符
+  const result = await translateTextProtected('test-sanitize-in', '原\n文\t', null);
+  assert.equal(received.includes('\n'), false);
+  assert.equal(received.includes('\t'), false);
+  assert.equal(received.includes('\u200B'), false);
+  assert.equal(result, '译文');   // 输出侧的控制字符同样被清掉
+});
+
+test('translateLinesBatched: 逐行清洗输入与输出，批量协议的换行不受影响', async () => {
+  let received = '';
+  registerProvider({
+    id: 'test-sanitize-batch', name: 'test', isConfigured: () => true,
+    // 模拟模型在序号 1 的译文里夹带零宽字符
+    async translate(text){ received = text; return '1. 甲\u200B乙\n2. 丙\n'; },
+  });
+  // 第一行原文里混入真实换行 —— 若不逐行清洗，payload 会多出一条「序号行」破坏对齐
+  const outs = await translateLinesBatched('test-sanitize-batch', ['甲\n乙', '丙'], null);
+  assert.equal(received.includes('甲\n乙'), false);                       // 行内换行已删
+  assert.equal(received.split('\n').filter(s => /^\s*\d/.test(s)).length, 2); // 序号行仍是 2 条
+  assert.deepEqual(outs, ['甲乙', '丙']);                                 // 输出侧零宽字符已删
 });
 
 /* ---------------- 通用大模型提示词 ---------------- */
@@ -187,4 +243,68 @@ test('migrateMtSettings: 已是新结构则原样保留', () => {
   assert.equal(m.provider, 'llm');
   assert.equal(m.providers.llm.model, 'x');
   assert.equal(m.providers.sakura.host, 'h');
+});
+
+/* ---------------- 批量策略（Q6） ---------------- */
+
+test('normalizeBatchMode: 只认 perLine/batched，其余回退 perLine（最稳）', () => {
+  assert.deepEqual(BATCH_MODES, ['perLine', 'batched']);
+  assert.equal(normalizeBatchMode('batched'), 'batched');
+  assert.equal(normalizeBatchMode('perLine'), 'perLine');
+  assert.equal(normalizeBatchMode('batch'), 'perLine');
+  assert.equal(normalizeBatchMode(''), 'perLine');
+  assert.equal(normalizeBatchMode(null), 'perLine');
+  assert.equal(normalizeBatchMode(undefined), 'perLine');
+});
+
+test('normalizeBatchSize: 钳到 2–20，非法回退默认 5', () => {
+  assert.equal(BATCH_SIZE_DEFAULT, 5);
+  assert.equal(normalizeBatchSize(5), 5);
+  assert.equal(normalizeBatchSize('8'), 8);
+  assert.equal(normalizeBatchSize(8.6), 9);
+  assert.equal(normalizeBatchSize(0), BATCH_SIZE_MIN);
+  assert.equal(normalizeBatchSize(-3), BATCH_SIZE_MIN);
+  assert.equal(normalizeBatchSize(999), BATCH_SIZE_MAX);
+  assert.equal(normalizeBatchSize('abc'), BATCH_SIZE_DEFAULT);
+  assert.equal(normalizeBatchSize(null), BATCH_SIZE_DEFAULT);
+});
+
+test('buildBatchUserText: 写明行数与格式要求，正文带序号', () => {
+  const t = buildBatchUserText(['おはよう', 'こんばんは']);
+  assert.ok(t.includes('恰好 2 行'));
+  assert.ok(t.includes('1. おはよう'));
+  assert.ok(t.includes('2. こんばんは'));
+  assert.ok(t.includes('不要合并行'));
+  // 空输入不抛错
+  assert.ok(buildBatchUserText([]).includes('恰好 0 行'));
+  assert.ok(buildBatchUserText(null).includes('恰好 0 行'));
+});
+
+test('parseNumberedLines: 按序号对齐，容忍多种分隔与项目符号', () => {
+  assert.deepEqual(parseNumberedLines('1. 早上好\n2. 晚上好', 2), ['早上好', '晚上好']);
+  assert.deepEqual(parseNumberedLines('1、甲\n2、乙', 2), ['甲', '乙']);
+  assert.deepEqual(parseNumberedLines('1：甲\n2：乙', 2), ['甲', '乙']);
+  assert.deepEqual(parseNumberedLines('- 1. 甲\n- 2. 乙', 2), ['甲', '乙']);
+  // 乱序也按序号归位
+  assert.deepEqual(parseNumberedLines('2. 乙\n1. 甲', 2), ['甲', '乙']);
+  // 译文里带句点/冒号不影响（只认行首序号）
+  assert.deepEqual(parseNumberedLines('1. 早。好：呀\n2. 乙', 2), ['早。好：呀', '乙']);
+  // 空译文（源行为空）是合法结果
+  assert.deepEqual(parseNumberedLines('1. \n2. 乙', 2), ['', '乙']);
+});
+
+test('parseNumberedLines: 缺行/重复/无序号一律 null —— 宁可回退也不猜对齐', () => {
+  assert.equal(parseNumberedLines('1. 甲', 2), null);              // 少一行
+  assert.equal(parseNumberedLines('1. 甲\n1. 乙', 2), null);        // 序号重复
+  assert.equal(parseNumberedLines('甲\n乙', 2), null);              // 完全没有序号
+  assert.equal(parseNumberedLines('', 2), null);
+  assert.equal(parseNumberedLines(null, 2), null);
+  assert.equal(parseNumberedLines('1. 甲', 0), null);               // n 非法
+  assert.equal(parseNumberedLines('1. 甲', NaN), null);
+});
+
+test('parseNumberedLines: 多出来的行被忽略（不破坏对齐），不影响正确结果', () => {
+  // 只要 1..n 齐全就算成功：多出的行没有序号归属，忽略它比整批失败更划算
+  assert.deepEqual(parseNumberedLines('1. 甲\n2. 乙\n3. 丙', 2), ['甲', '乙']);
+  assert.deepEqual(parseNumberedLines('以下是翻译：\n1. 甲\n2. 乙\n（完）', 2), ['甲', '乙']);
 });

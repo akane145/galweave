@@ -467,6 +467,9 @@ function normalizeProviderConfig(id, cfg){
     c.topP = Number.isFinite(Number(c.topP)) ? Number(c.topP) : d.topP;
     c.maxTokens = Number.isFinite(Number(c.maxTokens)) && c.maxTokens > 0 ? Number(c.maxTokens) : d.maxTokens;
   }
+  // 批量策略与 Provider 无关，两个引擎都要归一化（Q6）
+  c.batchMode = normalizeBatchMode(c.batchMode);
+  c.batchSize = normalizeBatchSize(c.batchSize);
   return c;
 }
 
@@ -637,14 +640,48 @@ export async function translateText(providerId, text, glossary, onChunk){
   return p.translate(text, glossary, onChunk);
 }
 
+/** 受保护 token 出错时的中文说法（换行类丢失已在 restoreProtectedTokens 内回填，不在错误里）。 */
+const TOKEN_ERROR_LABELS = {
+  missing: '丢失', duplicate: '重复', reordered: '顺序改变',
+  unknown: '出现未知占位符', 'invalid-mask': '保护信息无效',
+};
+const TOKEN_ROLE_LABELS = {
+  'line-break': '换行标签', wait: '等待标签', position: '定位命令',
+  font: '字体命令', command: '控制命令',
+};
+
+/** 把 token 级错误说成人话：哪个控制符、什么毛病（只报 code 的话用户看不出是哪个标签）。 */
+function describeTokenError(error){
+  const kind = TOKEN_ERROR_LABELS[error.code] || error.code;
+  if (!error || !error.value) return kind;
+  return kind + '：' + (TOKEN_ROLE_LABELS[error.role] || '控制符') + ' ' + error.value;
+}
+
+/* ---------------- 控制字符清洗（传输边界，双向） ---------------- */
+
+/**
+ * 控制字符与不可见字符：C0/C1 控制符、DEL、格式符（零宽空格/BOM/软连字符/双向控制）、
+ * 行/段分隔符 U+2028/2029、替换符 U+FFFD。
+ * **不含** `<r>` / `[n]` / 字面量 `\n` 这类引擎标签 —— 它们是普通可见字符，由
+ * mask/restore 体系保护，这里不能碰；字面量 `\n` 也刻意不删（会误伤路径等正文）。
+ */
+const CONTROL_CHARS_RE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\uFFFD\u200B-\u200F\u2060-\u2064\uFEFF\u00AD]/gu;
+
+/** 删除全部控制字符与不可见字符。传输前清洗输入、采纳前清洗输出，共用这一个定义。 */
+export function stripControlChars(text){
+  return String(text == null ? '' : text).replace(CONTROL_CHARS_RE, '');
+}
+
 /** 翻译正文并严格保护 Galgame 行内控制标签；标签异常时拒绝返回可写入结果。 */
 export async function translateTextProtected(providerId, text, glossary){
   const mask = maskProtectedTokens(text);
-  const translated = await translateText(providerId, mask.text, glossary);
-  const restored = restoreProtectedTokens(String(translated), mask);
+  // 双向清洗：控制字符（含换行）不进模型，也不进译文。
+  // 此时引擎标签已被遮蔽成占位符（占位符本身不含控制字符），清洗不伤保护体系；
+  // 批量协议的换行在逐行清洗**之后**才拼装，所以也不会被误删。
+  const translated = await translateText(providerId, stripControlChars(mask.text), glossary);
+  const restored = restoreProtectedTokens(stripControlChars(String(translated)), mask);
   if (!restored.ok){
-    const labels = { missing: '丢失', duplicate: '重复', reordered: '顺序改变', unknown: '出现未知占位符', 'invalid-mask': '保护信息无效' };
-    const detail = [...new Set(restored.errors.map(error => labels[error.code] || error.code))].join('、');
+    const detail = [...new Set(restored.errors.map(describeTokenError))].join('、');
     throw new Error('机翻结果破坏了脚本控制标签（' + detail + '），已拒绝写入。请重试或手动翻译此行。');
   }
   return restored.text;
@@ -655,4 +692,92 @@ export async function translateBatch(providerId, texts, glossary){
   const p = getProvider(providerId) || NotConfiguredProvider;
   if (!p.isConfigured()) throw new Error('尚未配置机器翻译服务。请在「⚙ 机翻配置」中配置。');
   return p.translateBatch(texts, glossary);
+}
+
+/* ============================================================
+   批量策略（阻塞项 Q6）
+   ------------------------------------------------------------
+   'perLine'  —— 逐行串行（默认，最稳：每行单独一次请求，失败只影响那一行）
+   'batched'  —— 每 N 行合并成**一次**请求，减少往返、省 token 与时间
+   批次模式的对齐完全依赖返回里的行号，因此**任何对不上就整批放弃并回退逐行**，
+   绝不猜对齐关系 —— 猜错等于把 A 的译文写到 B 行上，比慢一点严重得多。
+   ============================================================ */
+
+export const BATCH_MODES = ['perLine', 'batched'];
+export const BATCH_SIZE_MIN = 2;
+export const BATCH_SIZE_MAX = 20;
+export const BATCH_SIZE_DEFAULT = 5;
+
+/** 归一化批量策略，非法值回退逐行 */
+export function normalizeBatchMode(mode){
+  return BATCH_MODES.includes(mode) ? mode : 'perLine';
+}
+
+/** 归一化批次大小（未设置回退默认；非法值回退默认；其余钳到 2–20） */
+export function normalizeBatchSize(n){
+  if (n === null || n === undefined || n === '') return BATCH_SIZE_DEFAULT;
+  const v = Number(n);
+  if (!Number.isFinite(v)) return BATCH_SIZE_DEFAULT;
+  return Math.min(BATCH_SIZE_MAX, Math.max(BATCH_SIZE_MIN, Math.round(v)));
+}
+
+/**
+ * 批次请求的用户文本：带序号的原文清单 + 明确的格式要求。
+ * 序号是**对齐的唯一依据**，所以格式要求必须写死、写明确。
+ */
+export function buildBatchUserText(lines){
+  const list = Array.isArray(lines) ? lines : [];
+  const head = '将下面 ' + list.length + ' 行日文逐行翻译成简体中文。'
+    + '必须严格按「序号. 译文」的格式返回恰好 ' + list.length + ' 行；'
+    + '不要合并行、不要增删行、不要输出原文、不要添加任何说明。';
+  const body = list.map((t, i) => (i + 1) + '. ' + String(t == null ? '' : t)).join('\n');
+  return head + '\n\n' + body;
+}
+
+/**
+ * 解析「序号. 译文」清单。
+ * 要求 1..n 全部命中且不重复，否则返回 null。
+ * 容忍行首空白 / 项目符号 / 多种序号分隔写法。
+ */
+export function parseNumberedLines(text, n){
+  const count = Math.floor(Number(n));
+  if (!Number.isFinite(count) || count <= 0) return null;
+  const out = new Array(count).fill(null);
+  const seen = new Set();
+  for (const raw of String(text == null ? '' : text).split(/\r?\n/)){
+    const m = /^\s*(?:[-*]\s*)?(\d{1,3})\s*[.、．:：)]\s*(.*)$/.exec(raw);
+    if (!m) continue;
+    const idx = Number(m[1]);
+    if (!Number.isInteger(idx) || idx < 1 || idx > count || seen.has(idx)) continue;
+    seen.add(idx);
+    out[idx - 1] = m[2].trim();
+  }
+  if (seen.size !== count) return null;
+  if (out.some(v => v === null)) return null;
+  return out;
+}
+
+/**
+ * 批次翻译：把 N 行合成一次请求。
+ * 行内受保护标签**逐行遮蔽后再拼接**，返回时逐行还原；任一行还原失败即整批放弃。
+ * @returns {Promise<string[]|null>} 成功返回与 texts 等长的译文数组；失败返回 null（调用方回退逐行）
+ */
+export async function translateLinesBatched(providerId, texts, glossary){
+  const lines = Array.isArray(texts) ? texts : [];
+  if (!lines.length) return [];
+  const masks = lines.map(t => maskProtectedTokens(String(t == null ? '' : t)));
+  // 逐行清洗后再拼装：行内混入换行/控制符会直接破坏「序号. 译文」的对齐，
+  // 是批次整批作废的常见原因，所以在拼包之前就掐掉。
+  const payload = buildBatchUserText(masks.map(m => stripControlChars(m.text)));
+  const raw = await translateText(providerId, payload, glossary);
+  const parsed = parseNumberedLines(raw, lines.length);
+  if (!parsed) return null;                 // 行数/序号对不上 → 整批放弃
+  const out = [];
+  for (let i = 0; i < lines.length; i++){
+    // 输出侧同样逐行清洗（清洗整个 raw 会把序号行的分隔换行也删掉，破坏解析）
+    const restored = restoreProtectedTokens(stripControlChars(parsed[i]), masks[i]);
+    if (!restored.ok) return null;          // 标签丢失/重复/换序 → 整批放弃
+    out.push(restored.text);
+  }
+  return out;
 }

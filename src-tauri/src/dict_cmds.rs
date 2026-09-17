@@ -35,7 +35,13 @@ impl DictState {
     fn db_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         let exe = std::env::current_exe().map_err(|e| format!("定位程序目录失败: {}", e))?;
         let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        Ok(dir.join("galtrans.db"))
+        let current = dir.join("galweave.db");
+        let legacy = dir.join("galtrans.db");
+        // 首次升级时保留旧词典库数据，但后续只写新名。
+        if !current.exists() && legacy.exists() {
+            let _ = std::fs::copy(&legacy, &current);
+        }
+        Ok(current)
     }
     /// 打开数据库(惰性,单次);返回克隆的 connection 引用
     pub fn with_db<F, T>(&self, app: &AppHandle, f: F) -> Result<T, String>

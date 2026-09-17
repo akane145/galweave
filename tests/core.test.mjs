@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   parsePrefix, stripBrackets, transValue, makePara, parseFile,
   buildStarPrefix, buildExport, scanTerms, setParseConf, getParseConf, parseConf,
-  buildOrigHighlights, mergeRanges, migrateNameTranslations, mergeSavedState,
+  buildOrigHighlights, migrateNameTranslations, mergeSavedState,
   validateParseConf
 } from '../src/parsers.js';
 import { detect } from '../src/recognize.js';

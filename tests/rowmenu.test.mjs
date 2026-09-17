@@ -9,6 +9,7 @@ const FULL = {
   proofMode: true,
   canUndo: true,
   mtReady: true,
+  tmHit: '早上好',
 };
 
 const byAction = (items, action) => items.find(x => x.action === action);
@@ -18,10 +19,24 @@ const byAction = (items, action) => items.find(x => x.action === action);
 test('rowMenuItems：全能力上下文下所有项都可用', () => {
   const items = rowMenuItems(FULL);
   const actionable = items.filter(x => !x.sep);
-  assert.equal(actionable.length, 8);
+  assert.equal(actionable.length, 10);
   for (const it of actionable) {
     assert.equal(it.disabled, false, it.label + ' 不该被禁用');
   }
+});
+
+test('rowMenuItems：翻译记忆——有命中时标签带建议、无命中时禁用', () => {
+  const hit = byAction(rowMenuItems(FULL), 'applyTm');
+  assert.equal(hit.disabled, false);
+  assert.equal(hit.label, '套用记忆：早上好');
+
+  const miss = byAction(rowMenuItems({ ...FULL, tmHit: '' }), 'applyTm');
+  assert.equal(miss.disabled, true);
+  assert.equal(miss.label, '套用翻译记忆');
+
+  // 缺字段（旧调用方）不应崩
+  const { tmHit, ...noField } = FULL;
+  assert.equal(byAction(rowMenuItems(noField), 'applyTm').disabled, true);
 });
 
 test('rowMenuItems：NAME 条目禁用复制原文到译文与机翻', () => {

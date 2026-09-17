@@ -177,6 +177,63 @@ test('受保护 token：源文已有占位符样式时自动换命名空间', ()
   assert.equal(restored.text, '原文⟦GWCTRL:0⟧[n]');
 });
 
+test('换行类丢失：就近回填到下一个存活占位符之前 / 末尾', () => {
+  // 中间丢失 → 插到下一个存活占位符之前
+  let masked = maskProtectedTokens('A[r]B[np]C');
+  const wait = masked.tokens[1].placeholder;
+  assert.deepEqual(restoreProtectedTokens(`A B${wait}C`, masked), {
+    ok: true, text: 'A B[r][np]C', errors: [],
+  });
+  // 末尾丢失（没有下一个存活占位符）→ 补在末尾
+  masked = maskProtectedTokens('A[np]B[r]');
+  assert.deepEqual(restoreProtectedTokens(`A${masked.tokens[0].placeholder}B`, masked), {
+    ok: true, text: 'A[np]B[r]', errors: [],
+  });
+  // 连续多个换行丢失 → 按源顺序回填在同一锚点前
+  masked = maskProtectedTokens('A[r]B[n]C[np]D');
+  const only = masked.tokens[2].placeholder;
+  assert.deepEqual(restoreProtectedTokens(`A B C${only}D`, masked), {
+    ok: true, text: 'A B C[r][n][np]D', errors: [],
+  });
+});
+
+test('换行类丢失可回填，但重复/换序仍然失败（不放过真正的破坏）', () => {
+  const masked = maskProtectedTokens('A[r]B');
+  const ph = masked.tokens[0].placeholder;
+  const dup = restoreProtectedTokens(`A${ph}${ph}B`, masked);
+  assert.equal(dup.ok, false);
+  assert.equal(dup.errors[0].code, 'duplicate');
+
+  const reordered = maskProtectedTokens('A[r]B[np]C');
+  const [p0, p1] = reordered.tokens.map(token => token.placeholder);
+  const rev = restoreProtectedTokens(`A${p1}B${p0}C`, reordered);
+  assert.equal(rev.ok, false);
+  assert.ok(rev.errors.some(error => error.code === 'reordered'));
+});
+
+test('命令类丢失仍硬拒，且错误带上角色与原值（便于指明是哪个控制符）', () => {
+  // 只丢定位命令
+  const masked = maskProtectedTokens('A%p100;B');
+  const missing = restoreProtectedTokens('AB', masked);
+  assert.equal(missing.ok, false);
+  assert.deepEqual(missing.errors, [
+    { code: 'missing', placeholder: masked.tokens[0].placeholder, role: 'position', value: '%p100;' },
+  ]);
+
+  // 换行丢失（可回填）与字体命令丢失（不可）同时发生 → 仍然失败，且只报命令那一条
+  const mixed = maskProtectedTokens('A[r]B%fＭＳ ゴシック;C');
+  const breakPh = mixed.tokens[0].placeholder;
+  const result = restoreProtectedTokens(`A B${breakPh}C`, mixed);
+  assert.equal(result.ok, false);
+  assert.equal(result.errors.length, 1);
+  assert.equal(result.errors[0].role, 'font');
+
+  // 模型自己编了一个占位符 → 依旧失败
+  const unknown = restoreProtectedTokens(`A${breakPh}⟦GWCTRL:77⟧C`, mixed);
+  assert.equal(unknown.ok, false);
+  assert.ok(unknown.errors.some(error => error.code === 'unknown'));
+});
+
 test('局部回写：重复 ID 只修改指定 occurrence，并保持 EOL 与另一记录', () => {
   const text = '☆1☆A\r\n★1★甲\r\n☆1☆B\n★1★乙';
   const document = parseDocument(text);

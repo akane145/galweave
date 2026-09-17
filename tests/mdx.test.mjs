@@ -9,9 +9,10 @@ import zlibShim from '../src/node-shims/zlib.js';
 import assertShim from '../src/node-shims/assert.js';
 import { sanitizeMdxHtml, sanitizeCss, extractCssUrls, hydrateCssUrls,
   buildMdxResults, createMdxProvider, createPathMdxProvider,
-  createTauriMdxProvider, createTauriMdd,
+  createTauriMdxProvider, createTauriMdd, mddPartPaths, createCompositeMdd,
+  createDiskResourceMdd, diskResourceKeyCandidates, soundResourceKey,
   extractHtmlHeadword, displayHeadword, cleanGaijiMarkers, unifyCssFontSize,
-  replaceCssTokens, normalizeDictionaryColors, scopeDictionaryCss, normalizeDictionaryCss,
+  normalizeDictionaryColors, scopeDictionaryCss, normalizeDictionaryCss,
   mimeFromExt, srcToResourceKey, isMddResourceSrc, isEntryLink, isSoundLink, linkTarget } from '../src/mdx.js';
 import { base64ToArrayBuffer } from '../src/fs.js';
 
@@ -239,13 +240,6 @@ test('assert shim: 条件为假抛错', () => {
 });
 
 /* ---------------- MDX 结果映射(注入桩实例) ---------------- */
-
-function fakeInst(){
-  return {
-    lookup: async () => { throw new Error('boom'); },
-    prefix: async () => { throw new Error('boom'); },
-  };
-}
 
 test('buildMdxResults: 精确命中返回消毒后的 HTML 释义', async () => {
   const inst = {
@@ -552,4 +546,109 @@ test('base64ToArrayBuffer: 字节往返', () => {
   const back = new Uint8Array(base64ToArrayBuffer(b64));
   assert.deepEqual([...back], [...src]);
   assert.equal(base64ToArrayBuffer('').byteLength, 0);
+});
+
+/* ================= 分卷 MDD 与磁盘资源兜底 ================= */
+
+test('mddPartPaths: 主卷 + 分卷候选;非 .mdx 返回空', () => {
+  assert.deepEqual(mddPartPaths('D:/dict/大词泉/DJS.mdx'), [
+    'D:/dict/大词泉/DJS.mdd',
+    'D:/dict/大词泉/DJS.1.mdd',
+    'D:/dict/大词泉/DJS.2.mdd',
+    'D:/dict/大词泉/DJS.3.mdd',
+    'D:/dict/大词泉/DJS.4.mdd',
+    'D:/dict/大词泉/DJS.5.mdd',
+    'D:/dict/大词泉/DJS.6.mdd',
+    'D:/dict/大词泉/DJS.7.mdd',
+    'D:/dict/大词泉/DJS.8.mdd',
+    'D:/dict/大词泉/DJS.9.mdd',
+  ]);
+  assert.deepEqual(mddPartPaths('D:/dict/a.txt'), []);
+  assert.deepEqual(mddPartPaths(''), []);
+  assert.deepEqual(mddPartPaths(null), []);
+});
+
+function fakePart(name, hits){
+  const missing = [];
+  return {
+    name, missing,
+    async resourceB64(key){ if (hits[key]) return 'b64:' + name + ':' + key; missing.push(key); return null; },
+    async resource(key){ return await this.resourceB64(key) ? 'buf' : null; },
+    disposed: false,
+    dispose(){ this.disposed = true; },
+  };
+}
+
+test('createCompositeMdd: 按顺序取第一个命中,空值与抛错都继续向后', async () => {
+  const a = fakePart('A', { 'k1': 1 });
+  const b = {
+    name: 'B',
+    async resourceB64(key){ if (key === 'k1') throw new Error('boom'); return key === 'k2' ? 'b64:B:k2' : null; },
+    async resource(key){ return key === 'k2' ? 'buf' : null; },
+    dispose(){},
+  };
+  const c = fakePart('C', {});
+  const m = createCompositeMdd([a, b, c]);
+  assert.equal(await m.resourceB64('k1'), 'b64:A:k1');   // 第一源命中
+  assert.equal(await m.resourceB64('k2'), 'b64:B:k2');   // 第一源未命中且第二源抛错 → 第三源
+  assert.equal(await m.resourceB64('nope'), null);       // 全部未命中
+  m.dispose();
+  assert.equal(a.disposed, true);
+  assert.equal(c.disposed, true);   // b 的 dispose 是空操作桩,不在此断言
+  // 空数组/非数组也不炸
+  assert.equal(await createCompositeMdd([]).resourceB64('k'), null);
+  assert.equal(await createCompositeMdd(null).resource('k'), null);
+});
+
+test('diskResourceKeyCandidates: 完整相对路径 + 文件名兜底;拒绝穿越', () => {
+  const BS = String.fromCharCode(92); // 反斜杠(Windows 路径分隔)
+  assert.deepEqual(diskResourceKeyCandidates(BS + 'image' + BS + 'dictionary' + BS + 'a.png'),
+    ['image/dictionary/a.png', 'a.png']);
+  assert.deepEqual(diskResourceKeyCandidates('KogoGaiji.ttf'), ['KogoGaiji.ttf']);
+  assert.deepEqual(diskResourceKeyCandidates('/a/b/c.ttf'), ['a/b/c.ttf', 'c.ttf']);
+  assert.deepEqual(diskResourceKeyCandidates('../secret'), []);
+  assert.deepEqual(diskResourceKeyCandidates('a/../../b'), []);
+  assert.deepEqual(diskResourceKeyCandidates(''), []);
+  assert.deepEqual(diskResourceKeyCandidates(null), []);
+});
+
+test('createDiskResourceMdd: 子目录 key 与文件名兜底都能命中,未命中返回 null', async () => {
+  const BS = String.fromCharCode(92);
+  const reads = [];
+  const resolver = createDiskResourceMdd({
+    name: '磁盘资源',
+    dir: 'D:/dict/古語大辞典',
+    readB64: async (p) => {
+      reads.push(p);
+      if (p === 'D:/dict/古語大辞典/KogoGaiji.ttf') return 'b64:font';
+      if (p === 'D:/dict/古語大辞典/image/dictionary/a.png') return 'b64:img';
+      return null;
+    },
+  });
+  assert.equal(await resolver.resourceB64('KogoGaiji.ttf'), 'b64:font');
+  assert.equal(await resolver.resourceB64(BS + 'image' + BS + 'dictionary' + BS + 'a.png'), 'b64:img');   // 子目录 key
+  assert.equal(await resolver.resourceB64(BS + 'nothing' + BS + 'here.wav'), null);
+  // 未命中时尝试过完整路径与文件名两个候选
+  assert.ok(reads.includes('D:/dict/古語大辞典/nothing/here.wav'));
+  assert.ok(reads.includes('D:/dict/古語大辞典/here.wav'));
+  // 穿越路径不会产生任何读取
+  reads.length = 0;
+  assert.equal(await resolver.resourceB64('../secret'), null);
+  assert.deepEqual(reads, []);
+});
+
+/* ================= 发音 key(sound:// 协议头剥离) ================= */
+
+test('soundResourceKey: 剥掉 sound:// 协议头与斜杠,data-sound 裸 key 兼容', () => {
+  // 大词泉词条的真实形态: <a href="sound://s00013366.aac">
+  assert.equal(soundResourceKey('sound://s00013366.aac'), 's00013366.aac');
+  assert.equal(soundResourceKey('SOUND://s00013366.aac'), 's00013366.aac');   // 大小写不敏感
+  assert.equal(soundResourceKey('sound:///audio/s00013366.aac'), 'audio/s00013366.aac');
+  // data-sound 里已存裸 key → 原样保留
+  assert.equal(soundResourceKey('s00013366.aac'), 's00013366.aac');
+  assert.equal(soundResourceKey('/audio/s00013366.aac'), 'audio/s00013366.aac');
+  assert.equal(soundResourceKey(''), '');
+  assert.equal(soundResourceKey(null), '');
+  // mime 覆盖 .aac(发音文件的真实扩展名)
+  assert.equal(mimeFromExt('s00013366.aac'), 'audio/aac');
 });

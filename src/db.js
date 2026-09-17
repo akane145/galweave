@@ -1,5 +1,5 @@
 // db.js — 词典源注册表持久化(SQLite,桌面版)
-// 桌面版: 存 exe 同目录 galtrans.db 的 dict_sources 表(Tauri dict_* 命令);
+// 桌面版: 存 exe 同目录 galweave.db 的 dict_sources 表(Tauri dict_* 命令);
 // 浏览器版: 降级回 settings.json(localStorage,与 v5.0 一致)。
 // 源记录字段: { id, type, name, path?, enabled, extra? }
 //   type: 'json' | 'http' | 'mdx';extra 存 HTTP 的 urlTemplate/map/headers 等 JSON。
