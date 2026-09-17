@@ -2,7 +2,7 @@
 // 运行: node --test tests/
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -13,6 +13,8 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
+
+const testWithSamples = (name, fn) => test(name, { skip: !existsSync(resolve(ROOT, 'test text', '新建 文本文档.txt')) ? '需要本地测试文本（不随源码分发）' : false }, fn);
 
 function readSample(name){
   return readFileSync(resolve(ROOT, 'test text', name), 'utf-8');
@@ -75,7 +77,7 @@ test('detectIdShape: 编号形状分类', () => {
 
 /* ---------------- 全文件识别 ---------------- */
 
-test('detect: 第二种(○/● + [[名字]] + 标签)', () => {
+testWithSamples('detect: 第二种(○/● + [[名字]] + 标签)', () => {
   const p = detect(readSample('新建 文本文档 (13).txt'), '新建 文本文档 (13).txt');
   assert.equal(p.marks.open, '○');
   assert.equal(p.marks.close, '●');
@@ -86,7 +88,7 @@ test('detect: 第二种(○/● + [[名字]] + 标签)', () => {
   assert.equal(p.issues.length, 0);
 });
 
-test('detect: (11) 系统性编号偏移被识别放行,不再误报', () => {
+testWithSamples('detect: (11) 系统性编号偏移被识别放行,不再误报', () => {
   const p = detect(readSample('新建 文本文档 (11).txt'), '(11).txt');
   assert.equal(p.idOffset.offset, 1, '译文编号 = 原文 +1 被检测');
   assert.equal(p.idOffset.systematic, true, '偏移是系统性的');
@@ -95,14 +97,14 @@ test('detect: (11) 系统性编号偏移被识别放行,不再误报', () => {
   assert.ok(p.marks.confidence >= 0.9, '按偏移对齐后置信度恢复高值');
 });
 
-test('detect: 第一种 #NOTTRANS 作为行控制行保留', () => {
+testWithSamples('detect: 第一种 #NOTTRANS 作为行控制行保留', () => {
   const p = detect(readSample('新建 文本文档 (12).txt'), '新建 文本文档 (12).txt');
   const withControls = p.rows.filter(r => r.controls && r.controls.length).length;
   assert.equal(withControls, 11, '#NOTTRANS 附着在每对正文行上保留');
   assert.equal(p.issues.some(i => i.type === 'other-line'), false, '控制行不算无法归类');
 });
 
-test('detect: N 后缀名字行(000001N)与 NAME|n 均计入名字行', () => {
+testWithSamples('detect: N 后缀名字行(000001N)与 NAME|n 均计入名字行', () => {
   const p3 = detect(readSample('新建 文本文档 (3).txt'), '(3).txt');
   assert.equal(p3.rowTypes.nameRows, 9, 'N 后缀名字行计入 nameRows');
   assert.equal(p3.rowTypes.nameSuffixN, 9);
@@ -114,7 +116,7 @@ test('detect: N 后缀名字行(000001N)与 NAME|n 均计入名字行', () => {
   assert.equal(p5.rowTypes.nameSuffixN, 0);
 });
 
-test('detect: 【宗一郎】角括号名字提取,对话行【名】说话人也识别', () => {
+testWithSamples('detect: 【宗一郎】角括号名字提取,对话行【名】说话人也识别', () => {
   const p5 = detect(readSample('新建 文本文档 (5).txt'), '(5).txt');
   const nmRow = p5.rows.find(r => r.id === 'NAME|7');
   assert.equal(nmRow.name, '宗一郎', '名字取括号内');
@@ -135,7 +137,7 @@ test('detect: 无标记文本 → marks 为空且报无法归类', () => {
   assert.ok(p.issues.some(i => i.type === 'other-line'));
 });
 
-test('renderReport: 报告包含关键信息', () => {
+testWithSamples('renderReport: 报告包含关键信息', () => {
   const p = detect(readSample('新建 文本文档 (13).txt'), '新建 文本文档 (13).txt');
   const r = renderReport(p);
   assert.ok(r.includes('○'), '报告含原文标记');
@@ -144,7 +146,7 @@ test('renderReport: 报告包含关键信息', () => {
 
 /* ---------------- 规范化 / 还原 ---------------- */
 
-test('canonicalize/restore: 13 个示例文件字节级无损还原', () => {
+testWithSamples('canonicalize/restore: 13 个示例文件字节级无损还原', () => {
   const dir = resolve(ROOT, 'test text');
   const names = readdirSync(dir).filter(n => n.endsWith('.txt'));
   assert.equal(names.length, 13);
@@ -180,7 +182,7 @@ test('canonicalize: 保留前导空行(文件开头空行)', () => {
   assert.equal(restore(p, canon), text, '还原一致');
 });
 
-test('canonicalize/restore: 编号错位文件(11) 还原保留各自的编号', () => {
+testWithSamples('canonicalize/restore: 编号错位文件(11) 还原保留各自的编号', () => {
   const text = readSample('新建 文本文档 (11).txt');
   const p = detect(text, '(11).txt');
   const canon = canonicalize(p);
@@ -190,7 +192,7 @@ test('canonicalize/restore: 编号错位文件(11) 还原保留各自的编号',
 
 /* ---------------- 编辑器模拟 ---------------- */
 
-test('simulateEditor: 识别配置让 ○/● 文件全部获得编号', async () => {
+testWithSamples('simulateEditor: 识别配置让 ○/● 文件全部获得编号', async () => {
   const { analyzeWithParsers } = await import('../src/recognize.js');
   const { parseFile, setParseConf, buildExport } = await import('../src/parsers.js');
   const parsers = { parseFile, setParseConf, buildExport };
@@ -205,7 +207,7 @@ test('simulateEditor: 识别配置让 ○/● 文件全部获得编号', async (
   assert.equal(after.roundTrip, true);
 });
 
-test('simulateEditor: [[名字]] 规范化后名字栏可用', async () => {
+testWithSamples('simulateEditor: [[名字]] 规范化后名字栏可用', async () => {
   const { analyzeWithParsers } = await import('../src/recognize.js');
   const { parseFile, setParseConf, buildExport } = await import('../src/parsers.js');
   const parsers = { parseFile, setParseConf, buildExport };

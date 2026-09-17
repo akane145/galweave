@@ -2,7 +2,7 @@
 // 运行: node --test tests/
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -29,6 +29,8 @@ import * as model from '../src/model.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
+
+const testWithSamples = (name, fn) => test(name, { skip: !existsSync(resolve(ROOT, 'test text', '新建 文本文档.txt')) ? '需要本地测试文本（不随源码分发）' : false }, fn);
 
 function readSample(name){
   return readFileSync(resolve(ROOT, name), 'utf-8');
@@ -154,7 +156,7 @@ test('stripBrackets / transValue', () => {
   assert.equal(stripBrackets(''), '');
 });
 
-test('parseFile + buildExport: 示例文件全量解析与无损还原', () => {
+testWithSamples('parseFile + buildExport: 示例文件全量解析与无损还原', () => {
   // 选取可字节级无损往返的样本(N 后缀名字行 / TEXT+NAME 编号,均以换行结尾)
   const cases = [
     { file: '新建 文本文档 (3).txt', paras: 18, names: 9 },

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -18,7 +18,8 @@ function run(args){
 test('recognize-format CLI：增强 profile 可跨进程规范化并无损还原', () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'galweave-parser-'));
   try {
-    const source = resolve(root, 'test text/新建 文本文档 (13).txt');
+    const source = resolve(dir, 'source.txt');
+    writeFileSync(source, '○00001○[[人物]]「こんにちは」[np]\n●00001●[[人物]]「你好」[np]\n\n', 'utf8');
     const canonical = resolve(dir, 'sample.canonical.txt');
     const profile = resolve(dir, 'sample.profile.json');
     const restored = resolve(dir, 'sample.restored.txt');

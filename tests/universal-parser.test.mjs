@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -25,8 +25,10 @@ import {
 } from '../src/universal-parser.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const testWithSamples = (name, fn) => test(name, { skip: !existsSync(resolve(root, 'test text', '新建 文本文档.txt')) ? '需要本地测试文本（不随源码分发）' : false }, fn);
+
 const sampleDir = resolve(root, 'test text');
-const samples = readdirSync(sampleDir)
+const samples = (existsSync(sampleDir) ? readdirSync(sampleDir) : [])
   .filter(name => name.endsWith('.txt'))
   .sort((a, b) => a.localeCompare(b, 'zh-CN'));
 
@@ -34,7 +36,7 @@ function sample(name){
   return readFileSync(resolve(sampleDir, name), 'utf8');
 }
 
-test('通用格式档案：13 份现有样本均可规范化后字节级还原', () => {
+testWithSamples('通用格式档案：13 份现有样本均可规范化后字节级还原', () => {
   assert.equal(samples.length, 13);
   for (const name of samples){
     const text = sample(name);
@@ -56,7 +58,7 @@ test('行内 token：识别并原样保留换行、等待、字体、位置和�
   );
 });
 
-test('语义模块：显式标题、N 名字行、R 指令与括号说话人可区分', () => {
+testWithSamples('语义模块：显式标题、N 名字行、R 指令与括号说话人可区分', () => {
   const title = parseDocument(sample('新建 文本文档 (10).txt')).records;
   assert.equal(title[0].kind, 'title');
 
@@ -74,7 +76,7 @@ test('语义模块：显式标题、N 名字行、R 指令与括号说话人可�
   assert.ok(bracket[0].source.tokens.some(token => token.value === '[np]' && token.protected));
 });
 
-test('弱语义：无标记名字通过相邻对白推断，但必须留下低置信诊断', () => {
+testWithSamples('弱语义：无标记名字通过相邻对白推断，但必须留下低置信诊断', () => {
   const records = parseDocument(sample('新建 文本文档 (9).txt')).records;
   const speaker = records.find(record => record.source.text === '無名');
   assert.equal(speaker.kind, 'speaker');
@@ -93,7 +95,7 @@ test('连续原译文对不依赖空行也能分成多个段落', () => {
   assert.equal(serializeDocument(document), text);
 });
 
-test('识别报告展示语义模块统计与低置信数量', () => {
+testWithSamples('识别报告展示语义模块统计与低置信数量', () => {
   const text = sample('新建 文本文档 (9).txt');
   const profile = enrichDetectionProfile(text, detect(text, 'sample-9'));
   const report = renderReport(profile);
@@ -124,7 +126,7 @@ test('物理结构：混合换行、重复 ID 与显式空注释规则均不丢�
   assert.equal(noComments.issues[0].type, 'unmarked-line');
 });
 
-test('格式档案记录系统性编号偏移，但保留原译文各自 ID', () => {
+testWithSamples('格式档案记录系统性编号偏移，但保留原译文各自 ID', () => {
   const text = sample('新建 文本文档 (11).txt');
   const profile = enrichDetectionProfile(text, detect(text, 'offset'));
   assert.equal(profile.formatProfile.pairing.strategy, 'position-with-systematic-offset');
@@ -272,7 +274,7 @@ test('局部回写：控制 token 被删除或重排时拒绝输出', () => {
   assert.ok(reordered.errors.some(error => error.code === 'protected-token-mismatch'));
 });
 
-test('新规范化适配器：13 份样本未编辑时均可还原原文件', () => {
+testWithSamples('新规范化适配器：13 份样本未编辑时均可还原原文件', () => {
   for (const name of samples){
     const original = sample(name);
     const document = parseDocument(original, { file: name });
@@ -314,7 +316,7 @@ test('新规范化适配器：未知物理行拒绝规范化，不静默丢数�
   assert.ok(canonical.errors.some(error => error.code === 'unsupported-line'));
 });
 
-test('增强 profile 自带可序列化的无损恢复信息', () => {
+testWithSamples('增强 profile 自带可序列化的无损恢复信息', () => {
   const original = sample('新建 文本文档 (13).txt');
   const profile = enrichDetectionProfile(original, detect(original, 'profile'));
   const cloned = JSON.parse(JSON.stringify(profile));

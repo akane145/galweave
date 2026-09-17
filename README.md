@@ -21,10 +21,8 @@
 
 ## 文档
 
-- [使用教程](使用教程.md)
-- [格式识别与正则](使用说明-格式识别与正则.md)
+- [使用指南](docs/USER_GUIDE.md)
 - [Obsidian 联动](docs/obsidian-integration.md)
-- [词典接口](docs/dictionary-plugins.md)
 - [开发说明](docs/DEVELOPMENT.md)
 - [更新日志](CHANGELOG.md)
 - [本版发布说明](docs/RELEASE_NOTES.md)

@@ -58,3 +58,6 @@ obsidian-export.json
 test text/dc4ph/
 vscode-extension/.mimosa/
 vscode-extension/dist/
+
+# 测试文本仅保留在本地
+test text/
