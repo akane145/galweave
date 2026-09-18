@@ -9,10 +9,10 @@ import {
   addLayout, removeLayout, setLayoutKind, setLayoutTitle,
   addSample, removeSample, setSampleText,
   addMark, removeMark, fieldLabel,
-  stateFromRule, marksFromFragments, templateOfFragments,
+  stateFromRule, sampleFromFragments,
   buildRule, cloneState, DEFAULT_TITLES,
 } from '../src/format-editor-state.js';
-import { inferLayout } from '../src/format-samples.js';
+import { buildSkeleton, inferLayout } from '../src/format-samples.js';
 import { validateFormatV2, migrateV1ToV2, BUILTIN_FORMATS } from '../src/offline-formats.js';
 
 /* ---------------- 构造 ---------------- */
@@ -225,9 +225,15 @@ test('stateFromRule: v2 档案回填为编辑器状态', () => {
   assert.equal(s.layouts[0].kind, 'dialogue');
   assert.equal(s.pairing, 'id');
   assert.deepEqual(s.ignore, ['#',';']);
+  assert.equal(s.layouts[0].source.samples.length, 2, '已有档案应回填成可直接归纳的两组样例');
+  assert.equal(s.layouts[0].target.samples.length, 2);
   // 标注从片段反推：编号在前、正文在后
   const marks = s.layouts[0].source.samples[0].marks;
   assert.deepEqual(marks.map(m=>m.field), ['id','text']);
+
+  const rebuilt = buildRule(s, inferLayout);
+  assert.equal(rebuilt.ok, true, '使用已有档案后无需切换高级模式即可重新生成规则');
+  assert.deepEqual(validateFormatV2(rebuilt.rule), validateFormatV2(v2));
 });
 
 test('stateFromRule: v1 档案先迁移（调用方负责），非 v2 返回 null', () => {
@@ -236,18 +242,18 @@ test('stateFromRule: v1 档案先迁移（调用方负责），非 v2 返回 nul
   assert.equal(stateFromRule(undefined), null);
 });
 
-test('marksFromFragments / templateOfFragments: 片段与模板互推', () => {
+test('sampleFromFragments: 生成可回推原片段的真实样例与精确标注', () => {
   const frags = [
     { type:'literal', value:'JP[' },
     { type:'field', field:'id' },
     { type:'literal', value:'] ' },
     { type:'field', field:'text' },
   ];
-  assert.equal(templateOfFragments(frags), 'JP[{id}] {text}');
-  const marks = marksFromFragments(frags);
-  assert.equal(marks.length, 2);
-  assert.equal(marks[0].start, 3, '编号紧跟在 JP[ 之后');
-  assert.equal(marks[1].field, 'text');
+  const sample = sampleFromFragments(frags, 0);
+  assert.equal(sample.text, 'JP[1] 样例甲');
+  assert.equal(sample.text.slice(sample.marks[0].start, sample.marks[0].end), '1');
+  assert.equal(sample.text.slice(sample.marks[1].start, sample.marks[1].end), '样例甲');
+  assert.deepEqual(buildSkeleton(sample.text, sample.marks).fragments, frags);
 });
 
 /* ---------------- 组装档案 ---------------- */

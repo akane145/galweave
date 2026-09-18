@@ -22,10 +22,15 @@
 //
 // 译文侧没有 kind（它是原文布局的属性）——与 offline-formats 的 v2 契约一致。
 
-import { FIELD_NAMES, MAX_FRAGMENTS } from './offline-formats.js';
+import { FIELD_NAMES, FIELD_LABEL, MAX_FRAGMENTS } from './offline-formats.js';
 
 /** 新建布局时的默认标题 */
 export const DEFAULT_TITLES = { dialogue: '对话', narration: '旁白' };
+
+const SAMPLE_VALUES = [
+ { id:'1', name:'角色甲', text:'样例甲' },
+ { id:'2', name:'角色乙', text:'样例乙' },
+];
 
 let _seq = 0;
 /** 生成稳定 id（不用随机数：便于测试复现，也避免不必要的熵） */
@@ -174,7 +179,7 @@ export function removeMark(state, layoutId, side, index, field){
 }
 
 export function fieldLabel(field){
- return { id:'编号', name:'角色名', text:'正文' }[field] || field;
+ return FIELD_LABEL[field] || field;
 }
 
 /* ---------------- v2 档案 → 编辑器状态 ---------------- */
@@ -198,8 +203,8 @@ export function stateFromRule(rule){
    id: nextId('L'),
    title: '',
    kind: sp.kind === 'narration' ? 'narration' : 'dialogue',
-   source: { samples: [ { text:'', marks: marksFromFragments(sp.fragments) } ] },
-   target: { samples: [ { text:'', marks: marksFromFragments(tp.fragments) } ] },
+   source: { samples: [sampleFromFragments(sp.fragments,0),sampleFromFragments(sp.fragments,1)] },
+   target: { samples: [sampleFromFragments(tp.fragments,0),sampleFromFragments(tp.fragments,1)] },
   });
  }
  const out = {
@@ -214,29 +219,24 @@ export function stateFromRule(rule){
 }
 
 /**
- * 从片段反推标注区间。
+ * 从片段生成一组可直接归纳的示例文本与精确标注区间。
  *
- * ⚠️ 这是个**建模简化**：档案里存的是"结构"，没有原始样例文本，
- *    所以无法还原用户当时标的是哪几个字。这里返回的是"字段在模板串里的位置"，
- *    UI 用它把字段显示成可撤销的胶囊。用户重新粘贴真实样例后，
- *    标注坐标需要重标 —— 这是刻意的取舍：plan.md 明确要求**不保存原始样例**。
+ * 档案只保存结构，不保存用户原始脚本文本，因此这里使用明确的合成值。
+ * 两组不同的值既能让多样例归纳立即通过，也避免把 `{text}` 这种模板语法
+ * 当成真实样例后产生错位标注。
  */
-export function marksFromFragments(fragments){
+export function sampleFromFragments(fragments, sampleIndex=0){
+ const values=SAMPLE_VALUES[sampleIndex===1?1:0];
+ let text='';
  const marks = [];
- let cursor = 0;
  for (const f of Array.isArray(fragments) ? fragments : []){
-  if (f.type === 'literal'){ cursor += String(f.value || '').length; continue; }
-  const len = f.field === 'text' ? 4 : (f.field === 'name' ? 4 : 2);
-  marks.push({ start: cursor, end: cursor + len, field: f.field });
-  cursor += len;
+  if (f.type === 'literal'){ text+=String(f.value||''); continue; }
+  const value=values[f.field]||String(f.field||'字段');
+  const start=text.length;
+  text+=value;
+  marks.push({start,end:text.length,field:f.field});
  }
- return marks;
-}
-
-/** 模板串（把片段还原成 `{text}` 形式），供 UI 在"我没有真实样例"时占位显示 */
-export function templateOfFragments(fragments){
- return (Array.isArray(fragments) ? fragments : [])
-  .map(f => f.type === 'literal' ? String(f.value || '') : '{' + f.field + '}').join('');
+ return {text,marks};
 }
 
 /* ---------------- 状态 → v2 档案 ---------------- */

@@ -95,6 +95,9 @@
 - 说话人配色按**文档中首次出现顺序**分配槽位（`main.speakerSlot`），保证同角色全篇同色且不随滚动漂移；只给前 3 个角色上色（再多区分度不够）。换文档要 `invalidateSpeakerSlots()`。
 - 与校对模式**互斥**：进入剧场会先退出校对（批注框、漏翻条纹在阅读态是噪音，且会撑变形气泡）。
 - ⚠️ 切换后必须**下一帧再 `refreshAllRows()` 一次**：`autoResize` 读的是当前 `scrollHeight`，而刚加的 body class 在同一任务内尚未生效，会量到旧字号的高度，气泡撑不开。
+- ⚠️ **任何在剧场模式下量元素尺寸的函数都必须显式跳过**。剧场里 `.orig-cell` 是 `display:none`，`getBoundingClientRect()` 全返回 0，据此算出的位移是垃圾值；而 `syncOriginalWrapWidth` 写的是 **inline 样式**，坏值会**留在元素上**。已踩过一次：`left` 被算成 566px，退出剧场后原文行整体右推、超出显示边界 388px（v5.6.0 引入，v5.9.0 修复）。
+  修法见 `renderer.js` 的 `syncOriginalWrapWidth`：入口 `if (state.theater && state.theater()) return;`，且**量到 0 也不写回**（`transRect.width <= 0 || origRect.width <= 0`）。
+  新增同类函数时照此办理；排查判据是"开剧场 → 关剧场 → 看 `element.style` 有无残留"。
 
 ### 界面模块拆分（src/ui/）
 
@@ -133,7 +136,7 @@
 
 约定与纪律：
 
-- **v1 → v2 迁移必须无损**。`migrateV1ToV2` 用 `fragmentsFromTemplate` 还原片段，`tests/offline-formats.test.mjs` 里有**编译等价性测试**：同一批文本分别走 v1 与 v2 解析器，记录数/取值/错误/未识别行必须完全一致。改动迁移逻辑后这条必须先过。
+- **v1 → v2 迁移必须无损**。v1 先由 `fragmentsFromTemplate` 还原片段，再与 v2 共用 `compileFragments` 和同一套全文扫描、配对核心；v1 包装层只保留历史返回形状与错误文案。`tests/offline-formats.test.mjs` 的编译等价性测试要求两种入口的记录数、取值、错误和未识别行完全一致，改动迁移或核心逻辑后这条必须先过。
 - **`kind`（对话/旁白）是原文布局的属性**，译文布局没有这个字段。曾误在 order 配对里比较两侧 kind，导致每次配对都假报错。
 - **相同译文布局自动去重**（`validateFormatV2`）：两种原文共用一种译文时合并为一条，避免"译文格式相同"造成伪歧义。
 - **原文与译文布局不得同形**：同形会让每一行都同时匹配两侧，属真歧义，直接拒绝。

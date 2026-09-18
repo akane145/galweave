@@ -4123,62 +4123,157 @@ button:active:not(:disabled){
 .annotation-editor textarea { display: block; box-sizing: border-box; width: 100%; margin: 8px 0; padding: 10px; resize: vertical; min-height: 120px; max-height: 50vh; font: inherit; color: var(--text); background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px; }
 .annotation-editor textarea:focus-visible { outline: 2px solid var(--text-muted); outline-offset: 2px; }
 
-.offline-format-section > label { display: block; margin-top: 12px; }
-.offline-format-section > input[type=text], .offline-format-section > select, .offline-format-section textarea { box-sizing: border-box; width: 100%; }
-.offline-template-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-.offline-template-grid textarea { display: block; margin: 6px 0; resize: vertical; min-height: 90px; }
-.offline-format-section .row { flex-wrap: wrap; margin-top: 8px; gap: 6px; }
-.offline-preview { overflow: auto; max-height: 320px; margin-top: 12px; }
-.offline-preview table { width: 100%; border-collapse: collapse; }
-.offline-preview th, .offline-preview td { border-bottom: 1px solid var(--border); padding: 8px; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }
-.offline-format-section input:focus-visible, .offline-format-section textarea:focus-visible, .offline-format-section button:focus-visible, .offline-format-section select:focus-visible { outline: 2px solid var(--text-muted); outline-offset: 2px; }
-@media (max-width: 700px) { .offline-template-grid { grid-template-columns: 1fr; } }
+.offline-format-section,
+.parse-manual-section{ padding-top:var(--sp-5); border-top:1px solid var(--border-hair); }
+.offline-format-section input[type=text],
+.offline-format-section select,
+.offline-format-section textarea{ box-sizing:border-box; width:100%; }
 
-/* ── 多样例布局编辑器 ──
-   每个布局一张卡片；卡内是若干"原文 / 译文"成对的样例区。
-   窄屏下样例对改为上下堆叠（见文件末的媒体查询）。 */
+.of-profile-row{
+  display:grid;
+  grid-template-columns:minmax(240px,1fr) auto;
+  gap:var(--sp-3);
+  align-items:end;
+}
+.of-profile-field,
+.of-config-grid .field,
+.of-ignore-field{ min-width:0; margin:0; }
+.of-profile-actions,
+.of-layout-actions,
+.of-rule-actions,
+.of-preview-actions,
+.of-layout-foot,
+.of-mark-bar{
+  display:flex;
+  align-items:center;
+  gap:var(--sp-2);
+  flex-wrap:wrap;
+}
+.of-config-grid{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(240px,.7fr);
+  gap:var(--sp-3);
+  margin-top:var(--sp-3);
+}
+.of-layout-actions,
+.of-rule-actions,
+.of-ignore-field{ margin-top:var(--sp-3); }
+.of-rule-actions{ padding-top:var(--sp-3); border-top:1px solid var(--border-hair); }
+.of-ack{
+  display:flex;
+  align-items:flex-start;
+  gap:var(--sp-2);
+  margin-top:var(--sp-3);
+  color:var(--text-mid);
+  font-size:var(--fs-xs);
+  line-height:1.5;
+}
+.of-ack input{ flex:none; margin-top:2px; accent-color:var(--accent); }
+
+.offline-preview{
+  max-height:320px;
+  margin-top:var(--sp-3);
+  overflow:auto;
+  border:1px solid var(--border-soft);
+  border-radius:var(--r-sm);
+  background:var(--bg-base);
+}
+.offline-preview table{ width:100%; border-collapse:collapse; }
+.offline-preview th,
+.offline-preview td{
+  padding:var(--sp-2) var(--sp-3);
+  border-bottom:1px solid var(--border-hair);
+  text-align:left;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+}
+.offline-preview th{
+  position:sticky;
+  top:0;
+  background:var(--bg-raised);
+  color:var(--text-dim);
+  font-size:var(--fs-2xs);
+  font-weight:var(--fw-semi);
+  letter-spacing:.04em;
+  z-index:1;
+}
+.offline-preview td{ color:var(--text-mid); font-size:var(--fs-xs); }
+.of-preview-actions{ margin-top:var(--sp-2); }
+.of-preview-actions #of-pages{ margin-right:auto; color:var(--text-dim); font-family:var(--font-mono); font-size:var(--fs-2xs); }
+
+/* 多样例布局编辑器：沿用设置工作台的薄边框、排印层级与控件尺度。 */
 .of-layout{
-  border: 1px solid var(--border-soft); border-radius: var(--r-sm);
-  padding: var(--sp-2); margin-top: var(--sp-2); background: var(--bg-raised);
+  margin-top:var(--sp-3);
+  padding:var(--sp-4);
+  border:1px solid var(--border-soft);
+  border-radius:var(--r-md);
+  background:var(--bg-base);
 }
-.of-layout-head{ display: flex; align-items: center; gap: var(--sp-2); }
-.of-layout-title{ flex: 1 1 auto; min-width: 0; font-weight: 600; }
-.of-layout-kind{ flex: 0 0 auto; max-width: 15em; }
+.of-layout-head{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(180px,auto) 30px;
+  gap:var(--sp-2);
+  align-items:center;
+}
+.of-layout-title{ min-width:0; color:var(--text-hi); font-weight:var(--fw-semi); }
+.of-layout-kind{ min-width:0; }
 .of-layout-del{
-  flex: none; width: 28px; min-width: 28px; height: 28px; min-height: 28px;
-  padding: 0; border: 1px solid var(--border-soft); background: transparent;
-  color: var(--text-dim); cursor: pointer;
+  width:30px;
+  min-width:30px;
+  height:30px;
+  min-height:30px;
+  padding:0;
+  border:1px solid var(--border-soft);
+  border-radius:var(--r-sm);
+  background:var(--bg-raised);
+  color:var(--text-dim);
+  cursor:pointer;
 }
-.of-layout-del:hover{ border-color: var(--danger); background: var(--danger); color: #fff; }
-
-.of-samples{ display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-2); }
-.of-sample-pair{ display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
-.of-sample{ display: flex; flex-direction: column; min-width: 0; }
-.of-sample label{ font-size: var(--fs-2xs); color: var(--text-dim); }
+.of-layout-del:hover{ border-color:var(--danger); background:var(--danger); color:#fff; }
+.of-samples{ display:flex; flex-direction:column; gap:var(--sp-3); margin-top:var(--sp-3); }
+.of-sample-pair{ display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-3); }
+.of-sample{
+  display:flex;
+  min-width:0;
+  padding:var(--sp-3);
+  border-left:2px solid var(--border-strong);
+  background:var(--bg-raised);
+  flex-direction:column;
+}
+.of-sample label{ color:var(--text-dim); font-size:var(--fs-2xs); font-weight:var(--fw-semi); letter-spacing:.04em; }
 .of-sample textarea{
-  display: block; width: 100%; margin: 4px 0; resize: vertical;
-  min-height: 68px; font-family: var(--font-mono); font-size: var(--fs-sm);
+  display:block;
+  min-height:76px;
+  margin:var(--sp-2) 0;
+  resize:vertical;
+  font-family:var(--font-mono);
+  font-size:var(--fs-sm);
 }
-.of-mark-bar{ margin-top: 2px; }
-.of-mark-bar button{ padding: 0 var(--sp-2); font-size: var(--fs-2xs); }
-
-/* 已标注字段的胶囊：显示字段名与被标的文字，点击撤销 */
-.of-chips{ display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.of-mark-bar button{ min-height:28px; height:28px; padding:0 var(--sp-2); font-size:var(--fs-2xs); }
+.of-chips{ display:flex; min-height:24px; flex-wrap:wrap; gap:var(--sp-1); margin-top:var(--sp-2); }
 .of-chip{
-  border: 1px solid var(--st-pending-bd, rgba(154,103,0,.3));
-  background: var(--st-pending-bg, rgba(154,103,0,.14));
-  color: var(--st-pending-fg);
-  border-radius: var(--r-pill); padding: 1px var(--sp-2);
-  font-size: var(--fs-2xs); cursor: pointer;
+  min-height:24px;
+  height:auto;
+  padding:2px var(--sp-2);
+  border:1px solid var(--st-pending-bd);
+  border-radius:var(--r-pill);
+  background:var(--st-pending-bg);
+  color:var(--st-pending-fg);
+  font-size:var(--fs-2xs);
+  line-height:1.35;
+  cursor:pointer;
 }
-.of-chip:hover{ filter: brightness(1.15); }
+.of-chip:hover{ border-color:var(--st-pending); background:var(--st-pending-bg); }
+.of-layout-foot{ margin-top:var(--sp-3); padding-top:var(--sp-3); border-top:1px solid var(--border-hair); }
+.of-layout-status{ flex:1 1 100%; color:var(--text-dim); font-size:var(--fs-2xs); line-height:1.55; white-space:pre-wrap; }
+.of-layout-status.ok{ color:var(--st-approved-fg); }
+.of-layout-status.bad{ color:var(--st-pending-fg); }
 
-/* 布局归纳状态：成功/冲突。冲突文案可能较长，允许换行。 */
-.of-layout-status{ flex: 1 1 100%; font-size: var(--fs-2xs); line-height: 1.5; white-space: pre-wrap; }
-.of-layout-status.ok{ color: var(--st-approved-fg); }
-.of-layout-status.bad{ color: var(--st-pending-fg); }
-
-@media (max-width: 700px) {
-  .of-sample-pair { grid-template-columns: 1fr; }
-  .of-layout-kind { max-width: 100%; }
+@media (max-width:700px){
+  .of-profile-row,
+  .of-config-grid,
+  .of-sample-pair{ grid-template-columns:1fr; }
+  .of-profile-actions{ align-items:stretch; }
+  .of-layout-head{ grid-template-columns:minmax(0,1fr) 30px; }
+  .of-layout-kind{ grid-column:1 / -1; grid-row:2; }
 }

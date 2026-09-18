@@ -13,12 +13,10 @@
 //   1. buildSkeleton(text, marks) —— 单组样例 + 标注 → 片段骨架
 //   2. inferLayout(samples)       —— 多组骨架 → 一致的布局 或 冲突详情
 
-import { FIELD_NAMES, MAX_TEMPLATE_LEN, MAX_FRAGMENTS } from './offline-formats.js';
+import { FIELD_NAMES, FIELD_LABEL, MAX_TEMPLATE_LEN, MAX_FRAGMENTS, cloneFragments } from './offline-formats.js';
 
 /** 至少需要几组样例才允许归纳出一个布局（plan.md 硬要求） */
 export const MIN_SAMPLES = 2;
-
-const FIELD_LABEL = { id: '编号', name: '角色名', text: '正文' };
 
 /* ---------------- 标注校验 ---------------- */
 
@@ -228,9 +226,7 @@ export function toSourcePattern(fragments, meta){
   id: String(m.id||'s1'),
   kind: m.kind === 'narration' ? 'narration' : 'dialogue',
   target: String(m.target||'t1'),
-  fragments: (Array.isArray(fragments)?fragments:[]).map(f=>f.type==='literal'
-   ?{type:'literal',value:f.value}
-   :{type:'field',field:f.field}),
+  fragments: cloneFragments(fragments),
  };
 }
 
@@ -238,9 +234,7 @@ export function toSourcePattern(fragments, meta){
 export function toTargetPattern(fragments, id){
  return {
   id: String(id||'t1'),
-  fragments: (Array.isArray(fragments)?fragments:[]).map(f=>f.type==='literal'
-   ?{type:'literal',value:f.value}
-   :{type:'field',field:f.field}),
+  fragments: cloneFragments(fragments),
  };
 }
 

@@ -1,33 +1,25 @@
 // offline-formats-ui.js — 样例配置与格式档案（零正则多样例编辑器）
 //
-// 两条通路并存（这是有意的）：
-//   1. **主流程：布局卡片 + 样例对**（默认）—— 面向完全不懂正则的用户。
-//      为每个布局提供 ≥2 组原文/译文样例，选中文字点按钮标注字段，
-//      程序归纳出规则。
-//   2. **高级：直接编辑模板**（折叠）—— v1 的 {text}/{id}/{name} 模板语法。
-//      保留它是因为既有用户档案与内置档案都是模板形态，且模板能表达
-//      样例难以演示的边界情形。主流程图里不出现模板语法。
+// 单一主流程：布局卡片 + 样例对，面向完全不懂正则的用户。
+// v1 模板档案在读取时迁移成 v2，并生成两组合成样例供预览和继续编辑；
+// UI 不再维护一套平行的“高级模板模式”。
 //
 // 状态与归纳逻辑分别在 format-editor-state.js / format-samples.js（纯逻辑、已单测），
 // 本文件只负责 DOM 渲染与事件接线。
 
-import { BUILTIN_FORMATS, validateFormat, validateFormatV2, migrateV1ToV2, parseFormatAny, exportFormat } from './offline-formats.js';
+import { BUILTIN_FORMATS, normalizeFormat, validateFormatV2, migrateV1ToV2, parseFormatAny, exportFormat } from './offline-formats.js';
 import { inferLayout } from './format-samples.js';
 import {
   createEditorState, addLayout, removeLayout, setLayoutKind, setLayoutTitle,
   addSample, removeSample, setSampleText, addMark, removeMark, fieldLabel,
-  stateFromRule, buildRule, cloneState, templateOfFragments,
+  stateFromRule, buildRule, cloneState,
 } from './format-editor-state.js';
 import { loadSettings, saveSettings } from './settings.js';
 import { downloadTextWithDialog, getAppDir } from './fs.js';
 
 export async function savedFormats(){
  const settings=await loadSettings();
- return (Array.isArray(settings.offlineFormats)?settings.offlineFormats:[]).flatMap(r=>{try{return [normalize(r)];}catch{return [];}});
-}
-/** 统一读取：v1 原样（保持既有行为），v2 严格校验 */
-function normalize(r){
- return (r&&r.version===2)?validateFormatV2(r):validateFormat(r);
+ return (Array.isArray(settings.offlineFormats)?settings.offlineFormats:[]).flatMap(r=>{try{return [normalizeFormat(r)];}catch{return [];}});
 }
 export async function availableFormats(){
  const unique = new Map();
@@ -41,8 +33,6 @@ export async function availableFormats(){
 let hooks, mounted=false, preview=null, page=0, generation=0;
 /** 编辑器状态（纯数据，来自 format-editor-state） */
 let editor = null;
-/** 高级模板模式的输入（与 editor 二选一；用户切到高级时才用） */
-let advanced = { source:'', target:'' };
 const $=id=>document.getElementById('of-'+id);
 
 /* ---------------- 报告与预览 ---------------- */
@@ -53,22 +43,8 @@ function invalidate(){
 
 function setReport(msg){ $('report').textContent = msg; }
 
-/** 当前模式：'samples'（默认）| 'advanced' */
-function mode(){ return $('mode') && $('mode').value === 'advanced' ? 'advanced' : 'samples'; }
-
-/** 读当前配置为规则对象（两种模式各自的入口） */
+/** 读当前样例编辑器状态为 v2 规则对象 */
 function readRule(){
- if (mode() === 'advanced'){
-  return validateFormat({
-   version:1,
-   name: $('name').value,
-   source: $('adv-source').value,
-   target: $('adv-target').value,
-   pairing: $('pairing').value,
-   ignore: $('ignore').value.split('\n').map(x=>x.trim()).filter(Boolean),
-  });
- }
- // 样例模式：状态 → 归纳 → v2 规则
  const state = { ...cloneState(editor), name: $('name').value,
   pairing: $('pairing').value,
   ignore: $('ignore').value.split('\n').map(x=>x.trim()).filter(Boolean) };
@@ -90,19 +66,9 @@ function fillFromRule(rule){
  const v2 = (rule&&rule.version===2) ? rule : migrateV1ToV2(rule);
  const st = stateFromRule(v2);
  editor = st || createEditorState();
- // 档案里**只有结构、没有原始样例文本**（plan.md 明确要求不保存样例），
- // 所以回填时用模板串占位：用户能看清结构，粘贴真实样例后重新标注即可。
- editor.layouts.forEach((L,i)=>{
-  const sp = v2.sourcePatterns[i];
-  const tp = sp ? v2.targetPatterns.find(t => t && t.id === sp.target) : null;
-  if (sp && L.source.samples[0]) L.source.samples[0].text = templateOfFragments(sp.fragments);
-  if (tp && L.target.samples[0]) L.target.samples[0].text = templateOfFragments(tp.fragments);
- });
  $('name').value = rule.name || '';
  $('pairing').value = rule.pairing || 'order';
  $('ignore').value = (rule.ignore||[]).join('\n');
- // v1 档案额外回填到高级模板（用户切过去就能看到原始模板）
- if (rule.version === 1){ advanced = { source:rule.source, target:rule.target }; if($('adv-source'))$('adv-source').value=rule.source; if($('adv-target'))$('adv-target').value=rule.target; }
  renderLayouts();
  invalidate();
 }
@@ -147,6 +113,7 @@ function renderLayoutCard(L){
  const del = document.createElement('button');
  del.type='button'; del.className='of-layout-del'; del.textContent='✕';
  del.title='删除这个布局';
+ del.setAttribute('aria-label','删除布局「'+(L.title||'未命名')+'」');
  del.addEventListener('click',()=>{ editor = removeLayout(editor, L.id); renderLayouts(); invalidate(); });
  head.append(title, kind, del);
  card.appendChild(head);
@@ -161,12 +128,12 @@ function renderLayoutCard(L){
  card.appendChild(pairs);
 
  const foot = document.createElement('div');
- foot.className='row';
+ foot.className='of-layout-foot';
  const add = document.createElement('button');
- add.type='button'; add.textContent='＋ 添加一组样例';
+ add.type='button'; add.className='toolbtn'; add.textContent='＋ 添加一组样例';
  add.addEventListener('click',()=>{ editor = addSample(editor, L.id); renderLayouts(); invalidate(); });
  const delSample = document.createElement('button');
- delSample.type='button'; delSample.className='secondary'; delSample.textContent='－ 删除最后一组';
+ delSample.type='button'; delSample.className='toolbtn secondary'; delSample.textContent='－ 删除最后一组';
  delSample.disabled = n<=0;
  delSample.addEventListener('click',()=>{ editor = removeSample(editor, L.id, n-1); renderLayouts(); invalidate(); });
  foot.append(add, delSample);
@@ -198,10 +165,10 @@ function renderSamplePair(L, i){
   ta.addEventListener('input',()=>{ editor = setSampleText(editor, L.id, side, i, ta.value); invalidate(); });
   // 标注按钮：作用于这个 textarea 的当前选区
   const bar = document.createElement('div');
-  bar.className='row of-mark-bar';
+  bar.className='of-mark-bar';
   for (const f of ['id','name','text']){
    const b=document.createElement('button');
-   b.type='button'; b.className='secondary';
+   b.type='button'; b.className='toolbtn secondary';
    b.textContent='标为'+fieldLabel(f);
    b.dataset.mark = side+':'+f;
    b.addEventListener('click',()=>{
@@ -222,6 +189,7 @@ function renderSamplePair(L, i){
    const text=(ta.value||'').slice(m.start,m.end);
    chip.textContent = fieldLabel(m.field) + '：' + (text.length>10?text.slice(0,10)+'…':text);
    chip.title='点击撤销这处标注';
+   chip.setAttribute('aria-label','撤销'+fieldLabel(m.field)+'标注：'+text);
    chip.addEventListener('click',()=>{ editor = removeMark(editor, L.id, side, i, m.field); renderLayouts(); invalidate(); });
    chips.appendChild(chip);
   }
@@ -258,10 +226,6 @@ function renderLayoutStatus(){
 
 function renderPreview(){
  const d=preview;if(!d)return;
- const layoutName=(r)=>{
-  if(!r.kind)return '';
-  return ' · '+(r.kind==='narration'?'旁白':'对话');
- };
  setReport(`${d.rule.name}：${d.records.length} 条原译文，${d.errors.length} 个错误，${d.unmatched.length} 行未识别。\n`+
   d.errors.join('\n')+(d.unmatched.length?'\n未识别行将保持原样；请逐一确认是否漏掉了正文。':d.errors.length?'':'\n未编辑回写校验通过。'));
  const list=$('rows');list.replaceChildren();
@@ -276,7 +240,6 @@ function renderPreview(){
  $('pages').textContent=`第 ${page+1} / ${total} 页（全部 ${entries.length} 项）`;
  $('prev').disabled=page===0;$('next').disabled=page>=total-1;
  $('load').disabled=!!d.errors.length||!!d.unmatched.length&&!$('ack').checked;
- void layoutName;
 }
 
 /* ---------------- 运行 ---------------- */
@@ -287,7 +250,7 @@ function run(){
   const d=parseFormatAny(text,readRule());
   if(!d.errors.length&&exportFormat(d,d.records.map(r=>({translation:r.target.values.text,nameTr:r.target.values.name})))!==text)throw new Error('未编辑回写不一致');
   preview=d;page=0;$('ack').checked=false;
-  if (mode()==='samples') renderLayoutStatus();
+  renderLayoutStatus();
   renderPreview();
  }catch(e){invalidate();setReport(e.message);}
 }
@@ -298,50 +261,30 @@ export async function initOfflineFormats(options){
  hooks=options;const current=++generation;
  if(!mounted){
   const host=document.createElement('section');host.className='settings-section offline-format-section';
-  host.innerHTML=`<div class="settings-section-heading"><span class="settings-section-index">离线</span><div><h4>样例配置与格式档案</h4><p>无需 AI 或额外环境。给每种布局至少两组原文/译文样例，选中文字标为「编号 / 角色名 / 正文」，程序据此生成规则。</p></div></div>
-  <div class="row"><label for="of-profiles">格式档案</label><select id="of-profiles"></select><button type="button" id="of-use">使用档案</button><button type="button" id="of-import">导入档案</button><input id="of-file" type="file" accept=".json" hidden></div>
-  <label for="of-name">档案名称</label><input id="of-name" type="text" maxlength="100">
-
-  <div class="row"><label for="of-mode">配置方式</label><select id="of-mode">
-   <option value="samples">用样例标注（推荐，不需要懂正则）</option>
-   <option value="advanced">直接编辑模板（高级）</option>
-  </select></div>
-
-  <div id="of-pane-samples">
-   <div id="of-layouts"></div>
-   <div class="row"><button type="button" id="of-add-dialogue">＋ 添加对话布局</button><button type="button" id="of-add-narration" class="secondary">＋ 添加旁白布局</button></div>
-   <p class="settings-caption">每个布局至少两组样例。未标注的文字会作为固定结构原样保留；标注错了点胶囊即可撤销。</p>
+  host.innerHTML=`<div class="settings-section-heading"><span class="settings-section-index">02</span><div><h4>样例格式档案</h4><p>给每种布局至少两组原文与译文样例，选中文字标明字段，程序生成可复用规则。</p></div><span class="settings-badge settings-badge--muted">自定义</span></div>
+  <div class="of-profile-row">
+   <div class="field of-profile-field"><label for="of-profiles">格式档案</label><select id="of-profiles"></select></div>
+   <div class="of-profile-actions"><button type="button" class="toolbtn secondary" id="of-use">使用档案</button><button type="button" class="toolbtn secondary" id="of-import">导入档案</button><input id="of-file" type="file" accept=".json" hidden></div>
   </div>
-
-  <div id="of-pane-advanced" class="hidden">
-   <div class="offline-template-grid">
-    <div><label for="of-adv-source">原文模板</label><textarea id="of-adv-source" rows="4" spellcheck="false"></textarea></div>
-    <div><label for="of-adv-target">译文模板</label><textarea id="of-adv-target" rows="4" spellcheck="false"></textarea></div>
-   </div>
-   <p class="settings-caption">正文标为 {text}，编号为 {id}，角色名为 {name}。每个模板需要固定开头。</p>
+  <div class="of-config-grid">
+   <div class="field"><label for="of-name">档案名称</label><input id="of-name" type="text" maxlength="100"></div>
+   <div class="field"><label for="of-pairing">原译配对</label><select id="of-pairing"><option value="order">按各自出现顺序</option><option value="id">按相同编号（支持原译分区）</option></select></div>
   </div>
-
-  <label for="of-pairing">原译配对</label><select id="of-pairing"><option value="order">按各自出现顺序</option><option value="id">按相同编号（支持原译分区）</option></select>
-  <label for="of-ignore">不参与翻译的行前缀（每行一个）</label><textarea id="of-ignore" rows="2"></textarea>
-  <div class="row"><button type="button" id="of-preview">预览全部文本</button><button type="button" id="of-save">保存为我的档案</button><button type="button" id="of-export">导出档案</button><button type="button" id="of-delete">删除我的同名档案</button></div>
+  <div id="of-layouts"></div>
+  <div class="of-layout-actions"><button type="button" class="toolbtn settings-primary" id="of-add-dialogue">＋ 添加对话布局</button><button type="button" class="toolbtn secondary" id="of-add-narration">＋ 添加旁白布局</button></div>
+  <p class="settings-caption">每个布局至少两组样例。未标注文字作为固定结构原样保留；点已标注字段可撤销。</p>
+  <div class="field of-ignore-field"><label for="of-ignore">不参与翻译的行前缀</label><textarea id="of-ignore" rows="2" placeholder="每行一个，例如 # 或 ;"></textarea><small>匹配这些前缀的整行会保持原样，不进入翻译记录。</small></div>
+  <div class="of-rule-actions"><button type="button" class="toolbtn settings-primary" id="of-preview">预览全部文本</button><button type="button" class="toolbtn secondary" id="of-save">保存为我的档案</button><button type="button" class="toolbtn secondary" id="of-export">导出档案</button><button type="button" class="toolbtn danger" id="of-delete">删除同名档案</button></div>
   <pre id="of-report" class="recog-report" role="status" aria-live="polite"></pre>
-  <label><input type="checkbox" id="of-ack">我已检查未识别行，确认它们无需翻译并保持原样</label>
+  <label class="of-ack"><input type="checkbox" id="of-ack">我已检查未识别行，确认它们无需翻译并保持原样</label>
   <div class="offline-preview"><table><thead><tr><th>原文行</th><th>类型</th><th>原文 / 未识别内容</th><th>译文</th></tr></thead><tbody id="of-rows"></tbody></table></div>
-  <div class="row"><button type="button" id="of-prev">上一页</button><span id="of-pages"></span><button type="button" id="of-next">下一页</button><button type="button" id="of-load" disabled>按此格式载入</button></div>
+  <div class="of-preview-actions"><button type="button" class="toolbtn secondary" id="of-prev">上一页</button><span id="of-pages"></span><button type="button" class="toolbtn secondary" id="of-next">下一页</button><button type="button" class="toolbtn settings-primary" id="of-load" disabled>按此格式载入</button></div>
   <p class="settings-caption">保存的档案用于后续导入自动匹配；只有唯一匹配、无错误且无未识别行时自动采用。导出的档案只含规则，不含脚本文本。</p>`;
   document.querySelector('#setModal .settings-scroll').insertBefore(host,document.querySelector('.parse-manual-section'));
   mounted=true;
 
   for(const id of ['name','pairing','ignore']) $(id).addEventListener('input',invalidate);
-  $('adv-source').addEventListener('input',()=>{advanced.source=$('adv-source').value;invalidate();});
-  $('adv-target').addEventListener('input',()=>{advanced.target=$('adv-target').value;invalidate();});
   for(const id of ['recogText','recogSrcFile','recogSrcPaste'])document.getElementById(id).addEventListener('input',invalidate);
-  $('mode').addEventListener('change',()=>{
-   const adv = mode()==='advanced';
-   $('pane-samples').classList.toggle('hidden',adv);
-   $('pane-advanced').classList.toggle('hidden',!adv);
-   invalidate();
-  });
   $('add-dialogue').addEventListener('click',()=>{ editor=addLayout(editor,'dialogue');renderLayouts();invalidate(); });
   $('add-narration').addEventListener('click',()=>{ editor=addLayout(editor,'narration');renderLayouts();invalidate(); });
   $('preview').addEventListener('click',run);
@@ -362,7 +305,7 @@ export async function initOfflineFormats(options){
    if(file.size>32768)throw new Error('档案超过 32 KB');
    const obj=JSON.parse(await file.text());
    // v2 走严格校验，v1 走迁移——两者最终都回填到样例编辑器
-   fillFromRule(obj&&obj.version===2?validateFormatV2(obj):validateFormat(obj));
+    fillFromRule(normalizeFormat(obj));
    setReport('档案已导入，可预览后保存到我的档案。');
   }catch(e){setReport('导入失败：'+e.message);}finally{$('file').value='';}});
   $('load').addEventListener('click',async()=>{try{

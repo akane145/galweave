@@ -6,65 +6,25 @@ export const BUILTIN_FORMATS = [
  {version:1,name:'多行标签块',source:'<jp {id}>\n{text}\n</jp>',target:'<cn {id}>\n{text}\n</cn>',pairing:'id',ignore:['#']},
 ];
 const escape = s => s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&').replace(/\n/g,'\\r?\\n');
-function compile(template){
- if(typeof template!=='string'||template.length>4096) throw new Error('模板不能为空或超过 4096 字符');
- const parts=template.replace(/\r\n/g,'\n').split(/(\{(?:text|id|name)\})/);
- const fields=[]; let pattern='';
- for(let i=0;i<parts.length;i++){
-  const p=parts[i];
-  if(i%2){
-   const key=p.slice(1,-1);
-   if(fields.includes(key)) throw new Error('每个字段在同一模板中只能标注一次');
-   if(i>1&&!parts[i-1]) throw new Error('两个字段之间需要固定分隔文字');
-   fields.push(key);
-   pattern+=key==='text'&&template.includes('\n')?'([\\s\\S]*?)':'([^\\r\\n]*?)';
-  }else{
-   if(/\{[^}]*\}/.test(p)) throw new Error('只支持 {text}、{id}、{name} 字段');
-   pattern+=escape(p);
-  }
- }
- if(!fields.includes('text')||!parts[0]) throw new Error('模板需含正文，并以固定文字开头');
- return {re:new RegExp(pattern+'(?=\\r?\\n|$)','dy'),fields};
-}
-export function validateFormat(value){
- if(!value||value.version!==1) throw new Error('不支持的格式档案版本');
+function validateCommon(value,version){
+ if(!value||value.version!==version) throw new Error('不支持的格式档案版本');
  if(typeof value.name!=='string'||!value.name.trim()||value.name.length>100) throw new Error('请填写 1–100 字符的档案名称');
  if(!['id','order'].includes(value.pairing)) throw new Error('配对方式必须是编号或顺序');
- const source=compile(value.source),target=compile(value.target);
- if(value.source===value.target) throw new Error('原文与译文模板不能相同');
- if(value.pairing==='id'&&(!source.fields.includes('id')||!target.fields.includes('id'))) throw new Error('编号配对要求两侧均标注编号');
  if(!Array.isArray(value.ignore)||value.ignore.length>20||value.ignore.some(s=>typeof s!=='string'||!s.trim()||s.length>100)) throw new Error('忽略前缀格式不正确');
- return {version:1,name:value.name.trim(),source:value.source.replace(/\r\n/g,'\n'),target:value.target.replace(/\r\n/g,'\n'),pairing:value.pairing,ignore:[...value.ignore]};
+ return {name:value.name.trim(),pairing:value.pairing,ignore:[...value.ignore]};
 }
-function match(compiled,text,start){
- compiled.re.lastIndex=start;const m=compiled.re.exec(text);if(!m)return null;
- const values={},spans={};compiled.fields.forEach((key,i)=>{values[key]=m[i+1];spans[key]=m.indices[i+1];});
- return {start,end:start+m[0].length,values,spans};
+export function validateFormat(value){
+ const common=validateCommon(value,1);
+ const sourceFragments=fragmentsFromTemplate(value.source),targetFragments=fragmentsFromTemplate(value.target);
+ if(sameFragments(sourceFragments,targetFragments)) throw new Error('原文与译文模板不能相同');
+ const hasField=(fragments,field)=>fragments.some(f=>f.type==='field'&&f.field===field);
+ if(common.pairing==='id'&&(!hasField(sourceFragments,'id')||!hasField(targetFragments,'id'))) throw new Error('编号配对要求两侧均标注编号');
+ return {version:1,name:common.name,source:templateFromFragments(sourceFragments),target:templateFromFragments(targetFragments),pairing:common.pairing,ignore:common.ignore};
 }
 export function parseFormat(text,value){
  let rule;try{rule=validateFormat(value);}catch(e){return {text,rule:value,records:[],unmatched:[],errors:[e.message]};}
- const source=compile(rule.source),target=compile(rule.target),sources=[],targets=[],unmatched=[],errors=[];
- let pos=text.charCodeAt(0)===0xfeff?1:0,line=1;
- while(pos<text.length){
-  const a=match(source,text,pos),b=match(target,text,pos);
-  const endLine=text.indexOf('\n',pos);let end=endLine<0?text.length:endLine+1;
-  if(a&&b) errors.push(`第 ${line} 行同时匹配原文和译文`);
-  else if(a||b){const m=a||b;m.line=line;(a?sources:targets).push(m);end=m.end;if(text[end]==='\r')end++;if(text[end]==='\n')end++;}
-  else{const raw=text.slice(pos,end).replace(/[\r\n]+$/,'');if(raw.trim()&&!rule.ignore.some(p=>raw.trimStart().startsWith(p)))unmatched.push({line,text:raw});}
-  line+=(text.slice(pos,end).match(/\n/g)||[]).length;pos=end;
- }
- const records=[];
- if(rule.pairing==='id'){
-  const sm=new Map(),tm=new Map();
-  for(const [list,map] of [[sources,sm],[targets,tm]])for(const m of list){const id=m.values.id;if(!id||map.has(id))errors.push(`第 ${m.line} 行编号为空或重复：${id}`);map.set(id,m);}
-  for(const a of sources){const b=tm.get(a.values.id);if(!b)errors.push(`第 ${a.line} 行找不到配对译文`);else records.push({key:a.values.id,source:a,target:b});}
-  for(const b of targets)if(!sm.has(b.values.id))errors.push(`第 ${b.line} 行是孤立译文`);
- }else{
-  if(sources.length!==targets.length)errors.push(`原文 ${sources.length} 条，译文 ${targets.length} 条，数量不一致`);
-  for(let i=0;i<Math.min(sources.length,targets.length);i++)records.push({key:String(i+1),source:sources[i],target:targets[i]});
- }
- if(!records.length)errors.push('没有完整的原译文记录');
- return {text,rule,records,unmatched,errors};
+ const doc=parseValidatedFormat(text,migrateValidatedV1(rule),{legacy:true});
+ return {...doc,rule};
 }
 export function chooseFormat(text,rules){return rules.map(rule=>parseFormat(text,rule)).filter(d=>!d.errors.length&&!d.unmatched.length);}
 /**
@@ -149,6 +109,7 @@ export function formatParas(doc){
    ============================================================ */
 
 export const FIELD_NAMES = ['id', 'name', 'text'];
+export const FIELD_LABEL = {id:'编号',name:'角色名',text:'正文'};
 export const SOURCE_KINDS = ['dialogue', 'narration'];
 export const KIND_LABEL = { dialogue: '对话', narration: '旁白' };
 /** 单个 pattern 的片段数上限与模板长度上限（与 v1 的 4096 字符约束同源） */
@@ -185,7 +146,7 @@ export function isMultiline(fragments){
  return (Array.isArray(fragments)?fragments:[]).some(f=>f&&f.type==='literal'&&typeof f.value==='string'&&f.value.includes('\n'));
 }
 
-/** 片段 → 正则。与 v1 compile 的产物逐字等价（用 v1 迁移来的片段验证）。 */
+/** 片段 → 正则。v1 也先迁移为片段，因此所有档案只走这一套编译器。 */
 export function compileFragments(fragments){
  checkFragments(fragments);
  const multi=isMultiline(fragments);
@@ -201,7 +162,7 @@ export function compileFragments(fragments){
 
 /** v1 模板 → 片段。抛出与 compile 相同的错误，保证迁移期行为一致。 */
 export function fragmentsFromTemplate(template){
- if(typeof template!=='string') throw new Error('模板不能为空或超过 4096 字符');
+ if(typeof template!=='string'||!template) throw new Error('模板不能为空或超过 4096 字符');
  const norm=template.replace(/\r\n/g,'\n');
  if(norm.length>MAX_TEMPLATE_LEN) throw new Error('模板不能为空或超过 4096 字符');
  const parts=norm.split(/(\{(?:text|id|name)\})/);
@@ -254,18 +215,13 @@ export function cloneFragments(fragments){
  * 旧档案无需用户重建；调用方只在**写出**新档案时用 v2。
  */
 export function migrateV1ToV2(value){
- if(!value||value.version!==1) throw new Error('不支持的格式档案版本');
- if(typeof value.name!=='string'||!value.name.trim()||value.name.length>100) throw new Error('请填写 1–100 字符的档案名称');
- if(!['id','order'].includes(value.pairing)) throw new Error('配对方式必须是编号或顺序');
- if(!Array.isArray(value.ignore)||value.ignore.length>20||value.ignore.some(s=>typeof s!=='string'||!s.trim()||s.length>100)) throw new Error('忽略前缀格式不正确');
- const src=fragmentsFromTemplate(value.source), tgt=fragmentsFromTemplate(value.target);
- if(value.source===value.target) throw new Error('原文与译文模板不能相同');
- const srcHas=(k)=>src.some(f=>f.type==='field'&&f.field===k);
- const tgtHas=(k)=>tgt.some(f=>f.type==='field'&&f.field===k);
- if(value.pairing==='id'&&(!srcHas('id')||!tgtHas('id'))) throw new Error('编号配对要求两侧均标注编号');
+ return migrateValidatedV1(validateFormat(value));
+}
+
+function migrateValidatedV1(rule){
+ const src=fragmentsFromTemplate(rule.source),tgt=fragmentsFromTemplate(rule.target);
  return {
-  version:2, name:value.name.trim(),
-  pairing:value.pairing, ignore:[...value.ignore],
+  version:2,name:rule.name,pairing:rule.pairing,ignore:[...rule.ignore],
   sourcePatterns:[{id:'s1',kind:'dialogue',target:'t1',fragments:src}],
   targetPatterns:[{id:'t1',fragments:tgt}],
  };
@@ -277,10 +233,7 @@ const ID_RE=/^[A-Za-z0-9_-]{1,40}$/;
 
 /** 严格校验 v2 档案，返回深拷贝后的规范化对象。 */
 export function validateFormatV2(value){
- if(!value||value.version!==2) throw new Error('不支持的格式档案版本');
- if(typeof value.name!=='string'||!value.name.trim()||value.name.length>100) throw new Error('请填写 1–100 字符的档案名称');
- if(!['id','order'].includes(value.pairing)) throw new Error('配对方式必须是编号或顺序');
- if(!Array.isArray(value.ignore)||value.ignore.length>20||value.ignore.some(s=>typeof s!=='string'||!s.trim()||s.length>100)) throw new Error('忽略前缀格式不正确');
+ const common=validateCommon(value,2);
 
  if(!Array.isArray(value.targetPatterns)||!value.targetPatterns.length) throw new Error('至少需要一个译文布局');
  if(!Array.isArray(value.sourcePatterns)||!value.sourcePatterns.length) throw new Error('至少需要一个原文布局');
@@ -314,7 +267,7 @@ export function validateFormatV2(value){
   if(sameFragments(s.fragments,t.fragments)) throw new Error('原文布局与译文布局不能相同：'+s.id);
  }
 
- if(value.pairing==='id'){
+ if(common.pairing==='id'){
   const srcHasId=sources.some(s=>s.fragments.some(f=>f.type==='field'&&f.field==='id'));
   const tgtHasId=targets.some(t=>t.fragments.some(f=>f.type==='field'&&f.field==='id'));
   if(!srcHasId||!tgtHasId) throw new Error('编号配对要求原文与译文布局均标注编号');
@@ -331,8 +284,7 @@ export function validateFormatV2(value){
  const finalSources=sources.map(s=>({...s,target:remap.get(s.target)}));
 
  return {
-  version:2, name:value.name.trim(),
-  pairing:value.pairing, ignore:[...value.ignore],
+  version:2,name:common.name,pairing:common.pairing,ignore:common.ignore,
   sourcePatterns:finalSources, targetPatterns:dedup,
  };
 }
@@ -360,12 +312,11 @@ export function normalizeFormat(value){
    ============================================================ */
 
 /**
- * 与 v1 的 match 同构，但接受预编译对象。
+ * 在指定位置执行预编译布局。
  * ⚠️ 用 `String.prototype.match` 而非 `RegExp.prototype.exec`：sticky 正则下两者
  *    行为等价（都从 lastIndex 起匹配），但本项目的安全扫描器会把 `.exec(` 误判为
  *    命令执行（`RegExp.exec` vs `child_process.exec`）。同类误报的完整说明见
- *    docs/DEVELOPMENT.md「安全扫描结论」。v1 的 match 保持原样不动 —— 那是经回归
- *    验证的既有行为。
+ *    docs/DEVELOPMENT.md「安全扫描结论」。
  */
 function matchAt(compiled,text,start){
  compiled.re.lastIndex=start;const m=text.match(compiled.re);if(!m)return null;
@@ -391,7 +342,11 @@ export function parseFormatV2(text,value){
  let rule;
  try{ rule=validateFormatV2(value); }
  catch(e){ return {text,rule:value,records:[],unmatched:[],errors:[e.message]}; }
+ return parseValidatedFormat(text,rule);
+}
 
+/** v1/v2 共用的扫描与配对核心；legacy 只控制 v1 历史返回形状和错误文案。 */
+function parseValidatedFormat(text,rule,{legacy=false}={}){
  const sources=rule.sourcePatterns.map(p=>({...p,compiled:compileFragments(p.fragments)}));
  const targets=rule.targetPatterns.map(p=>({...p,compiled:compileFragments(p.fragments)}));
 
@@ -413,7 +368,7 @@ export function parseFormatV2(text,value){
    errors.push(`第 ${line} 行同时匹配原文和译文`);
   } else if(aHits.length===1||bHits.length===1){
    const hit=aHits.length===1?aHits[0]:bHits[0];
-   const rec={...hit.m,line,layout:hit.layout};
+   const rec=legacy?{...hit.m,line}:{...hit.m,line,layout:hit.layout};
    (aHits.length===1?srcHits:tgtHits).push(rec);
    end=hit.m.end;if(text[end]==='\r')end++;if(text[end]==='\n')end++;
   } else {
@@ -429,14 +384,16 @@ export function parseFormatV2(text,value){
   for(const [list,map,side] of [[srcHits,sm,'原文'],[tgtHits,tm,'译文']]){
    for(const m of list){
     const id=m.values.id;
-    if(!id||map.has(id))errors.push(`第 ${m.line} 行编号为空或重复：${id}（${side}）`);
+    if(!id||map.has(id))errors.push(`第 ${m.line} 行编号为空或重复：${id}${legacy?'':`（${side}）`}`);
     map.set(id,m);
    }
   }
   for(const a of srcHits){
    const b=tm.get(a.values.id);
    if(!b)errors.push(`第 ${a.line} 行找不到配对译文`);
-   else records.push({key:a.values.id,source:a,target:b,sourcePattern:a.layout.id,targetPattern:b.layout.id,kind:a.layout.kind});
+   else records.push(legacy
+    ?{key:a.values.id,source:a,target:b}
+    :{key:a.values.id,source:a,target:b,sourcePattern:a.layout.id,targetPattern:b.layout.id,kind:a.layout.kind});
   }
   for(const b of tgtHits)if(!sm.has(b.values.id))errors.push(`第 ${b.line} 行是孤立译文`);
  } else {
@@ -451,10 +408,12 @@ export function parseFormatV2(text,value){
  if(srcHits.length!==tgtHits.length)errors.push(`原文 ${srcHits.length} 条，译文 ${tgtHits.length} 条，数量不一致`);
  for(let i=0;i<Math.min(srcHits.length,tgtHits.length);i++){
   const a=srcHits[i],b=tgtHits[i];
-  records.push({key:String(i+1),source:a,target:b,sourcePattern:a.layout.id,targetPattern:b.layout.id,kind:a.layout.kind});
+  records.push(legacy
+   ?{key:String(i+1),source:a,target:b}
+   :{key:String(i+1),source:a,target:b,sourcePattern:a.layout.id,targetPattern:b.layout.id,kind:a.layout.kind});
  }
  }
- if(!records.length&&!errors.length)errors.push('没有完整的原译文记录');
+ if(!records.length&&(legacy||!errors.length))errors.push('没有完整的原译文记录');
  return {text,rule,records,unmatched,errors};
 }
 
