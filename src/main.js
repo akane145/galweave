@@ -2,7 +2,7 @@
 // 职责: 初始化各模块,绑定事件,编排 导入/导出/保存/搜索/术语表/机翻/文件夹 流程。
 
 import { parseFile, buildExport, transValue, stripBrackets, setParseConf, getParseConf, parsePrefix, validateParseConf, migrateNameTranslations as migrateNameTranslationsPure, mergeSavedState } from './parsers.js';
-import { loadSettings, saveSettings, loadBackground, saveBackground, clearBackground, loadFontSettings, saveFontSettings, loadFontLibrary, saveFontLibrary, loadTextAreaTransparency, saveTextAreaTransparency, loadThemeMode, saveThemeMode, loadFavorites, saveFavorites, loadDensity, saveDensity, loadByteEncoding, saveByteEncoding, loadByteLimit, saveByteLimit, loadWidthLimit, saveWidthLimit, loadMtAround, saveMtAround, loadDictHistory, saveDictHistory } from './settings.js';
+import { loadSettings, saveSettings, loadBackground, saveBackground, clearBackground, loadFontSettings, saveFontSettings, loadFontLibrary, saveFontLibrary, loadTextAreaTransparency, saveTextAreaTransparency, loadThemeMode, saveThemeMode, loadFavorites, saveFavorites, loadDensity, saveDensity, loadByteEncoding, saveByteEncoding, loadByteLimit, saveByteLimit, loadWidthLimit, saveWidthLimit, loadMtAround, saveMtAround, loadCheckControls, saveCheckControls, loadDictHistory, saveDictHistory } from './settings.js';
 import * as theme from './theme.js';
 import * as fonts from './fonts.js';
 import * as fontloader from './fontloader.js';
@@ -122,6 +122,7 @@ rdr.setRendererState({
   // 行级术语门禁：词条表走缓存；文案复用侧栏清单的 issueDetail，两处说法保持一致
   qaEntries: qaEntriesCached,
   issueDetail,
+  checkControls: () => _checkControls,
   // 剧场视图（只读）：渲染器据此置 textarea.readOnly 与说话人配色
   theater: isTheater,
   speakerSlot,
@@ -262,6 +263,20 @@ function applyMtAround(n){
   _mtAroundCache = (n === null || n === undefined) ? 2 : Math.max(0, Math.min(10, Math.round(Number(n) || 0)));
 }
 
+/**
+ * 应用"核对控制符丢失"开关（默认关）。
+ *
+ * 缓存成变量而不是每次读设置：renderer 的 updateRowQA 每行每次渲染都要问一次，
+ * 不能在那里等异步读取。开关变化时重渲染已挂载行，让提示立即出现/消失。
+ */
+let _checkControls = false;
+function applyCheckControls(on){
+  const next = !!on;
+  if (next === _checkControls) return;
+  _checkControls = next;
+  rdr.refreshAllRows();   // 开关变了 → 已挂载行要按新设置重算提示
+}
+
 /** 设置项里的语境句数说明 */
 function updateMtAroundLabel(){
   const el = document.getElementById('mtAroundInput');
@@ -301,6 +316,7 @@ async function applyAppearance(){
   applyByteLimit(await loadByteLimit());
   applyWidthLimit(await loadWidthLimit());
   applyMtAround(await loadMtAround());
+  applyCheckControls(await loadCheckControls());
 }
 
 /** 快速切换按钮: 深色→浅色→黑白→深色 循环 */
@@ -3736,6 +3752,7 @@ async function openThemeSettings(){
   const savedAround = await loadMtAround();
   document.getElementById('mtAroundInput').value = savedAround === null ? '' : String(savedAround);
   updateMtAroundLabel();
+  document.getElementById('checkControls').checked = _checkControls;
   // 打开时重置到「界面设置」页
   thSwitchTab(document.querySelector('#thTabs button[data-thpage="0"]'));
   document.getElementById('themeModal').classList.add('show');
@@ -3837,6 +3854,10 @@ async function saveBgSettings(){
   const around = aRaw ? Math.max(0, Math.min(10, Math.round(Number(aRaw) || 0))) : 2;
   applyMtAround(around);
   await saveMtAround(around);
+  // 控制符丢失核对（默认关）
+  const cc = document.getElementById('checkControls').checked;
+  applyCheckControls(cc);
+  await saveCheckControls(cc);
   document.getElementById('bgFile').value = '';
   delete document.getElementById('bgFile').dataset.pending;
   document.getElementById('themeModal').classList.remove('show');
@@ -5437,6 +5458,10 @@ function initEvents(){
     updateMtAroundLabel();
     const raw = String(e.target.value || '').trim();
     applyMtAround(raw ? raw : null);
+  });
+  // 控制符丢失核对：即时生效（勾选后已挂载行立刻按新设置重算提示）
+  document.getElementById('checkControls').addEventListener('change', (e) => {
+    applyCheckControls(e.target.checked);
   });
   document.getElementById('bgOpacity').addEventListener('input', () => {
     updateBgOpacityLabel();

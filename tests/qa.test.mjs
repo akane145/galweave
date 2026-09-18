@@ -325,9 +325,37 @@ test('controlMisses: 空译文/照抄原文跳过（归 proof 管）', () => {
   assert.deepEqual(controlMisses(P('あ[r]い', 'あ[r]い')), []);
 });
 
-test('controlMisses: 经 analyzeRowQA 汇总时 kind 为 control', () => {
-  const r = analyzeRowQA(P('あ[r]い', '啊咦'), null);
+test('analyzeRowQA: 控制符检查**默认关闭**（断行标签本就要重排，默认报是噪音）', () => {
+  // 不传 opts → 不该报 control
+  const off = analyzeRowQA(P('あ[r]い', '啊咦'), null);
+  assert.equal(off.issues.filter(x => x.kind === 'control').length, 0,
+    '默认必须不报控制符，否则每行的断行标签都会刷提示');
+  // 显式传 false 也一样
+  assert.equal(analyzeRowQA(P('あ[r]い', '啊咦'), null, { checkControls: false })
+    .issues.filter(x => x.kind === 'control').length, 0);
+});
+
+test('analyzeRowQA: 开启后控制符丢失仍会被报（kind 为 control）', () => {
+  const r = analyzeRowQA(P('あ[r]い', '啊咦'), null, { checkControls: true });
   const ctl = r.issues.filter(x => x.kind === 'control');
   assert.equal(ctl.length, 1);
   assert.equal(ctl[0].ch, '[r]');
+});
+
+test('analyzeRowQA: 控制符保留时不报（无论开关）', () => {
+  for (const opts of [undefined, { checkControls: true }]){
+    const r = analyzeRowQA(P('あ[r]い', '啊[r]咦'), null, opts);
+    assert.equal(r.issues.filter(x => x.kind === 'control').length, 0);
+  }
+});
+
+test('analyzeRowQA: 术语表为空时，非术语类检查仍然工作（避头尾/标点/占位符）', () => {
+  // 曾以 `entries.length` 作总开关，导致没有术语表时这些检查全部不跑 ——
+  // 但它们与术语表无关，不该被术语表的有无连带影响。
+  assert.ok(analyzeRowQA(P('そう', '这样。\n、然后'), null).issues.some(x => x.kind === 'kinjiru'),
+    '避头尾应照常检出');
+  assert.ok(analyzeRowQA(P('そう', '这样,对吧'), null).issues.some(x => x.kind === 'punct'),
+    '标点检查应照常检出');
+  assert.ok(analyzeRowQA(P('第3話', '第话'), null).issues.some(x => x.kind === 'token'),
+    '占位符检查应照常检出');
 });

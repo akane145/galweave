@@ -270,6 +270,27 @@ export async function saveWidthLimit(limit){
 }
 
 /**
+ * 读取"是否核对译文里的控制符丢失"。**未设置时返回 false（默认关）**。
+ *
+ * 默认关是刻意的：断行类标签（`[r]` / `<r>` / 字面量 `\n`）译文本就要按中文长度
+ * 重新断行，把它们当"丢失"报出来多数是噪音。需要时（例如目标引擎的**命令类**
+ * 标签确实不能动）再由用户在设置里显式开启。
+ * 存 settings.ui.checkControls。
+ */
+export async function loadCheckControls(){
+  const s = await loadSettings();
+  return !!(s.ui && s.ui.checkControls);
+}
+
+/** 保存"核对控制符丢失"开关到 settings.ui.checkControls（布尔） */
+export async function saveCheckControls(on){
+  const s = await loadSettings();
+  if (!s.ui) s.ui = {};
+  s.ui.checkControls = !!on;
+  await saveSettings(s);
+}
+
+/**
  * 读取机翻语境句数（当前句前后各取几句作为上下文参考）。
  * 未设置返回 null（调用方用默认 2）；0 = 显式关闭。
  * 存 settings.ui.mtAround —— 刻意不放进 mt.providers：它作用于**两个** provider，

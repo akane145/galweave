@@ -716,6 +716,13 @@
             <small>按<b>全角字位</b>计（1 个汉字 = 1，1 个半角字符 = 0.5），与字体无关。超限时指示器会给出折行建议位置。留空或填 0 = 关闭。</small>
           </div>
           <div class="field">
+            <label class="check-label"><input type="checkbox" id="checkControls">
+              核对译文里的控制符丢失（默认关闭）</label>
+            <small>开启后，原文里的控制符在译文中缺失时行尾会提示（含全角误输，如 <code>[r]</code> 敲成 <code>［ｒ］</code>）。
+              <b>默认关闭</b>：断行标签（<code>[r]</code> / <code>&lt;r&gt;</code>）译文本就要按中文长度重新断行，把它当"丢失"报出来多数是噪音。
+              只在目标引擎的命令类标签确实不能动时才需要开启。</small>
+          </div>
+          <div class="field">
             <div class="field-label-row"><label for="mtAroundInput">机翻语境句数</label><output id="mtAroundVal" for="mtAroundInput"></output></div>
             <input type="number" id="mtAroundInput" min="0" max="10" step="1" placeholder="留空 = 默认 2">
             <small>翻译时附带当前句<b>前后各 N 句</b>作为语境参考（解决代词指代、语气连贯）。0 = 关闭。与「机翻配置」里的多轮上下文是两种机制，可同时生效。</small>

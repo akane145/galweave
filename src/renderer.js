@@ -69,6 +69,8 @@ let state = {
   //   issueDetail 把一条问题说成人话(复用侧栏清单同一套文案,避免两处措辞不一致)
   qaEntries: () => [],
   issueDetail: null,       // (issue) => string
+  // 是否核对控制符丢失（默认关，见 qa.analyzeRowQA 的说明：断行标签本就要重排，默认报是噪音）
+  checkControls: () => false,
   // 剧场视图（只读阅读态）：为真时译文框强制只读、行上按说话人着色
   theater: () => false,
   speakerSlot: null,       // (name) => 0..3，说话人 → 配色槽位
@@ -1226,7 +1228,13 @@ function updateRowQA(i, r){
     return;
   }
   const entries = state.qaEntries ? state.qaEntries() : [];
-  const q = (entries && entries.length) ? analyzeRowQA(p, entries) : { issues: [], total: 0, term: null };
+  const checkControls = !!(state.checkControls && state.checkControls());
+  const hasGlossary = !!(entries && entries.length);
+  // ⚠️ 不能只在有术语表时才跑：避头尾/占位符/标点这些检查与术语表无关。
+  //    控制符检查同理 —— 它由 opts 决定，术语表为空也应能开启。
+  const q = (hasGlossary || checkControls)
+    ? analyzeRowQA(p, entries, { checkControls })
+    : { issues: [], total: 0, term: null };
   r.qaTerm = q.term;                 // 供点击时取用（一键填入）
   const shown = q.total > 0;
   r.qaCapsule.classList.toggle('show', shown);

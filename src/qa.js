@@ -320,7 +320,7 @@ export function analyzeQA(paras, gloss){
 /* ---------------- 单行入口（行级实时门禁） ---------------- */
 
 /**
- * 单行 QA：判一行有没有术语未用 / 占位符缺失 / 标点异常。
+ * 单行 QA：判一行有没有术语未用 / 占位符缺失 / 标点异常 / 避头尾。
  *
  * 供行级实时门禁调用（renderer 的行内胶囊）。**判定与阈值全部复用上面的
  * termMisses / tokenMisses / punctMisses，不另设一套标准** —— 实时化若放宽阈值，
@@ -329,12 +329,18 @@ export function analyzeQA(paras, gloss){
  * 不含 name-conflict：那一项按定义就是跨行统计（同一源名的多个译名），
  * 单行范围内无法判定，由批量 analyzeQA 负责。
  *
+ * **控制符检查默认关闭**（`opts.checkControls`）：见 `controlMisses` 的说明 ——
+ * 断行类标签（`[r]` 等）译文本就要按中文长度重排，默认报它多数是噪音。
+ * 需要时（如某引擎的命令类标签确实不能动）再由调用方显式开启。
+ *
  * @param {object} p 单行
  * @param {Array} entries termEntries() 的产物（调用方缓存，勿逐行重建）
+ * @param {{checkControls?:boolean}} [opts]
  * @returns {{issues:Array, total:number, term:object|null}}
  *          issues 扁平列表，每项带 kind；term 为第一条"术语未应用"（供一键填入），无则 null
  */
-export function analyzeRowQA(p, entries){
+export function analyzeRowQA(p, entries, opts){
+  const o = opts || {};
   const issues = [];
   // termMisses 面向 paras 数组（内部自行 checkable），传单元素数组即可复用同一套判定
   for (const t of termMisses([p], Array.isArray(entries) ? entries : [])){
@@ -356,9 +362,11 @@ export function analyzeRowQA(p, entries){
       kHits++;
       issues.push({ kind: 'kinjiru', ch: k.ch, lineKind: k.kind, label: kinjiruLabel(k) });
     }
-    // 控制符核对（手动编辑链路的口子，机翻链路由 universal-parser 保护）
-    for (const m of controlMisses(p)){
-      issues.push({ kind: 'control', ch: m.ch, role: m.role, count: m.count, fullwidth: m.fullwidth });
+    // 控制符核对：**默认关闭**，需显式开启（理由见上方 JSDoc 与 controlMisses 注释）
+    if (o.checkControls){
+      for (const m of controlMisses(p)){
+        issues.push({ kind: 'control', ch: m.ch, role: m.role, count: m.count, fullwidth: m.fullwidth });
+      }
     }
   }
   return {
