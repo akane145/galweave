@@ -179,3 +179,17 @@ UI 状态机的纯逻辑部分（布局/样例/标注的增删改、v2 回填、
 - **「mongo-sort-injection」2 条**（`applyTermsToTranslations`、`saveTm`）：本项目**不使用 MongoDB**，无相关 sink。
 
 ⚠️ 复查提示：扫描的 `coverage.json` 标记 `completeness: partial`、`runStatus: inconclusive`（威胁建模与污点路径两阶段未完整覆盖），且 `evidenceBoundary: static_only_no_runtime_execution`。即**扫描未给出完整结论**，上述判定来自人工逐条核验，而非扫描器结论。
+
+### 追加核验（2026-09-18 提交后复查，2 条）
+
+提交 v5.8.0 后 Stop 钩子在 `dist-single/recognize.worker-DQ_yebvT.js`（**构建产物**，已在 `.gitignore:4` 忽略）第 13、19 行报"命令注入"。核验结论：**误报，与上一节同源**。
+
+- 第 19 行命中的是 `e.re.exec(t)`，即 `RegExp.prototype.exec`。判定依据：`grep -rn "\.exec(" src/*.js` 的 15 处调用**接收者全是正则对象**，源码中不存在 `child_process`、`execSync`、`spawnSync` 或 `shell: true`。扫描器把 `Regex.exec()` 与 `child_process.exec()` 混为一谈。
+- 该文件是 `npm run build:html` 的产物，代码即源码的压缩结果，不含额外逻辑。
+
+**同时确认真实存在一处命令执行，并单独核验为安全**：`src-tauri/src/obsidian.rs:73-78` 用 `std::process::Command` 调 `rundll32` / `open` / `xdg-open` 打开 Obsidian URI。判定依据：
+
+1. 参数走 `.args([...])` / `.arg(...)` **数组**，不经 shell 解释，不存在拼接注入；
+2. 传入的 URI 由 `note_uri` 逐字节白名单编码（`:83-87`：仅保留 `[A-Za-z0-9-_.~]`，其余 `%XX`），且路径先经 `note_path` 校验必须是指定 vault 下的既有文件（`:68`）；
+3. 被启动的是固定程序名（`rundll32.exe` 等）而非用户提供的命令串，属于"用系统默认程序打开一个文件"的标准做法；
+4. 该文件自 v5.3.1（提交 `0d80c3b`）起未被修改，**不在本次改动范围内**。
