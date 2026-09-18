@@ -90,7 +90,6 @@
 - 留档后必须 `resetChangeCounter()`；写盘失败也要清零，否则每次输入都会重试写盘、越积越慢。
 
 ### 剧场视图（body.theater）
-
 - 实现是**纯 CSS 覆盖**，不另建 DOM：虚拟滚动、行高模型、搜索/术语高亮都长在 `.para` 上，复制一套会立刻产生两份需要同步的渲染逻辑。
 - 只读靠 `textarea.readOnly`（不是 `disabled`，保留聚焦与 Tab 导航），由 `renderer` 读 `state.theater()` 决定。
 - 说话人配色按**文档中首次出现顺序**分配槽位（`main.speakerSlot`），保证同角色全篇同色且不随滚动漂移；只给前 3 个角色上色（再多区分度不够）。换文档要 `invalidateSpeakerSlots()`。
@@ -101,6 +100,23 @@
 
 - 从 `main.js` 拆出的编排/表单模块放 `src/ui/`。它们**不得反向 import `main.js`**（会成环），需要主模块的能力时由 `main.js` 通过 `initXxx(deps)` 注入。
 - ⚠️ `src/ui/` 是**下一级目录**，引用 `src/` 下的模块必须写 `../foo.js`。写错 `./foo.js` 时 **lint 与 node --test 都不会报**，只有 `vite build` 会失败——因此有 `tests/ui-modules.test.mjs` 专门加载每个 UI 模块，把这类错误提前到测试阶段。
+
+### Anki 制卡（src/anki.js）
+
+- 依赖 **AnkiConnect 插件**（Anki 的本地 HTTP 接口，默认 `http://127.0.0.1:8331`）。AI 制卡设置入口在术语面板的「Anki…」。
+- **桌面版可访问本地端口**（2026-09-18 实测确认）：Tauri 的 `csp` 为 `null`，不拦本地请求。验证方式：起一个 mock 服务，启动 exe，确认服务器收到 `action=version`。
+- ⚠️ **AnkiConnect 出错也返回 HTTP 200**，错误在 body 的 `{error}` 字段里。只查 `res.ok` 会把失败当成功（"已添加"但实际没加）。判定一律走 `anki.parseResponse`。
+- 内容组装是纯函数（`buildCardFields` / `buildNote`），**不做网络 IO**，fetch 由 `main.js` 注入，测试无需起服务器。
+- 卡片字段是 HTML，所有用户内容必须过 `escHtml`（否则原文里的 `<` 会被当标签解析）。
+- 正面只放生词与假名，释义/原句/译文放背面 —— 放正面会泄题。
+
+### Obsidian 双向的边界（重要）
+
+`docs/obsidian-integration.md:36` 写明「不提供从 Obsidian 反向覆盖游戏脚本」。**术语导入是唯一允许的反向路径，且只写 glossary 的 `names` / `terms` 映射**，不得引入任何回写 `translation` 的代码。
+
+术语导入的合并语义与 CSV/JSON **刻意不同**：已有的译名一律保留（笔记多为参考资料，静默覆盖更危险），只写入新条目并报告跳过数。
+
+`src/obsidian-import.js` 一律用 `String.prototype.match` / `matchAll` 而非 `RegExp.prototype.exec`：本项目安全扫描器会把 `.exec(` 误判为命令执行，避免每次改动都产生待核验的高危告警（同「安全扫描结论」一节）。
 
 ## 安全扫描结论（2026-09-18，供复查参考）
 

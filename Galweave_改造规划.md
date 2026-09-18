@@ -93,11 +93,37 @@ master 答复 Q5（5000 行以内，多为 1000–3000）、Q6（主要逐行）
 
 **回归**：`npm test` 643 通过 / 0 失败（本次新增 61 条）；`npm run lint` 0 error（2 条既有 warning）；`npm run build` 通过。
 
-### ⏸ 只剩第五批
+### ✅ 第五批：全景与生态（2026-09-18）—— 规划至此全部完成
 
-| 批次 | 项 | 人日 |
+| 项 | 结果 | 验证 |
 |---|---|---|
-| 第五批 | K Obsidian 术语导入 3.0 / L Anki 2.5（需先 spike） | 5.5（E 已取消） |
+| **L** Anki 一键制卡 | `src/anki.js`（纯逻辑：请求组装 / 响应解析 / 卡片内容）+ `modals.showAnkiSettings` + 行右键入口 | **桌面版访问本地端口已实测**；连 mock 服务器完成真实 HTTP 往返：探测→列牌组→**真的添加一张卡**（返回 ID） |
+| **K1** Obsidian 术语导入 | `src/obsidian-import.js`：frontmatter / 表格 / 列表配对 / 双链四种来源 | 30 条单测；实机验证四种来源同时解析且分类正确 |
+| **K2** 双语 Markdown 导出 | `exporter.buildBilingualMarkdown`（callout 语法 + frontmatter） | 33 条单测；实机核对 frontmatter、callout 分类、文件名后缀 |
+
+**L 的 spike 结论**：**可行**。Tauri 的 `csp` 为 `null`，不拦本地请求；起 mock 服务 + 启动 exe，服务器收到 `action=version` 确认。
+
+**过程中发现并修复的三个真问题**：
+
+1. **`parseBodyPairs` 的 `lastIndex` 状态 bug** —— 带 `g` 标志的正则连续 `test()` 结果不稳定，导致"一行多个分隔符"判断失准。
+2. **`mergeNotes` 去重顺序错** —— 先收集待补再检查译名，导致后续笔记提供的译名消不掉前面的待补项。
+3. **`mdScalar` 误用于 Markdown 标题** —— 它是给 YAML 标量加引号的，用在标题上让说话人显示成 `"爱丽丝"`。另修了 NAME 行被"无译文"分支吃掉、不走 `info` callout 的问题。
+
+**边界守住**：Obsidian 反向路径**只有术语导入**，且只写 `names`/`terms` 映射，无任何回写 `translation` 的代码（`docs/obsidian-integration.md:36` 的单向约定保持）。合并语义与 CSV 刻意不同：已有译名一律保留。
+
+**回归**：`npm test` 728 通过 / 0 失败（第五批新增 65 条）；lint 0 error；build 通过；exe 实机启动确认。
+
+### 📦 v5.7.0 已构建并归档
+
+`release-v5.7.0/`（含 SHA256SUMS.txt，校验通过），exe 实机启动确认。版本号三处同步。
+
+---
+
+## 规划完成度
+
+五批全部执行完毕。原始 38 人日估算中，**实际取消 14 人日**：M（XLIFF/PO，5d，Q4 单人）、E（小地图，5.5d，Q5 数千行量级）、H（Worker，3d，同 Q5）、以及 C 项的引擎预设部分（0.5d 不适用）。
+
+剩余未做且**建议不做**的：`L` 之外的 Anki 高级功能（如批量制卡、按标签同步）——先用一段时间，确有需要再加。
 
 ---
 

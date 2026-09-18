@@ -7,6 +7,7 @@ import {
   EXPORT_FORMATS, normalizeExportFormat, exportFormatLabel, suggestExportName,
   exportEntries, stateLabel, countEntries,
   buildBilingualTxt, buildTargetTxt, buildCsvText, buildExportText,
+  buildBilingualMarkdown,
 } from '../src/exporter.js';
 
 /** 普通行；brackets=false 时 transValue === translation */
@@ -199,4 +200,91 @@ test('EXPORT_FORMATS: id 唯一，且 original 排第一（默认项）', () => 
   const ids = EXPORT_FORMATS.map(f => f.id);
   assert.equal(new Set(ids).size, ids.length);
   assert.equal(ids[0], 'original');
+});
+
+/* ---------------- 双语对照 Markdown（Obsidian 友好） ---------------- */
+
+test('buildBilingualMarkdown: 结构完整（frontmatter + 标题 + callout）', () => {
+  const md = buildBilingualMarkdown([
+    { isName: false, brackets: false, content: 'おはよう', translation: '早上好', name: 'アリス', nameTr: '爱丽丝' },
+  ], { filename: 'ch01.ks' });
+  assert.match(md, /^---\n/, '应以 frontmatter 开头');
+  assert.match(md, /galweave: bilingual/);
+  assert.match(md, /source: "ch01\.ks"/);
+  assert.match(md, /^# ch01\.ks$/m, '标题是纯文本，不带 YAML 引号');
+  assert.match(md, /^#### 0001 · 爱丽丝$/m, '标题应带编号与说话人（不转义引号）');
+  assert.match(md, /> \[!quote\] 原文\n> おはよう/, '原文用 quote callout');
+  assert.match(md, /> \[!success\] 译文\n> 早上好/, '译文用 success callout');
+});
+
+test('buildBilingualMarkdown: 说话人名里的特殊字符不会破坏标题行', () => {
+  const md = buildBilingualMarkdown([
+    { isName: false, brackets: false, content: 'a', translation: '甲', name: '## 恶作剧', nameTr: '## 恶作剧' },
+  ]);
+  const head = md.split('\n').find(l => l.startsWith('#### 0001'));
+  assert.ok(head, '标题行应存在');
+  assert.equal((head.match(/#/g) || []).length, 4, '四级标题之外不该多出 #（名字里的 ## 要被剥掉）');
+});
+
+test('buildBilingualMarkdown: 未译条目用 warning/danger 标出', () => {
+  const md = buildBilingualMarkdown([{ isName: false, brackets: false, content: 'おはよう', translation: '' }]);
+  assert.match(md, /\[!warning\] 原文/);
+  assert.match(md, /\[!danger\] 未译/);
+});
+
+test('buildBilingualMarkdown: NAME 条目用 info callout 且标注未改', () => {
+  const md = buildBilingualMarkdown([
+    { isName: true, brackets: false, content: 'アリス', name: 'アリス', nameTr: '爱丽丝' },
+    { isName: true, brackets: false, content: 'ボブ', name: 'ボブ', nameTr: '' },
+  ]);
+  assert.match(md, /\[!info\] 译名\n> 爱丽丝/);
+  assert.match(md, /未改，导出原名/, '未改的译名要说清是原名');
+});
+
+test('buildBilingualMarkdown: 多行正文逐行加 > ，空行写成 >（否则 callout 会断）', () => {
+  const md = buildBilingualMarkdown([
+    { isName: false, brackets: false, content: 'あ\n\nい', translation: '甲\n\n乙' },
+  ]);
+  assert.match(md, /> \[!quote\] 原文\n> あ\n>\n> い/, '空行应是单独的 >，不能是空字符串');
+  assert.match(md, /> \[!success\] 译文\n> 甲\n>\n> 乙/);
+});
+
+test('buildBilingualMarkdown: frontmatter 里的特殊字符被转义（不破坏 YAML）', () => {
+  const md = buildBilingualMarkdown([], { filename: 'a: b "c" #d' });
+  const fmLine = md.split('\n').find(l => l.startsWith('source:'));
+  assert.match(fmLine, /\\"/, '双引号要转义');
+  const fmEnd = md.indexOf('\n---', 4);
+  assert.ok(fmEnd > 0, 'frontmatter 必须能正常闭合（未被内部引号破坏）');
+});
+
+test('buildBilingualMarkdown: 标题里的 # 不会变成多级标题', () => {
+  const md = buildBilingualMarkdown([], { filename: '### 注入尝试' });
+  assert.ok(!/^#+ 注入/.test(md.split('\n').find(l => l.startsWith('# ')).slice(2)), '标题文本里的 # 前缀应被剥掉');
+});
+
+test('buildBilingualMarkdown: 统计与内容一致', () => {
+  const md = buildBilingualMarkdown([
+    { isName: false, brackets: false, content: 'a', translation: '甲' },
+    { isName: false, brackets: false, content: 'b', translation: '' },
+  ]);
+  assert.match(md, /total: 2/);
+  assert.match(md, /translated: 1/);
+  assert.match(md, /pending: 1/);
+});
+
+test('buildBilingualMarkdown: 空输入安全', () => {
+  const md = buildBilingualMarkdown([], {});
+  assert.match(md, /^---\n/);
+  assert.match(md, /total: 0/);
+});
+
+test('EXPORT_FORMATS / suggestExportName: markdown 已登记且后缀正确', () => {
+  assert.ok(EXPORT_FORMATS.some(f => f.id === 'markdown'));
+  assert.equal(normalizeExportFormat('markdown'), 'markdown');
+  assert.equal(suggestExportName('ch01.ks', 'markdown'), 'ch01.bilingual.md');
+});
+
+test('buildExportText: markdown 分派生效', () => {
+  const out = buildExportText('markdown', [{ isName: false, brackets: false, content: 'a', translation: '甲' }], {});
+  assert.match(out, /\[!quote\] 原文/);
 });

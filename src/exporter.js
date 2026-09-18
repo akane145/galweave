@@ -30,6 +30,7 @@ export const EXPORT_FORMATS = [
   { id: 'bilingual', label: '双语对照 TXT' },
   { id: 'target', label: '纯译文 TXT' },
   { id: 'csv', label: '对照 CSV（Excel 可开）' },
+  { id: 'markdown', label: '双语对照 Markdown（Obsidian 友好）' },
 ];
 
 /** 归一化格式 id，非法值回退 'original'（最安全：不改变原有行为） */
@@ -56,6 +57,7 @@ export function suggestExportName(base, format){
     case 'bilingual': return stem + '.bilingual.txt';
     case 'target': return stem + '.zh.txt';
     case 'csv': return stem + '.csv';
+    case 'markdown': return stem + '.bilingual.md';
     default: return name;
   }
 }
@@ -207,11 +209,96 @@ export function buildCsvText(paras, opts = {}){
  * 按格式 id 构建导出文本。
  * @returns {string|null} 'original' 返回 null（由 parsers.buildExport 处理），格式非法同样返回 null
  */
+/**
+ * 双语对照 Markdown（面向 Obsidian）。
+ *
+ * 形态选择：用 **callout 语法**（`> [!quote]`）承载对白，而不是表格。
+ * 理由：对白里常出现 `|`（译文中也可能有）、换行与多段文本，表格会被撑破且难读；
+ * callout 天然支持多行，在 Obsidian 里渲染为带边框的块，阅读节奏接近剧本。
+ *
+ * YAML frontmatter 里写入来源与统计，便于 Obsidian 侧按属性检索/筛选。
+ *
+ * ⚠️ 这是**只读产物**：导出的是给人读的台本，不回写任何脚本。
+ *    与 obsidian-integration.md 的单向边界一致。
+ */
+export function buildBilingualMarkdown(paras, opts = {}){
+  const nl = opts.nl || '\n';
+  const rows = exportEntries(paras);
+  const c = countEntries(paras);
+  const lines = [];
+
+  // frontmatter：Obsidian 的 Properties 面板会读这里
+  lines.push('---');
+  lines.push('galweave: bilingual');
+  lines.push('source: ' + mdScalar(opts.filename || '未命名'));
+  lines.push('total: ' + c.total);
+  lines.push('translated: ' + c.translated);
+  lines.push('pending: ' + c.pending);
+  if (opts.project) lines.push('project: ' + mdScalar(opts.project));
+  lines.push('---');
+  lines.push('');
+  lines.push('# ' + mdHeading(opts.filename || '双语对照'));
+  lines.push('');
+  lines.push('> 共 ' + c.total + ' 条 · 已译 ' + c.translated + ' / 未译 ' + c.pending);
+  lines.push('');
+
+  for (const r of rows){
+    const no = String(r.index + 1).padStart(4, '0');
+    // 标题行带上编号与说话人，方便在 Obsidian 大纲里定位。
+    // ⚠️ 用 mdHeading（纯文本）而不是 mdScalar：后者是给 YAML 标量加引号转义的，
+    //    用在标题上会让说话人显示成 `"爱丽丝"`。
+    const head = r.speaker ? ('#### ' + no + ' · ' + mdHeading(r.speaker)) : ('#### ' + no);
+    lines.push(head);
+    lines.push('');
+    if (r.isName){
+      // NAME 行先判：它的 translation 就是译名（未改时等于原名），
+      // 若先走"无译文"分支会把它误报成未译。
+      const unchanged = !r.translation || r.translation === r.original;
+      lines.push(mdCallout('info', '译名',
+        String(r.translation || r.original) + (unchanged ? '（未改，导出原名）' : '')));
+    } else if (!String(r.translation || '').trim()){
+      lines.push(mdCallout('warning', '原文', r.original));
+      lines.push('');
+      lines.push(mdCallout('danger', '未译', '（这一条还没有译文）'));
+    } else {
+      lines.push(mdCallout('quote', '原文', r.original));
+      lines.push('');
+      lines.push(mdCallout('success', '译文', r.translation));
+    }
+    lines.push('');
+  }
+
+  while (lines.length && lines[lines.length - 1] === '') lines.pop();
+  return withNl(lines, nl);
+}
+
+/** 行内标量：包引号并转义，避免 YAML 元字符（: # 等）破坏 frontmatter */
+function mdScalar(s){
+  return '"' + String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, ' ') + '"';
+}
+
+/** 标题文本：Markdown 标题里不能有换行，且 # 开头会被当成标题级别 */
+function mdHeading(s){
+  return String(s == null ? '' : s).replace(/\r?\n/g, ' ').replace(/^#+\s*/, '').trim() || '双语对照';
+}
+
+/**
+ * 生成一个 Obsidian callout。
+ * 正文逐行加 `> `；空行写成 `>`（否则 callout 会被中断）。
+ * @param {string} kind info | quote | success | warning | danger
+ */
+function mdCallout(kind, title, body){
+  const head = '> [!' + kind + '] ' + String(title == null ? '' : title).trim();
+  const bodyLines = String(body == null ? '' : body).split(/\r?\n/);
+  return [head, ...bodyLines.map(l => (l.trim() ? '> ' + l : '>'))].join('\n');
+}
+
 export function buildExportText(format, paras, opts = {}){
   switch (normalizeExportFormat(format)){
     case 'bilingual': return buildBilingualTxt(paras, opts);
     case 'target': return buildTargetTxt(paras, opts);
     case 'csv': return buildCsvText(paras, opts);
+    case 'markdown': return buildBilingualMarkdown(paras, opts);
     default: return null;
   }
 }

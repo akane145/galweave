@@ -96,6 +96,16 @@ export function rowMenuItems(ctx) {
     action: 'historySave',
     disabled: false,
   });
+
+  items.push({ sep: true });
+
+  // Anki 制卡：把这一行的原文/译文做成记忆卡（需 Anki + AnkiConnect）
+  items.push({
+    label: '做成 Anki 卡片',
+    hint: '生词 + 语境',
+    action: 'ankiAdd',
+    disabled: !!c.isName && !c.hasTranslation,
+  });
   items.push({
     label: '撤销',
     hint: 'Ctrl+Z',

@@ -10,6 +10,80 @@
 //   §8.5 L3 破坏性 —— 标题写具体后果、确认按钮 danger、默认焦点在取消、Esc=取消
 //   机翻比对 —— 原文（JP）| 机翻结果（ZH）并排，采用 / 放弃
 
+/**
+ * Anki 制卡设置弹窗。
+ *
+ * 与 showConfirm 的分工：本函数带表单（地址 / 牌组 / 笔记类型 / 自动标签），
+ * showConfirm 只能显示文本，故单独实现。返回**配置对象**（取消返回 null）。
+ *
+ * @param {{conf:object, decks:string[], models:string[], status:string}} opt
+ *        decks/models 为空时仍可手填（Anki 没开也能先把设置存好）
+ */
+export function showAnkiSettings({ conf = {}, decks = [], models = [], status = '' } = {}){
+  const previousFocus = document.activeElement;
+  return new Promise(resolve => {
+    const { mask, modal } = mountModal(() => {
+      const el = document.createElement('div');
+      el.className = 'modal anki-settings';
+      el.setAttribute('role', 'dialog');
+      el.setAttribute('aria-modal', 'true');
+      el.setAttribute('aria-labelledby', 'anki-set-title');
+
+      // 连不上时给出可读原因，而不是让用户对着空下拉框猜
+      const connected = status === 'connected';
+      const note = connected
+        ? '✅ 已连上 Anki，下面的牌组与笔记类型来自你的实际库。'
+        : '⚠ ' + esc(String(status || '尚未连上 Anki')) + '\n可直接填写下面的项，Anki 启动后即可用。';
+
+      // 下拉：列表里有当前值就用列表，否则把当前值作为唯一选项（允许手填后保留）
+      const options = (list, cur) => {
+        const all = list.length ? (list.includes(cur) ? list : [cur, ...list]) : [cur];
+        return all.map(v => '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>' + esc(v) + '</option>').join('');
+      };
+
+      el.innerHTML =
+        '<h3 id="anki-set-title" class="modal-title">Anki 制卡设置</h3>' +
+        '<p class="modal-body anki-status">' + esc(note).replace(/\n/g, '<br>') + '</p>' +
+        '<label for="anki-url">AnkiConnect 地址</label>' +
+        '<input type="text" id="anki-url" value="' + esc(conf.url || '') + '" placeholder="http://127.0.0.1:8331">' +
+        '<label for="anki-deck">牌组</label>' +
+        '<select id="anki-deck">' + options(decks, conf.deck || '') + '</select>' +
+        '<label for="anki-model">笔记类型</label>' +
+        '<select id="anki-model">' + options(models, conf.model || '') + '</select>' +
+        '<label class="check-label"><input type="checkbox" id="anki-autotags"' + (conf.autoTagsOn ? ' checked' : '') +
+        '> 自动加标签（galweave / 文件名 / 项目目录）</label>' +
+        '<div class="actions"><button type="button" class="btn-cancel">取消</button>' +
+        '<button type="button" class="btn-confirm">保存</button></div>';
+      return el;
+    });
+
+    const urlIn = modal.querySelector('#anki-url');
+    const deckIn = modal.querySelector('#anki-deck');
+    const modelIn = modal.querySelector('#anki-model');
+    const tagsIn = modal.querySelector('#anki-autotags');
+    const cancel = modal.querySelector('.btn-cancel');
+    const save = modal.querySelector('.btn-confirm');
+    let settled = false;
+    const finish = (v) => {
+      if (settled) return;
+      settled = true;
+      unmount(mask);
+      if (previousFocus && previousFocus.focus) previousFocus.focus();
+      resolve(v);
+    };
+    save.addEventListener('click', () => finish({
+      url: urlIn.value.trim(),
+      deck: deckIn.value,
+      model: modelIn.value,
+      autoTagsOn: tagsIn.checked,
+    }));
+    cancel.addEventListener('click', () => finish(null));
+    mask.addEventListener('mousedown', (e) => { if (e.target === mask) finish(null); });
+    mask.addEventListener('keydown', (e) => { if (e.key === 'Escape'){ e.preventDefault(); finish(null); } });
+    requestAnimationFrame(() => urlIn.focus());
+  });
+}
+
 export function showAnnotationEditor(text){
   const previousFocus = document.activeElement;
   return new Promise(resolve => {

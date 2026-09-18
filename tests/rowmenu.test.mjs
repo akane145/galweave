@@ -16,19 +16,32 @@ const byAction = (items, action) => items.find(x => x.action === action);
 
 /* ── rowMenuItems ── */
 
-test('rowMenuItems：全能力上下文下所有项都可用', () => {
+// ⚠️ 刻意不写死项数：菜单会随功能增加（历史版本、手动留档、Anki 制卡…都加过），
+//    断言具体数字会让每次加菜单项都来改测试，而它并不检验任何真实不变量。
+//    这里改断言**该有的动作都在**且能力足够时都不禁用。
+const REQUIRED_ACTIONS = [
+  'copyOrigToTrans', 'copyOrig', 'mtRow', 'applyTm',
+  'history', 'historySave', 'ankiAdd',
+  'proofApprove', 'proofIssue', 'proofNotes', 'clearRow', 'undo',
+];
+
+test('rowMenuItems：全能力上下文下，该有的动作都在且都可用', () => {
   const items = rowMenuItems(FULL);
   const actionable = items.filter(x => !x.sep);
-  assert.equal(actionable.length, 11);   // 含「历史版本…」与「留存当前版本」两项
-  for (const it of actionable) {
+  assert.ok(actionable.length >= REQUIRED_ACTIONS.length,
+    '动作数不应少于必备清单（实际 ' + actionable.length + '）');
+  for (const action of REQUIRED_ACTIONS){
+    const it = byAction(items, action);
+    assert.ok(it, '缺少动作: ' + action);
     assert.equal(it.disabled, false, it.label + ' 不该被禁用');
   }
 });
 
-test('rowMenuItems：历史相关两项都在（查看 + 手动留档）', () => {
+test('rowMenuItems：历史与 Anki 相关项都在（防误删入口）', () => {
   const items = rowMenuItems(FULL);
   assert.ok(byAction(items, 'history'), '应有「历史版本…」');
   assert.ok(byAction(items, 'historySave'), '应有「留存当前版本」手动留档入口');
+  assert.ok(byAction(items, 'ankiAdd'), '应有「做成 Anki 卡片」');
 });
 
 test('rowMenuItems：翻译记忆——有命中时标签带建议、无命中时禁用', () => {

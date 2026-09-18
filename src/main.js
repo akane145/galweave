@@ -44,10 +44,12 @@ import * as exporter from './exporter.js';
 import * as recovery from './recovery.js';
 import * as dhist from './dict-history.js';
 import * as tm from './tm.js';
-import { showConfirm, showMtCompare, showExitConfirm, showHistoryList, showStatsPanel, showAnnotationEditor } from './modals.js';
+import { showConfirm, showMtCompare, showExitConfirm, showHistoryList, showStatsPanel, showAnnotationEditor, showAnkiSettings } from './modals.js';
 import * as history from './history.js';
 import * as mtbase from './mtbaseline.js';
 import { showObsidianExport } from './obsidian-ui.js';
+import * as obsi from './obsidian-import.js';
+import * as anki from './anki.js';
 import { snapshotChange } from './obsidian.js';
 import { buildProofReport } from './proof-report.js';
 import { saveProofReport } from './obsidian-files.js';
@@ -1425,6 +1427,9 @@ async function exportFile(){
     content = exporter.buildExportText(format, paras, {
       nl: model.getNl(),
       filename: model.getFilename(),
+      // 项目目录（术语表所在的目录）：Markdown frontmatter 里带上，
+      // 便于 Obsidian 侧按项目筛选多篇台本
+      project: gloss.getProjectDir() || '',
     });
     if (format === 'target' && !content){
       toastError('没有任何已翻译的正文行，纯译文导出会是空文件。\n请先翻译，或改用「双语对照 / 对照 CSV」。');
@@ -1710,6 +1715,50 @@ function addGlossEntry(kind){
 }
 
 /** CSV 术语表导入: 解析→确认→合并进当前术语表(同名覆盖)。返回是否成功。 */
+/**
+ * 导入 Obsidian 笔记（Markdown）里的术语。
+ *
+ * ⚠️ **只合并术语与词汇，绝不碰译文** —— docs/obsidian-integration.md 写明
+ * 「不提供从 Obsidian 反向覆盖游戏脚本」。本函数只写 glossaryData 的两个映射，
+ * 不存在任何回写 translation 的路径。
+ */
+async function importGlossMarkdownText(text, label){
+  const r = obsi.parseNote(text);
+  const nn = Object.keys(r.names).length;
+  const tn = Object.keys(r.terms).length;
+  if (!nn && !tn && !r.pending.length){
+    alert('这篇笔记里没有找到可导入的术语。\n\n支持三种写法：\n'
+      + '· frontmatter 里的 terms / names 两级映射\n'
+      + '· 表格两列「原文 | 译文」\n'
+      + '· 列表配对「先輩 :: 前辈」\n'
+      + '· [[双链]] 会被收集为"待补译名"');
+    return false;
+  }
+  const pendingNote = r.pending.length
+    ? '\n\n另有 ' + r.pending.length + ' 个 [[双链]] 条目没有译名（' + r.pending.slice(0, 5).map(x => x.src).join('、')
+      + (r.pending.length > 5 ? '…' : '') + '），它们不会进术语表 —— 补上译名后重新导入即可。'
+    : '';
+  if (!confirm((label ? '「' + label + '」' : '笔记') + ' 解析结果：人名 ' + nn + ' 条 / 词条 ' + tn + ' 条。'
+    + pendingNote + '\n\n合并进当前术语表？（同名条目以现有为准，不会被覆盖）')) return false;
+
+  // 与 CSV 导入的覆盖语义刻意不同：笔记多为参考资料，静默覆盖现有译名更危险。
+  // 已有的键一律保留，新键才写入（冲突在下面汇报条数）。
+  let addedN = 0, addedT = 0;
+  for (const [k, v] of Object.entries(r.names)){
+    if (!(k in glossData.names)){ glossData.names[k] = v; addedN++; }
+  }
+  for (const [k, v] of Object.entries(r.terms)){
+    if (!(k in glossData.names) && !(k in glossData.terms)){ glossData.terms[k] = v; addedT++; }
+  }
+  const skipped = (nn + tn) - addedN - addedT;
+  await gloss.saveGlossaryForProject(glossData);
+  renderGlossTables();
+  rdr.refreshAllRows();
+  showToast('✅ 已合并: 人名 ' + addedN + ' / 词条 ' + addedT
+    + (skipped ? '（' + skipped + ' 条已存在，保留原译名）' : ''));
+  return true;
+}
+
 async function importGlossCsvText(text){
   let g;
   try { g = toGlossary(parseCsv(text)); }
@@ -1732,15 +1781,20 @@ async function importGlossCsvText(text){
 
 async function glossImport(){
   if (fsx.isTauri()){
-    const res = await fsx.openFileDialog([{ name: '术语表', extensions: ['json', 'csv'] }]);
+    const res = await fsx.openFileDialog([{ name: '术语表 / Obsidian 笔记', extensions: ['json', 'csv', 'md'] }]);
     if (!res) return;
     if (/\.csv$/i.test(res.path)){
       await importGlossCsvText(await fsx.readTextFileSource(res.path));
       return;
     }
+    if (/\.md$/i.test(res.path)){
+      await importGlossMarkdownText(await fsx.readTextFileSource(res.path),
+        String(res.path).split(/[\\/]/).pop() || '');
+      return;
+    }
     let obj;
     try { obj = JSON.parse(await fsx.readTextFileSource(res.path)); } catch (e){ toastError('无法解析 JSON: ' + e); return; }
-    glossData = { names: obj.names || {}, terms: obj.terms || {} };
+    glossData = { names: obj.names || {}, terms: obj.terms || {}, personas: obj.personas || {} };
     await gloss.saveGlossaryForProject(glossData);
     renderGlossTables();
     rdr.refreshAllRows();
@@ -1749,7 +1803,7 @@ async function glossImport(){
   }
   const input = document.createElement('input');
   input.type = 'file';
-  input.accept = '.json,.csv';
+  input.accept = '.json,.csv,.md';
   input.onchange = async () => {
     const f = input.files[0];
     if (!f) return;
@@ -1758,8 +1812,12 @@ async function glossImport(){
         await importGlossCsvText(await f.text());
         return;
       }
+      if (/\.md$/i.test(f.name)){
+        await importGlossMarkdownText(await f.text(), f.name);
+        return;
+      }
       const obj = JSON.parse(await f.text());
-      glossData = { names: obj.names || {}, terms: obj.terms || {} };
+      glossData = { names: obj.names || {}, terms: obj.terms || {}, personas: obj.personas || {} };
       await gloss.saveGlossaryForProject(glossData);
       renderGlossTables();
       rdr.refreshAllRows();
@@ -4508,6 +4566,117 @@ function applyTmToRow(i){
  * 全部动作复用既有函数,本函数不实现任何业务逻辑。
  * 译文 textarea 上不接管右键(见 rowmenu.js 顶部设计说明),保留原生粘贴/输入法候选。
  */
+/* ---------------- Anki 一键制卡 ----------------
+   依赖 AnkiConnect 插件（Anki 的本地 HTTP 接口）。桌面版可访问本地端口
+   （2026-09-18 实测确认：Tauri 的 csp 为 null，不拦本地请求）。
+   纯逻辑（请求组装 / 响应解析 / 卡片内容）在 src/anki.js，本段只负责 IO 与 UI。 */
+
+/** AnkiConnect 设置（存在 settings.ui.anki） */
+async function loadAnkiConf(){
+  const s = await loadSettings();
+  const a = (s.ui && s.ui.anki) || {};
+  return {
+    url: String(a.url || anki.ANKI_DEFAULT_URL).trim() || anki.ANKI_DEFAULT_URL,
+    deck: String(a.deck || anki.ANKI_DEFAULT_DECK).trim() || anki.ANKI_DEFAULT_DECK,
+    model: String(a.model || anki.ANKI_DEFAULT_MODEL).trim() || anki.ANKI_DEFAULT_MODEL,
+    autoTagsOn: a.autoTagsOn !== false,
+  };
+}
+
+async function saveAnkiConf(next){
+  const s = await loadSettings();
+  if (!s.ui) s.ui = {};
+  s.ui.anki = { ...(s.ui.anki || {}), ...next };
+  await saveSettings(s);
+}
+
+/**
+ * 调一次 AnkiConnect。
+ * ⚠️ AnkiConnect **出错也返回 HTTP 200**，错误在 body 的 error 字段里 ——
+ *    只查 res.ok 会把失败当成功（"已添加"但实际没加）。判定交给 anki.parseResponse。
+ */
+async function ankiCall(req){
+  const conf = await loadAnkiConf();
+  const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), anki.ANKI_TIMEOUT_MS) : null;
+  let data;
+  try {
+    const res = await fetch(conf.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+      signal: ctrl ? ctrl.signal : undefined,
+    });
+    data = await res.json();
+  } catch (e){
+    const msg = anki.describeError(e && e.message) || '连不上 Anki。';
+    return { ok: false, error: msg, result: null };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  const r = anki.parseResponse(data);
+  return r.ok ? r : { ok: false, error: anki.describeError(r.error), result: null };
+}
+
+/** 由某一行组装卡片内容并送到 Anki */
+async function ankiAddForRow(i){
+  const p = model.getPara(i);
+  if (!p){ toastError('请先选择一行'); return; }
+  const card = {
+    word: p.isName ? (p.name || '') : (p.content || ''),
+    sentence: p.isName ? '' : (p.name ? (p.name + '：' + (p.content || '')) : (p.content || '')),
+    translation: p.isName ? (p.nameTr || '') : transValue(p),
+    speaker: p.nameTr || p.name || '',
+  };
+  if (!String(card.word).trim()){ toastError('这一行没有可制卡的原文'); return; }
+  await ankiAddCard(card, '第 ' + (i + 1) + ' 行');
+}
+
+/** 通用制卡：先探测连通性，再添加，成功/失败都给明确文案 */
+async function ankiAddCard(card, sourceLabel){
+  const conf = await loadAnkiConf();
+  const probe = await ankiCall(anki.versionRequest());
+  if (!probe.ok){
+    toastError('Anki 不可用：' + probe.error
+      + '\n（需要 Anki 正在运行 + 已装 AnkiConnect 插件；地址：' + conf.url + '）');
+    return false;
+  }
+  const tags = conf.autoTagsOn
+    ? anki.autoTags('galweave', model.getFilename(), gloss.getProjectDir())
+    : [];
+  const note = anki.buildNote(card, { deck: conf.deck, model: conf.model, tags });
+  const r = await ankiCall(anki.addNoteRequest(note));
+  if (!r.ok){
+    toastError('制卡失败：' + r.error);
+    return false;
+  }
+  showToast('🃏 已加入 Anki「' + conf.deck + '」' + (sourceLabel ? '（' + sourceLabel + '）' : ''));
+  return true;
+}
+
+/** 制卡设置弹窗（牌组 / 笔记类型 / 地址，可拉取 Anki 的实际列表） */
+async function openAnkiSettings(){
+  const conf = await loadAnkiConf();
+  // 先尽力拉取 Anki 的真实牌组/类型；连不上就用手填值（不阻断设置流程）
+  let decks = [], models = [], status = '';
+  const probe = await ankiCall(anki.deckNamesRequest());
+  if (probe.ok){
+    decks = Array.isArray(probe.result) ? probe.result : [];
+    status = 'connected';
+  } else {
+    status = probe.error || '连不上 Anki';
+  }
+  if (probe.ok){
+    const probe2 = await ankiCall(anki.modelNamesRequest());
+    if (probe2.ok) models = Array.isArray(probe2.result) ? probe2.result : [];
+  }
+
+  const next = await showAnkiSettings({ conf, decks, models, status });
+  if (!next) return;
+  await saveAnkiConf(next);
+  showToast('已保存 Anki 设置');
+}
+
 /* ---------------- 行级版本快照 / 本地历史 ---------------- */
 
 let lastSnapshotAt = 0;   // 当前文档上次留档时间（同一文档 5 分钟内不重复留档）
@@ -4692,6 +4861,7 @@ function initRowMenu(){
       applyTm: (i) => { applyTmToRow(i); },
       history: () => { openHistoryPicker(); },
       historySave: () => { snapshotManual(); },
+      ankiAdd: (i) => { ankiAddForRow(i); },
       clearRow: (i) => {
         transInputHandler(i, '');
         const r = rdr.getRow(i);
@@ -5307,6 +5477,7 @@ function initEvents(){
   document.getElementById('btnGlossApply').addEventListener('click', glossApply);
   document.getElementById('btnNormalize').addEventListener('click', normalizeApply);
   document.getElementById('btnPersonaAdd').addEventListener('click', addPersonaEntry);
+  document.getElementById('btnAnkiSet').addEventListener('click', openAnkiSettings);
   document.getElementById('personaAddName').addEventListener('keydown', (e) => {
     if (e.key === 'Enter'){ e.preventDefault(); addPersonaEntry(); }
   });
