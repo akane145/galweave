@@ -69,6 +69,9 @@ let state = {
   //   issueDetail 把一条问题说成人话(复用侧栏清单同一套文案,避免两处措辞不一致)
   qaEntries: () => [],
   issueDetail: null,       // (issue) => string
+  // 剧场视图（只读阅读态）：为真时译文框强制只读、行上按说话人着色
+  theater: () => false,
+  speakerSlot: null,       // (name) => 0..3，说话人 → 配色槽位
   // 输入建议与划词查词(main.js 注入)
   getSuggestions: null,    // (token) => [{kind:'term'|'snippet', src, dst}]
   onSuggestionApply: null, // (i, item) 采纳建议(替换光标前词元)
@@ -650,8 +653,15 @@ export function syncRow(i){
   const r = rows[i];
   const p = state.paras()[i];
   if (!r || !p) return;
+  const theater = !!(state.theater && state.theater());
   r.el.className = 'para' + (p.done ? ' done' : '');
   r.el.classList.toggle('has-speaker', !!p.name);
+  // 剧场视图：给说话人分配配色槽位（同一角色同一色，不同角色不同色）。
+  // 槽位由 main 侧的 speakerSlot 统一分配 —— 逐行临时算会随滚动顺序变化而不稳定。
+  if (theater && p.name && state.speakerSlot){
+    const slot = state.speakerSlot(p.name);
+    if (slot >= 1) r.el.classList.add('sp-' + slot);
+  }
   r.el.setAttribute('aria-label', '第 ' + (i + 1) + ' 行' + (p.name ? '，' + p.name : ''));
   r.pid.textContent = p.id || '';
   r.origName.textContent = p.name || '—';
@@ -666,7 +676,9 @@ export function syncRow(i){
     r.trans.value = p.nameTr;
     r.trans.placeholder = p.name || '—';
   } else {
-    r.trans.readOnly = false;
+    // 剧场视图是只读阅读态 → 强制 readOnly（见 main.setTheaterMode）。
+    // 用 readOnly 而非 disabled：保留聚焦与 Tab 导航，光标仍可选中复制。
+    r.trans.readOnly = theater;
     r.trans.value = transValue(p);
     r.trans.placeholder = '在此输入译文…';
   }

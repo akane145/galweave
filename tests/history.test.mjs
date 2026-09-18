@@ -5,10 +5,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  shouldSnapshotByChanges, HISTORY_CHANGE_THRESHOLD, shouldSnapshot,
   HISTORY_VERSION, HISTORY_MAX, HISTORY_MIN_INTERVAL_MS,
   snapshotId, snapshotTimeLabel, snapshotDirName, snapshotRelPath,
   buildSnapshot, parseSnapshot, snapshotStats,
-  diffSnapshot, patchFromSnapshot, planPrune, shouldSnapshot, parseIdToTime, listFromDirEntries,
+  diffSnapshot, patchFromSnapshot, planPrune, parseIdToTime, listFromDirEntries,
 } from '../src/history.js';
 
 /** 普通行 */
@@ -194,4 +195,40 @@ test('listFromDirEntries: 只认 <id>.json，按时间降序；忽略目录与�
     null,
   ]);
   assert.deepEqual(list.map(e => e.id), ['20260910-213005', '20260909-100000']);
+});
+
+/* ---------------- 改动量触发留档（J 项） ---------------- */
+
+test('shouldSnapshotByChanges: 达到阈值才留档', () => {
+  assert.equal(shouldSnapshotByChanges(0), false);
+  assert.equal(shouldSnapshotByChanges(49), false);
+  assert.equal(shouldSnapshotByChanges(50), true, '正好达到阈值应留档');
+  assert.equal(shouldSnapshotByChanges(80), true);
+});
+
+test('shouldSnapshotByChanges: 阈值可配，非法值回退默认', () => {
+  assert.equal(shouldSnapshotByChanges(10, 10), true);
+  assert.equal(shouldSnapshotByChanges(9, 10), false);
+  assert.equal(shouldSnapshotByChanges(50, 0), true, '阈值 0 非法 → 回退 50');
+  assert.equal(shouldSnapshotByChanges(50, NaN), true);
+  assert.equal(shouldSnapshotByChanges(49, 0), false);
+});
+
+test('shouldSnapshotByChanges: 非法输入不应触发留档（宁可不写也别乱写）', () => {
+  assert.equal(shouldSnapshotByChanges(NaN), false);
+  assert.equal(shouldSnapshotByChanges(undefined), false);
+  assert.equal(shouldSnapshotByChanges(null), false);
+  assert.equal(shouldSnapshotByChanges('abc'), false);
+});
+
+test('shouldSnapshot: manual 不受时间节流限制（用户明确要求留档）', () => {
+  const now = 1_000_000;
+  const justNow = now - 1000;   // 1 秒前刚留过
+  assert.equal(shouldSnapshot(justNow, now, 'manual'), true, '手动留档必须立即生效');
+  assert.equal(shouldSnapshot(justNow, now, 'force'), true);
+  assert.equal(shouldSnapshot(justNow, now, 'save'), false, '自动留档仍受 5 分钟节流');
+});
+
+test('HISTORY_CHANGE_THRESHOLD: 默认 50 行', () => {
+  assert.equal(HISTORY_CHANGE_THRESHOLD, 50);
 });

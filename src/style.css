@@ -2657,6 +2657,128 @@ kbd{ border-radius:0; background:transparent; color:var(--smoke); font-size:var(
 /* ── 术语表滚动区：给出可预测的固定高度，避免 220px 硬上限被内容顶开 ── */
 .gloss-table{ gap:var(--sp-1); max-height:320px; overflow-y:auto; scrollbar-gutter:stable; }
 
+/* ── 角色人设表 ──
+   比术语表多一层结构（角色 → 多字段），所以不是 .gloss-row 的单行两列，
+   而是每个角色一块卡片：标题行 + 若干「标签 + 输入」。 */
+.persona-row{
+  display:flex; flex-direction:column; gap:var(--sp-1);
+  padding:var(--sp-2); margin-bottom:var(--sp-1);
+  border:1px solid var(--border-soft); border-radius:var(--r-sm);
+  background:var(--bg-raised);
+}
+.persona-head{ display:flex; align-items:center; justify-content:space-between; gap:var(--sp-2); }
+.persona-head b{
+  color:var(--amber); font-size:var(--fs-sm); font-weight:600;
+  border-left:2px solid var(--amber); padding-left:var(--sp-1);
+}
+.persona-row .gloss-del{
+  flex:none; height:22px; min-height:22px; padding:0 var(--sp-1);
+  border:1px solid var(--border-soft); background:transparent; color:var(--text-dim);
+  font-size:var(--fs-2xs); cursor:pointer;
+}
+.persona-row .gloss-del:hover{ border-color:var(--danger); background:var(--danger); color:#fff; }
+.persona-field{ display:grid; grid-template-columns:78px minmax(0,1fr); align-items:center; gap:var(--sp-1); }
+.persona-field label{ color:var(--text-dim); font-size:var(--fs-2xs); }
+.persona-field input{
+  width:100%; min-width:0; height:26px; min-height:26px; padding:0 var(--sp-1);
+  border:1px solid var(--border-soft); border-radius:0;
+  background:var(--input-bg); color:var(--text);
+  font-family:var(--font-ui); font-size:var(--fs-sm);
+}
+.persona-field input:hover{ border-color:var(--border-strong); }
+.persona-field input:focus{ border-color:var(--accent); outline:0; }
+.gloss-empty{ color:var(--text-dim); font-size:var(--fs-2xs); line-height:1.5; padding:var(--sp-1) 0; }
+/* 人设匹配情况提示：正常是信息，解析不出说话人时是警告（人设会静默失效） */
+.persona-stat{
+  color:var(--text-dim); font-size:var(--fs-2xs); line-height:1.5;
+  padding:var(--sp-1); margin-bottom:var(--sp-1);
+  border-left:2px solid var(--border-strong); background:var(--bg-raised);
+}
+.persona-stat.warn{ color:var(--st-pending-fg); border-left-color:var(--st-pending-fg); }
+
+/* ══════════════════════════════════════════════════════════════
+   剧场视图（body.theater）—— 只读阅读态
+   ══════════════════════════════════════════════════════════════
+   目标：以角色气泡的形态读译文，贴近游戏内阅读节奏，而不是表格。
+
+   实现是**纯样式覆盖**，不改 DOM：虚拟滚动、行高模型、搜索/术语高亮、
+   行状态都长在 .para 这棵树上，另建一套会立刻产生两份要同步的渲染逻辑。
+
+   刻意做的取舍：
+   - 隐藏原文与编辑控件（textarea 换成只读文本由 .trans-read 承担），
+     但**保留行号列**：读稿时仍需要"这是第几行"来对照与反馈。
+   - 说话人不同则换色（用 nth 无法做到，故由 JS 给 .sp-a/.sp-b 类，见 renderer）。
+   - 旁白（无说话人）居左、无气泡尾巴，与对白区分。
+   - 字号放大、行距放宽 —— 阅读态与编辑态的密度需求不同。 */
+
+body.theater .para{
+  grid-template-columns:var(--row-num-col) minmax(0,1fr);
+  padding:var(--sp-2) 0;
+}
+/* 原文列在阅读态是干扰：目标是读译文 */
+body.theater .orig-cell,
+body.theater .byte-meter,
+body.theater .width-meter,
+body.theater .proof-row,
+body.theater .qa-capsule,
+body.theater .copy-btn,
+body.theater .row-status,
+body.theater .trans-caption,
+body.theater .orig-caption{ display:none !important; }
+
+body.theater .translation-block{
+  display:block;                     /* 取消两列网格，气泡占满整行 */
+  padding-left:0;
+}
+body.theater .speaker-plate{
+  display:block; margin:0 0 var(--sp-1) 0; padding:0;
+}
+/* 译名输入框在阅读态退化为角色名牌 */
+body.theater input.pname-input{
+  width:auto; height:auto; min-height:0; max-width:none;
+  padding:1px var(--sp-2); border:0; border-radius:var(--r-pill);
+  background:var(--accent-dim); color:var(--accent);
+  font-size:var(--fs-sm); font-weight:600; line-height:1.6;
+}
+body.theater .para:not(.has-speaker) input.pname-input{ display:none; }
+
+body.theater .row-input{ display:block; }
+/* textarea → 气泡。仍可聚焦（保留 Tab 导航），但不可编辑（readOnly 由 JS 置位） */
+body.theater textarea.trans{
+  width:100%; max-width:100%; resize:none; overflow:hidden;
+  padding:var(--sp-2) var(--sp-3);
+  border:1px solid var(--border-soft); border-radius:var(--r-lg);
+  background:var(--bg-raised); color:var(--text);
+  font-size:calc(var(--trans-font-size,17px) * 1.06);
+  line-height:1.85;
+  cursor:default;
+}
+body.theater .para.has-speaker textarea.trans{ border-top-left-radius:var(--r-xs); }
+body.theater textarea.trans:focus{ border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-dim); }
+
+/* 旁白：不加气泡描边，改为左侧细线，与对白视觉分层 */
+body.theater .para:not(.has-speaker) textarea.trans{
+  border:0; border-left:2px solid var(--border-strong);
+  border-radius:0; background:transparent; color:var(--text-mid);
+}
+
+/* 说话人换色：由 renderer 按说话人分组给 .sp-0 / .sp-1 / .sp-2 类 */
+body.theater .para.sp-1 input.pname-input{ background:rgba(92,140,190,.18); color:#8ab4e8; }
+body.theater .para.sp-2 input.pname-input{ background:rgba(150,110,190,.18); color:#b79ae0; }
+body.theater .para.sp-3 input.pname-input{ background:rgba(190,140,110,.18); color:#dda583; }
+
+/* 已定稿的行在阅读态给一点正反馈，但不喧哗 */
+body.theater .para.done textarea.trans{ border-color:var(--border-strong); }
+
+/* 剧场视图下顶部提示条，说明"这是只读的" */
+body.theater::before{
+  display:block; position:sticky; top:0; z-index:5;
+  padding:var(--sp-1) var(--sp-3);
+  background:var(--accent-dim); color:var(--accent);
+  font-size:var(--fs-2xs); text-align:center;
+  content:"🎬 剧场视图（只读）· 点击任意气泡回到表格编辑";
+}
+
 /* ══════════════════════════════════════════════════════════════
    P2-2 状态 pill + 四态形状编码
    规范 §7.5 / §0.3。

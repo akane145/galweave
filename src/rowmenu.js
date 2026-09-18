@@ -91,6 +91,12 @@ export function rowMenuItems(ctx) {
     disabled: false,
   });
   items.push({
+    label: '留存当前版本',
+    hint: '手动留档',
+    action: 'historySave',
+    disabled: false,
+  });
+  items.push({
     label: '撤销',
     hint: 'Ctrl+Z',
     action: 'undo',

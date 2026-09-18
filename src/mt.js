@@ -267,7 +267,20 @@ export function buildLlmSystemPrompt(custom){
     .replace('{tgtlang}', 'Chinese');
 }
 
-/** 用户消息正文: 语境参考段 + 术语表段 + 原文 */
+/** 构造语境与角色段：角色人设在前（它是长期约束），上下文档在后（它是本次参考）。
+ *  两者都可能为空，任一侧为空时不留多余空行。 */
+export function buildSpeechPrompt({ personaText, contextBlock } = {}){
+  const parts = [];
+  const per = String(personaText == null ? '' : personaText).trim();
+  if (per){
+    parts.push('本次台词的角色设定（请在译文中保持该角色的说话风格与用词习惯）：\n' + per);
+  }
+  const ctx = String(contextBlock == null ? '' : contextBlock).trim();
+  if (ctx) parts.push(ctx);
+  return parts.join('\n\n');
+}
+
+/** 用户消息正文: 角色/语境段 + 术语表段 + 原文 */
 export function buildLlmUserPrompt(text, glossaryText, contextBlock){
   const ctx = contextBlock ? (contextBlock + '\n\n') : '';
   const gloss = glossaryText ? '翻译时请将以下术语按要求翻译：\n' + glossaryText + '\n\n' : '';
@@ -305,9 +318,12 @@ export function buildContextBlock(items){
     hasNeighbor = true;
     const tr = String(it.translation == null ? '' : it.translation).trim();
     const st = CTX_STATUS[it.status] || '';
-    rows.push('· ' + orig
-      + (tr ? '\n  译文：' + tr : (st === CTX_STATUS.todo ? '\n  （尚未翻译）' : ''))
-      + (st ? '（' + st + '）' : ''));
+    // 状态只出现一次。此前写成 `tr ? 译文 : (todo ? 尚未翻译)` 再统一拼 `（状态）`，
+    // 未翻译的行会拼出「（尚未翻译）（未翻译）」—— 同一件事说两遍。
+    // 现在统一为：正文行 + 一个括注，括注按"有译文优先、否则用状态"取一次。
+    const note = tr ? ('译文：' + tr + (st ? '（' + st + '）' : ''))
+                    : (st ? '（' + st + '）' : '');
+    rows.push('· ' + orig + (note ? '\n  ' + note : ''));
   }
   if (!hasNeighbor) return '';   // 只有当前句 = 没有语境可参考，不要平白发一段
   return '以下是上下文的参考，**只用于理解语境**（人物关系、称谓、语气、前后呼应）。\n'
@@ -822,14 +838,14 @@ export function parseNumberedLines(text, n){
  * 行内受保护标签**逐行遮蔽后再拼接**，返回时逐行还原；任一行还原失败即整批放弃。
  * @returns {Promise<string[]|null>} 成功返回与 texts 等长的译文数组；失败返回 null（调用方回退逐行）
  */
-export async function translateLinesBatched(providerId, texts, glossary){
+export async function translateLinesBatched(providerId, texts, glossary, context){
   const lines = Array.isArray(texts) ? texts : [];
   if (!lines.length) return [];
   const masks = lines.map(t => maskProtectedTokens(String(t == null ? '' : t)));
   // 逐行清洗后再拼装：行内混入换行/控制符会直接破坏「序号. 译文」的对齐，
   // 是批次整批作废的常见原因，所以在拼包之前就掐掉。
   const payload = buildBatchUserText(masks.map(m => stripControlChars(m.text)));
-  const raw = await translateText(providerId, payload, glossary);
+  const raw = await translateText(providerId, payload, glossary, null, context);
   const parsed = parseNumberedLines(raw, lines.length);
   if (!parsed) return null;                 // 行数/序号对不上 → 整批放弃
   const out = [];

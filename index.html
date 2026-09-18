@@ -31,6 +31,7 @@
     </div>
     <div class="header-actions">
       <button type="button" id="btnProof" class="header-proof" title="开启/关闭校对模式(状态管理/批注/修改记录)" aria-pressed="false">校对</button>
+      <button type="button" id="btnTheater" class="header-proof" title="开启/关闭剧场视图（只读：以角色气泡阅读译文，编辑请切回表格）" aria-pressed="false">剧场</button>
       <button type="button" id="btnSidebar" class="header-tool" aria-pressed="false" title="打开或收起侧边栏">侧边栏</button>
       <button type="button" id="btnCommandPanel" class="header-more" aria-haspopup="menu" aria-expanded="false" aria-controls="utilityPanel" title="打开辅助工具">更多</button>
     </div>
@@ -228,6 +229,12 @@
           <button id="btnTermAdd" class="toolbtn">＋</button>
         </div>
         <div id="termTable" class="gloss-table"></div>
+        <div class="gloss-sec-title">角色人设（机翻时按说话人注入语气，见「机翻语境句数」设置）</div>
+        <div class="gloss-add-row">
+          <input type="text" id="personaAddName" placeholder="角色原名（须与脚本一致）">
+          <button id="btnPersonaAdd" class="toolbtn">＋ 添加</button>
+        </div>
+        <div id="personaTable" class="gloss-table"></div>
       </div>
     </div>
 

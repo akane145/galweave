@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 
 import {
   normalizeApiUrl, buildGptBody, parseGptResponse, parseSseLine, sseTextToChunks,
-  buildLlmSystemPrompt, buildLlmUserPrompt, buildLlmMessages, buildContextBlock,
+  buildLlmSystemPrompt, buildLlmUserPrompt, buildLlmMessages, buildContextBlock, buildSpeechPrompt,
   detectSakuraPromptVersion, buildGlossaryText, buildSakuraMessagesV,
   migrateMtSettings, registerProvider, translateTextProtected, translateLinesBatched,
   stripControlChars, translateText, setProviderConfig, resetLlmContext, getLlmContext,
@@ -414,12 +414,12 @@ test('buildContextBlock: 标注状态让模型知道哪些邻居可信', () => {
   assert.match(block, /待校对/);
 });
 
-test('buildContextBlock: 未翻译的邻居标出"尚未翻译",不放空行', () => {
+test('buildContextBlock: 未翻译的邻居标出状态,不放空行', () => {
   const block = buildContextBlock([
     { orig: 'あ', status: 'todo' },
     { orig: 'い', current: true },
   ]);
-  assert.match(block, /尚未翻译/);
+  assert.match(block, /（未翻译）/, '未翻译的邻居要标出状态，供模型判断可信度');
 });
 
 test('buildContextBlock: 只有当前句 → 返回空串（没有语境就不发这一段）', () => {
@@ -481,4 +481,55 @@ test('buildSakuraMessagesV: 无语境时与既有行为一致（向后兼容）'
   const b = buildSakuraMessagesV('本文', '', 'v1.0', '');
   assert.deepEqual(a, b);
   assert.equal(a[1].content, '将下面的日文文本翻译成中文：本文');
+});
+
+/* ---------------- 角色人设注入（G 项） ---------------- */
+
+test('buildSpeechPrompt: 人设在前、上下文档在后（长期约束优先于本次参考）', () => {
+  const s = buildSpeechPrompt({ personaText: '性别 / 年龄：女', contextBlock: 'CTXBLOCK' });
+  assert.ok(s.indexOf('角色设定') < s.indexOf('CTXBLOCK'), '人设应在语境之前');
+  assert.match(s, /保持该角色的说话风格/);
+});
+
+test('buildSpeechPrompt: 任一侧为空时不留多余空行', () => {
+  assert.equal(buildSpeechPrompt({ contextBlock: 'CTX' }), 'CTX');
+  assert.equal(buildSpeechPrompt({ personaText: '性别：女' }), '本次台词的角色设定（请在译文中保持该角色的说话风格与用词习惯）：\n性别：女');
+  assert.equal(buildSpeechPrompt({}), '');
+  assert.equal(buildSpeechPrompt(), '');
+  assert.equal(buildSpeechPrompt({ personaText: '   ', contextBlock: '  ' }), '', '纯空白视为空');
+});
+
+test('buildSpeechPrompt: 一段与两段拼接均无尾部换行', () => {
+  assert.ok(!buildSpeechPrompt({ contextBlock: 'CTX' }).endsWith('\n'));
+  const both = buildSpeechPrompt({ personaText: 'P', contextBlock: 'C' });
+  assert.ok(!both.endsWith('\n'));
+  assert.match(both, /P[\s\S]*\n\n[\s\S]*C/, '两段之间恰好一个空行');
+});
+
+test('buildContextBlock: 状态括注只出现一次（回归：曾拼出「（尚未翻译）（未翻译）」）', () => {
+  const block = buildContextBlock([
+    { orig: 'あ', status: 'todo' },
+    { orig: 'い', current: true },
+  ]);
+  const hits = block.match(/尚未翻译|未翻译/g) || [];
+  assert.equal(hits.length, 1, '同一状态只能说一遍，实际出现 ' + hits.length + ' 次：' + JSON.stringify(hits));
+  assert.ok(!block.includes('（尚未翻译）（未翻译）'));
+});
+
+test('buildContextBlock: 有译文时状态括注跟在译文后，且也只一次', () => {
+  const block = buildContextBlock([
+    { orig: 'あ', translation: '甲', status: 'approved' },
+    { orig: 'い', current: true },
+  ]);
+  assert.match(block, /译文：甲（已定稿）/);
+  assert.equal((block.match(/已定稿/g) || []).length, 1);
+});
+
+test('buildContextBlock: 无译文且无状态时不加空括注', () => {
+  const block = buildContextBlock([
+    { orig: 'あ' },
+    { orig: 'い', current: true },
+  ]);
+  assert.ok(!block.includes('（）'), '不该出现空括号');
+  assert.match(block, /· あ/);
 });

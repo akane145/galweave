@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { parseCsv, toGlossary, fromGlossary } from '../src/csv.js';
 import { currentToken, matchSuggestions } from '../src/suggest.js';
 import { mergeSnippets, sanitizeSnippets, projectSnippetsPath } from '../src/snippets.js';
+import { cloneGloss, sanitizePersona, setPersona, personaText } from '../src/glossary.js';
 import {
   parseDictJson, matchEntries, extractPath, httpToResults, lookupAll,
   createJsonDictProvider, createHttpDictProvider,
@@ -291,4 +292,75 @@ test('收藏: favoriteKey 唯一、isFavorite/toggleFavorite 增删', () => {
   // 同时收集两个不同源都保留
   list = toggleFavorite(toggleFavorite([], a), b);
   assert.equal(list.length, 2);
+});
+
+/* ---------------- 角色人设（G 项） ---------------- */
+
+test('cloneGloss 兼容旧数据：缺 personas 时兜底为空表，不抛异常', () => {
+  // 旧版 glossary.json 长这样：只有 names / terms
+  const legacy = { names: { 'アリス': '爱丽丝' }, terms: { '先輩': '前辈' } };
+  const g = cloneGloss(legacy);
+  assert.deepEqual(g.names, { 'アリス': '爱丽丝' });
+  assert.deepEqual(g.terms, { '先輩': '前辈' });
+  assert.deepEqual(g.personas, {}, '旧数据加载后 personas 必须是空表而非 undefined');
+});
+
+test('cloneGloss 深拷贝：改副本不影响原对象（personas 也要隔离）', () => {
+  const src = { names: {}, terms: {}, personas: { 'アリス': { tone: '傲娇' } } };
+  const g = cloneGloss(src);
+  g.personas['アリス'].tone = '改了';
+  g.personas['新角色'] = { tone: '新' };
+  assert.equal(src.personas['アリス'].tone, '傲娇', '内层对象也应隔离');
+  assert.equal(src.personas['新角色'], undefined);
+});
+
+test('sanitizePersona: 去空白、截断超长、剔除空字段', () => {
+  assert.equal(sanitizePersona(null), null);
+  assert.equal(sanitizePersona('字符串不是对象'), null);
+  assert.equal(sanitizePersona({}), null);
+  assert.equal(sanitizePersona({ gender: '', tone: '   ' }), null, '全空 → null');
+  assert.deepEqual(sanitizePersona({ gender: ' 女 ', tone: '' }), { gender: '女' });
+  assert.deepEqual(sanitizePersona({ tone: 123 }), null, '非字符串字段被忽略');
+  const long = 'あ'.repeat(200);
+  assert.equal(sanitizePersona({ tone: long }).tone.length, 80, '按字段上限截断');
+});
+
+test('setPersona: 写入/更新/清空，并报告是否真的变了', () => {
+  const g = { names: {}, terms: {}, personas: {} };
+  assert.equal(setPersona(g, 'アリス', { tone: '傲娇' }), true, '首次写入算改动');
+  assert.deepEqual(g.personas['アリス'], { tone: '傲娇' });
+  assert.equal(setPersona(g, 'アリス', { tone: '傲娇' }), false, '内容相同不算改动');
+  assert.equal(setPersona(g, 'アリス', { tone: '冷静' }), true);
+  assert.equal(g.personas['アリス'].tone, '冷静');
+  assert.equal(setPersona(g, 'アリス', {}), true, '清空算改动');
+  assert.equal(g.personas['アリス'], undefined, '清空后应删除键，不留空壳');
+});
+
+test('setPersona: personas 缺失时自动补建（旧数据兼容）', () => {
+  const legacy = { names: {}, terms: {} };
+  assert.equal(setPersona(legacy, 'アリス', { tone: '傲娇' }), true);
+  assert.deepEqual(legacy.personas['アリス'], { tone: '傲娇' });
+});
+
+test('setPersona: 空角色名 / 空术语表安全', () => {
+  assert.equal(setPersona(null, 'アリス', { tone: 'x' }), false);
+  assert.equal(setPersona({}, '', { tone: 'x' }), false);
+});
+
+test('personaText: 生成可读的前缀文本，只含有内容的字段', () => {
+  assert.equal(personaText(null), '');
+  assert.equal(personaText({}), '');
+  const t = personaText({ gender: '女', firstPerson: 'ボク', tone: '冷峻干练', note: '' });
+  assert.match(t, /性别 \/ 年龄：女/);
+  assert.match(t, /自称：ボク/);
+  assert.match(t, /语气 \/ 口吻：冷峻干练/);
+  assert.ok(!t.includes('备注：'), '空字段不该出现在文本里');
+});
+
+test('personaText: 字段顺序稳定（便于模型与测试预期一致）', () => {
+  const t = personaText({ note: '备注内容', gender: '女', tone: '语气内容' });
+  const iGender = t.indexOf('性别');
+  const iTone = t.indexOf('语气');
+  const iNote = t.indexOf('备注');
+  assert.ok(iGender < iTone && iTone < iNote, '应按 PERSONA_FIELDS 顺序输出');
 });

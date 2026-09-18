@@ -74,9 +74,43 @@
 
 - **多轮历史**（`mt.js` `llmContext`，设置 `mt.providers.llm.contextTurns`）：把上一轮的原文/译文作为对话轮次喂回，跨句累积。
 - **语境参考块**（`mt.js` `buildContextBlock`，设置 `ui.mtAround`）：把当前句左右邻居一起发过去，同一批。解决单句孤立翻译时代词指代不明。
-- 两者可同时生效。`llmContext` 是模块级全局，**不跨文档保留**：打开/切换文档必须调 `resetLlmContext()`（`main.js` 在 `finishLoadSource` 与 `afterDocActivated` 两处调用），否则上一篇对白会串味。
+- **角色人设**（`glossary.personas`）：按当前行说话人查人设，经 `mt.buildSpeechPrompt` 与语境块合并成一段注入（人设在前、语境在后）。
+- 三者可同时生效。`llmContext` 是模块级全局，**不跨文档保留**：打开/切换文档必须调 `resetLlmContext()`（`main.js` 在 `finishLoadSource` 与 `afterDocActivated` 两处调用），否则上一篇对白会串味。
+
+⚠️ **人设靠 `p.name` 匹配**，而 `p.name` 来自脚本前缀解析（`parsers.parsePrefix`，需 `☆编号☆角色名☆台词` 这类格式）。解析不出说话人时人设**静默失效**——因此术语面板的「角色人设」区有一行匹配情况提示，无说话人时显示警告。改动解析规则或人设逻辑时不要删掉该提示，它是用户判断"人设到底有没有生效"的唯一入口。
+
+批次模式（`mt.translateLinesBatched`）一次请求发多行，**只能带一份语境**（取组内首行）。多角色混排的批次会丢失其余角色的人设——有意为之：拆成多请求会成倍增加往返。需要严格人设时用逐行模式。
+
+### 历史快照的触发条件
+
+三档触发，互为补充：**时间**（5 分钟节流）、**改动量**（自上次留档起满 50 行）、**显式**（保存前 / 批量机翻前 / 恢复前 / 手动）。
+
+- `history.shouldSnapshot(lastAt, now, reason)` —— 时间维度；`'force'` 与 `'manual'` 不受节流限制。
+- `history.shouldSnapshotByChanges(changedRows)` —— 改动量维度，阈值 `HISTORY_CHANGE_THRESHOLD = 50`。按**行去重**计数（同一行反复输入只算一行），语义是"有多少行与上次快照不同"，不是按键次数。
+- 留档后必须 `resetChangeCounter()`；写盘失败也要清零，否则每次输入都会重试写盘、越积越慢。
+
+### 剧场视图（body.theater）
+
+- 实现是**纯 CSS 覆盖**，不另建 DOM：虚拟滚动、行高模型、搜索/术语高亮都长在 `.para` 上，复制一套会立刻产生两份需要同步的渲染逻辑。
+- 只读靠 `textarea.readOnly`（不是 `disabled`，保留聚焦与 Tab 导航），由 `renderer` 读 `state.theater()` 决定。
+- 说话人配色按**文档中首次出现顺序**分配槽位（`main.speakerSlot`），保证同角色全篇同色且不随滚动漂移；只给前 3 个角色上色（再多区分度不够）。换文档要 `invalidateSpeakerSlots()`。
+- 与校对模式**互斥**：进入剧场会先退出校对（批注框、漏翻条纹在阅读态是噪音，且会撑变形气泡）。
+- ⚠️ 切换后必须**下一帧再 `refreshAllRows()` 一次**：`autoResize` 读的是当前 `scrollHeight`，而刚加的 body class 在同一任务内尚未生效，会量到旧字号的高度，气泡撑不开。
 
 ### 界面模块拆分（src/ui/）
 
 - 从 `main.js` 拆出的编排/表单模块放 `src/ui/`。它们**不得反向 import `main.js`**（会成环），需要主模块的能力时由 `main.js` 通过 `initXxx(deps)` 注入。
 - ⚠️ `src/ui/` 是**下一级目录**，引用 `src/` 下的模块必须写 `../foo.js`。写错 `./foo.js` 时 **lint 与 node --test 都不会报**，只有 `vite build` 会失败——因此有 `tests/ui-modules.test.mjs` 专门加载每个 UI 模块，把这类错误提前到测试阶段。
+
+## 安全扫描结论（2026-09-18，供复查参考）
+
+完整深度扫描（Mimosa，`seal: sha256:eb225253…`）共 158 条，**131 条落在第三方参考源码**（`LunaTranslator-main/`、`goldendict-master/`、`node_modules`、构建产物——均在 `.gitignore` 中，从不入库），**27 条落在 `src/main.js`**。
+
+对 27 条逐类核验后判定**全部为误报**，依据：
+
+- **「命令注入」13 条**（含 `isMirrorFormatText`、`chooseFormat` 等纯文本解析函数）：本项目源码中**不存在任何命令执行原语** —— `grep -rn "child_process\|execSync\|spawnSync\|shell:true" src/ src-tauri/src/` 只命中了 `RegExp.exec`（正则匹配）。扫描器把 `Regex.exec()` 误判为 `child_process.exec()`。真正的命令执行只在 `src-tauri` 的构建脚本里，且不接触运行时输入。
+- **「XSS」13 条**（`refreshRow → syncRow`）：`renderer.js` 的 `renderOrigHTML` 对每一段拼接（含 `data-dst` 属性值）都调用了 `esc()`，是正确转义的写法。
+- **「SSRF」2 条**（`createHttpDictProvider`）：这是**用户主动配置自己的词典 HTTP 地址**的既有功能，请求由用户显式发起、目标是用户自己填的 URL，属预期行为而非漏洞。桌面版的网络请求受 Tauri capabilities 约束。
+- **「mongo-sort-injection」2 条**（`applyTermsToTranslations`、`saveTm`）：本项目**不使用 MongoDB**，无相关 sink。
+
+⚠️ 复查提示：扫描的 `coverage.json` 标记 `completeness: partial`、`runStatus: inconclusive`（威胁建模与污点路径两阶段未完整覆盖），且 `evidenceBoundary: static_only_no_runtime_execution`。即**扫描未给出完整结论**，上述判定来自人工逐条核验，而非扫描器结论。

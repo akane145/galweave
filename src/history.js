@@ -216,11 +216,30 @@ export function planPrune(entries, max = HISTORY_MAX){
 
 /** 是否该为新快照让路（距上次快照太近则跳过，但 reason 为 'force' 时总是写） */
 export function shouldSnapshot(lastAt, now, reason, minInterval = HISTORY_MIN_INTERVAL_MS){
-  if (reason === 'force') return true;
+  if (reason === 'force' || reason === 'manual') return true;
   const t = Number.isFinite(Number(now)) ? Number(now) : Date.now();
   const last = Number(lastAt);
   if (!Number.isFinite(last) || last <= 0) return true;
   return (t - last) >= minInterval;
+}
+
+/** 变更行数阈值：自上次快照以来累计改动这么多行，就该留一份（即使还没到时间间隔） */
+export const HISTORY_CHANGE_THRESHOLD = 50;
+
+/**
+ * 是否该因为「改动够多」而留档。
+ *
+ * 与 shouldSnapshot 的**时间**维度互补：连着翻 80 行可能只花 3 分钟，
+ * 按 5 分钟节流会一份不留，万一后面批量误操作就没有后悔药。
+ *
+ * @param {number} changedRows 自上次快照以来的累计变更行数
+ * @param {number} threshold
+ */
+export function shouldSnapshotByChanges(changedRows, threshold = HISTORY_CHANGE_THRESHOLD){
+  const n = Number(changedRows);
+  const th = Number.isFinite(Number(threshold)) && Number(threshold) > 0
+    ? Number(threshold) : HISTORY_CHANGE_THRESHOLD;
+  return Number.isFinite(n) && n >= th;
 }
 
 /* ---------------- IO（薄层，不参与单测） ---------------- */

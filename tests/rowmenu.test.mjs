@@ -19,10 +19,16 @@ const byAction = (items, action) => items.find(x => x.action === action);
 test('rowMenuItems：全能力上下文下所有项都可用', () => {
   const items = rowMenuItems(FULL);
   const actionable = items.filter(x => !x.sep);
-  assert.equal(actionable.length, 10);
+  assert.equal(actionable.length, 11);   // 含「历史版本…」与「留存当前版本」两项
   for (const it of actionable) {
     assert.equal(it.disabled, false, it.label + ' 不该被禁用');
   }
+});
+
+test('rowMenuItems：历史相关两项都在（查看 + 手动留档）', () => {
+  const items = rowMenuItems(FULL);
+  assert.ok(byAction(items, 'history'), '应有「历史版本…」');
+  assert.ok(byAction(items, 'historySave'), '应有「留存当前版本」手动留档入口');
 });
 
 test('rowMenuItems：翻译记忆——有命中时标签带建议、无命中时禁用', () => {

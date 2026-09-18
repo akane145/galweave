@@ -13,8 +13,31 @@ const PROJECT_FILE = 'glossary.json'; // 项目目录术语表文件名
 let cache = null;       // 内存缓存
 let projectDir = null;  // 当前项目目录(为空 = 全局术语表)
 
-function emptyGloss(){ return { names: {}, terms: {} }; }
-function cloneGloss(g){ return { names: { ...(g.names || {}) }, terms: { ...(g.terms || {}) } }; }
+// 术语表结构版本。加 personas 时**不升版本号**：新字段是可选增量，
+// 旧文件缺 personas 时按空表处理即可，无需迁移动作（见 cloneGloss 的兜底）。
+// 空名义上的版本号，是为了将来真需要破坏性变更时有地方判断。
+export const GLOSS_VERSION = 1;
+
+function emptyGloss(){ return { names: {}, terms: {}, personas: {} }; }
+
+/**
+ * 深拷贝术语表。
+ * ⚠️ 每个分组都必须有 `|| {}` 兜底 —— 旧版 glossary.json 里没有 personas，
+ * 少一个兜底就会让 cloneGloss 结果缺键，后续 `gloss.personas[x]` 直接抛异常。
+ * ⚠️ personas 的值是**对象**，必须逐个再拷一层：只做 `{...}` 浅拷贝会让副本与原件
+ * 共享同一个 persona 对象，改副本（如表单里编辑）会静默改掉原件。
+ */
+export function cloneGloss(g){
+  const personas = {};
+  for (const [name, p] of Object.entries((g && g.personas) || {})){
+    if (p && typeof p === 'object') personas[name] = { ...p };
+  }
+  return {
+    names: { ...((g && g.names) || {}) },
+    terms: { ...((g && g.terms) || {}) },
+    personas,
+  };
+}
 
 /** 规范化目录路径: \ 统一转 /、去尾部斜杠、去空白(纯函数,可单测) */
 export function normalizeDirPath(p){
@@ -171,4 +194,61 @@ export function recordNameIfNew(names, srcName, trName){
   if (names[srcName] && names[srcName] === trName) return false;
   names[srcName] = trName;
   return true;
+}
+
+/* ---------------- 角色人设 ---------------- */
+
+/**
+ * 人设字段定义。`key` 是要发给模型的提示词片段生成依据；
+ * `label`/`hint` 供面板渲染，`max` 是长度上限（防止把整篇人物小传贴进去）。
+ */
+export const PERSONA_FIELDS = [
+  { key: 'gender',  label: '性别 / 年龄',   hint: '如：女 / 17 岁', max: 40 },
+  { key: 'firstPerson', label: '自称',      hint: '如：ボク、私、俺', max: 40 },
+  { key: 'tone',    label: '语气 / 口吻',   hint: '如：冷峻干练、关西腔、傲娇', max: 80 },
+  { key: 'note',    label: '备注',          hint: '如：对主角用敬语', max: 120 },
+];
+
+/**
+ * 清空人设里的空白字段。
+ * 输入来自 UI 与外部 JSON，可能带空白串 / 非字符串 / 超长文本，
+ * 统一收口成"要么是有内容的字符串，要么不存在"。
+ * @returns {object|null} 全部为空时返回 null（调用方据此删键，不留空壳）
+ */
+export function sanitizePersona(raw){
+  if (!raw || typeof raw !== 'object') return null;
+  const out = {};
+  for (const f of PERSONA_FIELDS){
+    const v = raw[f.key];
+    if (typeof v !== 'string') continue;
+    const s = v.trim().slice(0, f.max);
+    if (s) out[f.key] = s;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** 设置/更新某角色的人设；传空内容则删除该键。返回是否发生了改动 */
+export function setPersona(gloss, name, raw){
+  if (!gloss || !name) return false;
+  if (!gloss.personas) gloss.personas = {};
+  const clean = sanitizePersona(raw);
+  const before = gloss.personas[name];
+  const same = JSON.stringify(before || null) === JSON.stringify(clean);
+  if (same) return false;
+  if (clean) gloss.personas[name] = clean;
+  else delete gloss.personas[name];
+  return true;
+}
+
+/**
+ * 按角色名取人设文本行（供机翻提示词注入）。
+ * @returns {string} 形如「性别/年龄：女；自称：ボク；语气：冷峻」；无则空串
+ */
+export function personaText(persona){
+  const p = sanitizePersona(persona);
+  if (!p) return '';
+  return PERSONA_FIELDS
+    .filter(f => p[f.key])
+    .map(f => f.label + '：' + p[f.key])
+    .join('；');
 }

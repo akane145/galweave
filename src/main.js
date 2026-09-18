@@ -119,6 +119,9 @@ rdr.setRendererState({
   // 行级术语门禁：词条表走缓存；文案复用侧栏清单的 issueDetail，两处说法保持一致
   qaEntries: qaEntriesCached,
   issueDetail,
+  // 剧场视图（只读）：渲染器据此置 textarea.readOnly 与说话人配色
+  theater: isTheater,
+  speakerSlot,
   onTermClick: insertTerm,
   // 输入建议(术语/片段)与划词查词
   getSuggestions: (token) => suggest.matchSuggestions(token, glossData ? glossData.terms : {}, snippetData.merged),
@@ -726,6 +729,8 @@ function transInputHandler(i, value){
   rdr.refreshRow(i);
   updateProgress();
   updateUndoButtons(); // 同上：让"可撤销"立即可见（含一键填入术语这条路径）
+  noteRowChanged(i);
+  void maybeSnapshotByChanges(); // 改动累积到阈值就留档（不阻塞输入：内部是异步写盘）
   markDirty();
   if (_synced) wkr.syncSearchShadow({ changes: [{ i, translation: p.translation, nameTr: p.nameTr }] });
 }
@@ -1054,6 +1059,7 @@ async function finishLoadSource(fname, parsed, file, note){
   docDirty = false; // 全新导入,尚未有未写回的改动
   lastSnapshotAt = 0; // 换文档 → 留档节流重新计时
   mt.resetLlmContext(); // 换文档 → 清空机翻多轮上下文,避免上一篇对白串味
+  invalidateSpeakerSlots(); // 换文档 → 说话人配色重新按新文档的首现顺序分配
   setHeaderSaveState('已载入', 'saved');
   await proof.loadForFile(); // 加载该文件的校对数据(批注/状态/修改记录)
   rdr.fullRender();
@@ -1167,6 +1173,7 @@ async function switchDoc(key){
 // 标签切换/恢复后的公共重渲染尾(与 loadSource 尾部一致)
 function afterDocActivated(){
   mt.resetLlmContext(); // 切标签 → 同上,机翻上下文不跨文档
+  invalidateSpeakerSlots(); // 切标签 → 说话人配色同理由新文档决定
   renderGlossTables();
   updateGlossProjectLabel();
   initSnippets();
@@ -1539,6 +1546,110 @@ function renderGlossTables(){
       if (value === '') delete terms[key]; else terms[key] = value;
     })));
   });
+  renderPersonaTable();
+}
+
+/* ---- 角色人设表 ----
+   每个角色一行：角色名 + 四个字段输入 + 删除。字段定义来自 glossary.PERSONA_FIELDS，
+   新增字段只需改那一处（本函数与其渲染都按定义循环，不硬编码字段名）。
+
+   ⚠️ 人设靠 p.name（由脚本前缀解析出的说话人）匹配。若当前文本解析不出说话人，
+      人设会**静默失效** —— 用户以为生效了其实没有。故在表头给出匹配情况提示。 */
+function renderPersonaTable(){
+  const box = document.getElementById('personaTable');
+  if (!box) return;
+  box.innerHTML = '';
+  const personas = glossData.personas || {};
+  const names = Object.keys(personas).sort((a, b) => a.localeCompare(b, 'ja'));
+  if (!names.length){
+    const empty = document.createElement('div');
+    empty.className = 'gloss-empty';
+    empty.textContent = '还没有角色人设。添加后，该角色说话的行在机翻时会自动带上语气设定。';
+    box.appendChild(empty);
+    return;
+  }
+
+  // 匹配情况：当前文档里有多少行能对上人设，以及哪些人设压根没出现过。
+  // 这是"人设到底有没有生效"的唯一可观测入口 —— 脚本没解析出说话人时，
+  // 这里会显示 0 行命中，用户据此就知道该去检查解析规则而不是怀疑模型。
+  const paras = model.getParas();
+  const speakers = new Set();
+  let named = 0;
+  for (const p of paras){
+    if (p && p.name){ speakers.add(p.name); named++; }
+  }
+  const hitRows = paras.filter(p => p && p.name && personas[p.name]).length;
+  const idle = names.filter(n => !speakers.has(n));
+
+  const stat = document.createElement('div');
+  stat.className = 'persona-stat';
+  if (named === 0){
+    stat.className += ' warn';
+    stat.textContent = '⚠ 当前文本没有解析出说话人，人设不会生效。'
+      + '请确认脚本行带有说话人前缀（如 ☆编号☆角色名☆台词），可在「解析规则」里调整。';
+  } else {
+    stat.textContent = '当前文本 ' + named + ' 行有说话人，其中 ' + hitRows + ' 行命中人设。'
+      + (idle.length ? '　未出现：' + idle.join('、') : '');
+  }
+  box.appendChild(stat);
+
+  for (const name of names){
+    const p = personas[name] || {};
+    const row = document.createElement('div');
+    row.className = 'persona-row';
+
+    const head = document.createElement('div');
+    head.className = 'persona-head';
+    const label = document.createElement('b');
+    label.textContent = name;
+    label.title = '角色原名（须与脚本中一致，否则匹配不到）';
+    const del = document.createElement('button');
+    del.className = 'gloss-del';
+    del.textContent = '✕';
+    del.title = '删除「' + name + '」的人设';
+    del.addEventListener('click', async () => {
+      const ok = await showConfirm({
+        title: '删除角色人设「' + name + '」',
+        message: '该角色的语气设定将从术语表移除，无法撤销。术语与译名不受影响。',
+        confirmText: '删除', danger: true,
+      });
+      if (ok) mutateGloss(() => { delete glossData.personas[name]; });
+    });
+    head.append(label, del);
+    row.appendChild(head);
+
+    for (const f of gloss.PERSONA_FIELDS){
+      const field = document.createElement('div');
+      field.className = 'persona-field';
+      const lab = document.createElement('label');
+      lab.textContent = f.label;
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.value = p[f.key] || '';
+      inp.placeholder = f.hint || '';
+      inp.maxLength = f.max;
+      // 用 change（失焦/回车）而非 input：避免每敲一个字就重建整张表并落盘
+      inp.addEventListener('change', () => {
+        const next = { ...(glossData.personas[name] || {}) };
+        const v = inp.value.trim();
+        if (v) next[f.key] = v; else delete next[f.key];
+        mutateGloss(() => gloss.setPersona(glossData, name, next));
+      });
+      field.append(lab, inp);
+      row.appendChild(field);
+    }
+    box.appendChild(row);
+  }
+}
+
+/** 添加角色人设：只填名字（其余字段留空，之后在行内补） */
+function addPersonaEntry(){
+  const el = document.getElementById('personaAddName');
+  const name = String(el.value || '').trim();
+  if (!name){ toastError('请填写角色原名'); return; }
+  if (glossData.personas && glossData.personas[name]){ toastError('「' + name + '」已有人设'); return; }
+  mutateGloss(() => { if (!glossData.personas) glossData.personas = {}; glossData.personas[name] = {}; });
+  el.value = '';
 }
 
 // 术语表变更统一入口: 改数据 → 立即重绘表格(删除/改名/清空译文后行要消失/更新) → 防抖保存 + 刷新翻译行高亮
@@ -3887,6 +3998,7 @@ async function mtTranslateBatch(){
       p.src = 'tm';   // 归因标记：翻译记忆复用
       model.recalcDone(p);
       rdr.refreshRow(i);
+      noteRowChanged(i);
       memApplied++;
     }
     model.scheduleAutosave();
@@ -3937,7 +4049,9 @@ async function mtTranslateBatch(){
       const i = list[k];
       fnameEl.textContent = '🔄 批量机翻中 ' + (done0 + k + 1) + ' / ' + toTranslate.length + ' …';
       try {
-        applyOne(i, await mt.translateTextProtected($mtProvider.value, paras[i].content, glossData));
+        // 逐行路径带该行**自己的**说话人语境：一行是爱丽丝、下一行是桐吾时，
+        // 各自的人设不会串（这也是 Q6 定为逐行为主后的主要收益）。
+        applyOne(i, await mt.translateTextProtected($mtProvider.value, paras[i].content, glossData, mtContextBlock(i)));
       } catch (e){
         failed.push({ i, err: e.message });
       }
@@ -3950,9 +4064,12 @@ async function mtTranslateBatch(){
       fnameEl.textContent = '🔄 批量机翻中 ' + (g + group.length) + ' / ' + toTranslate.length + ' …';
       let outs = null;
       try {
+        // ⚠️ 批次模式是**一次请求发多行**，只能带一份语境。取组内首行的说话人，
+        //    多角色混排的批次会因此丢失其余角色的人设 —— 有意为之：
+        //    拆成多请求会成倍增加往返，代价大于收益。需要严格人设时改用逐行模式。
         outs = group.length === 1
-          ? [await mt.translateTextProtected($mtProvider.value, paras[group[0]].content, glossData)]
-          : await mt.translateLinesBatched($mtProvider.value, group.map(i => paras[i].content), glossData);
+          ? [await mt.translateTextProtected($mtProvider.value, paras[group[0]].content, glossData, mtContextBlock(group[0]))]
+          : await mt.translateLinesBatched($mtProvider.value, group.map(i => paras[i].content), glossData, mtContextBlock(group[0]));
       } catch (e){
         outs = null;   // 网络/接口错误也走回退，让失败粒度落到单行
       }
@@ -4140,22 +4257,29 @@ function rowCtxStatus(p){
  */
 function mtContextBlock(i){
   const n = _mtAroundCache === null ? 2 : _mtAroundCache;
-  if (n <= 0) return '';
   const paras = model.getParas();
   const p = paras[i];
   if (!p) return '';
-  const items = [];
-  for (let k = Math.max(0, i - n); k <= Math.min(paras.length - 1, i + n); k++){
-    const q = paras[k];
-    if (!q || q.isName) continue;          // NAME 行对语境没帮助，跳过后自然收缩窗口
-    items.push({
-      orig: q.content,
-      translation: q.translation,
-      status: rowCtxStatus(q),
-      current: k === i,
-    });
+  // 角色人设与上下文是两件事，但都走同一条注入通道（mt.buildSpeechPrompt 负责拼装）。
+  // 人设按当前行的说话人查（p.name 由 parser 从脚本前缀解析而来，无需额外解析成本）。
+  const per = (p.name && glossData && glossData.personas) ? gloss.personaText(glossData.personas[p.name]) : '';
+
+  let ctx = '';
+  if (n > 0){
+    const items = [];
+    for (let k = Math.max(0, i - n); k <= Math.min(paras.length - 1, i + n); k++){
+      const q = paras[k];
+      if (!q || q.isName) continue;        // NAME 行对语境没帮助，跳过后自然收缩窗口
+      items.push({
+        orig: q.content,
+        translation: q.translation,
+        status: rowCtxStatus(q),
+        current: k === i,
+      });
+    }
+    ctx = mt.buildContextBlock(items);
   }
-  return mt.buildContextBlock(items);
+  return mt.buildSpeechPrompt({ personaText: per, contextBlock: ctx });
 }
 
 let _mtAroundCache = null;
@@ -4387,10 +4511,29 @@ function applyTmToRow(i){
 /* ---------------- 行级版本快照 / 本地历史 ---------------- */
 
 let lastSnapshotAt = 0;   // 当前文档上次留档时间（同一文档 5 分钟内不重复留档）
+let changedSinceSnapshot = 0; // 自上次留档以来累计变更的行数（按行去重，见 noteRowChanged）
+
+/**
+ * 记一笔"这一行变了"。用于按**改动量**触发快照（见 maybeSnapshotByChanges）。
+ *
+ * 按行去重：同一行反复输入（打字、改错、再改）只算一行 —— 我们关心的是
+ * "有多少行的内容与上次快照不同"，不是按键次数。
+ */
+const _changedRows = new Set();
+function noteRowChanged(i){
+  if (Number.isFinite(i)) _changedRows.add(i);
+  changedSinceSnapshot = _changedRows.size;
+}
+
+/** 留档后清零计数（该文档的"自从上次快照以来"重新开始算） */
+function resetChangeCounter(){
+  _changedRows.clear();
+  changedSinceSnapshot = 0;
+}
 
 /**
  * 在"译文即将被大面积改写"之前留一份快照。
- * reason: 'save'（写回原文件前）/ 'batch'（批量机翻前）/ 'force'（强制）
+ * reason: 'save'（写回原文件前）/ 'batch'（批量机翻前）/ 'force'（强制）/ 'manual'（手动）/ 'auto'（改动量触发）
  * 浏览器版拿不到可落盘目录，直接跳过（不假装做了）。
  */
 async function snapshotHistory(reason){
@@ -4399,12 +4542,40 @@ async function snapshotHistory(reason){
   if (!history.shouldSnapshot(lastSnapshotAt, Date.now(), reason)) return false;
   const snap = history.buildSnapshot(model.getParas(), Date.now(), reason);
   const { saved } = await history.writeSnapshot(path, model.getFilename(), snap);
-  if (saved) lastSnapshotAt = snap.at;
+  if (saved){
+    lastSnapshotAt = snap.at;
+    resetChangeCounter();
+  }
   return saved;
 }
 
+/**
+ * 改动量够多时自动留档（时间节流的补充）。
+ *
+ * 场景：连着翻 80 行可能只花 3 分钟 —— 按 5 分钟节流一份不留，
+ * 之后一次批量误操作就没有后悔药。这里按**行数**兜底。
+ * 节流仍生效：写盘后 resetChangeCounter 归零，不会连续刷快照。
+ */
+async function maybeSnapshotByChanges(){
+  if (!history.shouldSnapshotByChanges(changedSinceSnapshot)) return;
+  const ok = await snapshotHistory('auto');
+  // 写失败（如磁盘满）也要清零，否则每次输入都会重试写盘，越积越慢
+  if (!ok) resetChangeCounter();
+}
+
+/** 手动留档（行菜单入口）。force 语义：不受时间节流限制，用户明确要求 */
+async function snapshotManual(){
+  const path = model.getFilePath();
+  if (!path){ toastError('浏览器版无法保存历史版本（需要能落盘的目录）。'); return; }
+  if (!model.getParas().length){ toastError('请先导入文本文件'); return; }
+  const ok = await snapshotHistory('manual');
+  if (ok) toast('已留存当前版本，可在「历史版本…」里找回。');
+  else toastError('留档失败（可能磁盘不可写）。');
+}
+
 const HISTORY_REASON_LABEL = {
-  save: '写回原文件前', batch: '批量机翻前', force: '恢复前留档', manual: '手动留档',
+  save: '写回原文件前', batch: '批量机翻前', force: '恢复前留档',
+  manual: '手动留档', auto: '改动累积',
 };
 
 /** 行菜单「历史版本…」：列快照 → 选一条 → 二次确认后果 → 覆盖式恢复 */
@@ -4520,6 +4691,7 @@ function initRowMenu(){
       },
       applyTm: (i) => { applyTmToRow(i); },
       history: () => { openHistoryPicker(); },
+      historySave: () => { snapshotManual(); },
       clearRow: (i) => {
         transInputHandler(i, '');
         const r = rdr.getRow(i);
@@ -4616,6 +4788,82 @@ function openUtilityPanel(name){
   closeUtilityPanel();
   setWorkspaceMode(name);
 }
+
+/* ---------------- 剧场视图（只读） ----------------
+   实现方式：只切一个 body class，几何形态全部交给 CSS。
+   为什么不另建一套 DOM：虚拟滚动、行高模型、搜索高亮、术语高亮、行状态
+   都已经长在 .para 这棵树上；复制一份会立刻产生两套需要同步的渲染逻辑。
+   只读是刻意的 —— 可编辑版要与输入/防抖/撤销/IME 全链路耦合，成本翻倍。
+
+   进入时**自动关闭校对模式**：批注框、漏翻条纹这些是校对的语境，
+   在阅读视图里是噪音，且它们会把气泡撑变形。 */
+
+let theaterOn = false;
+
+function toggleTheaterMode(){
+  setTheaterMode(!theaterOn);
+}
+
+function setTheaterMode(on){
+  theaterOn = !!on;
+  // 与校对模式互斥：进剧场先退出校对，避免两套装饰叠加
+  if (on && proof.isEnabled()){
+    proof.setEnabled(false);
+    const pb = document.getElementById('btnProof');
+    pb.classList.remove('active');
+    pb.setAttribute('aria-pressed', 'false');
+    pb.textContent = '校对';
+    document.getElementById('proofbar').classList.add('hidden');
+    rdr.setNotesAutoOpen(false);
+    proof.setFilter('all');
+    document.querySelectorAll('.proof-filter').forEach(b => b.classList.toggle('active', b.dataset.pf === 'all'));
+    refreshProofUI();
+  }
+  document.body.classList.toggle('theater', theaterOn);
+  const btn = document.getElementById('btnTheater');
+  if (btn){
+    btn.classList.toggle('active', theaterOn);
+    btn.setAttribute('aria-pressed', String(theaterOn));
+    btn.textContent = theaterOn ? '剧场中' : '剧场';
+  }
+  rdr.refreshAllRows();   // 行高会变（字号/内距），需要重测
+  // ⚠️ refreshAllRows 里的 autoResize 读的是**当前** scrollHeight，而此刻刚加的
+  // body.theater 样式还没应用完（同一个任务内），量到的是旧字号下的高度。
+  // 下一帧再测一次：此时剧场字号已生效，气泡才能被内容正确撑开。
+  requestAnimationFrame(() => rdr.refreshAllRows());
+  showToast(theaterOn
+    ? '🎬 剧场视图（只读）。点击任意气泡可切回表格编辑。'
+    : '已退出剧场视图');
+}
+
+/** 当前是否在剧场视图（渲染器据此跳过那些只在编辑时有意义的同步） */
+function isTheater(){ return theaterOn; }
+
+/**
+ * 说话人 → 配色槽位（0 = 旁白/无色，1..3 对应 .sp-1/.sp-2/.sp-3）。
+ *
+ * 按**文档中首次出现的顺序**分配，保证同一角色全篇同色、且颜色不随滚动或
+ * 渲染顺序漂移（逐行临时算做不到这点）。缓存随文档切换失效。
+ * 只给前 3 个角色上色：再多的话配色区分度会低于可辨识阈值，不如统一色。
+ */
+let _speakerSlots = null;
+function speakerSlot(name){
+  if (!name) return 0;
+  if (!_speakerSlots){
+    _speakerSlots = new Map();
+    for (const p of model.getParas()){
+      if (p && p.name && !_speakerSlots.has(p.name)){
+        // 最多 3 个槽位；第 4 个及以后返回 0（无色，用默认样式）
+        if (_speakerSlots.size < 3) _speakerSlots.set(p.name, _speakerSlots.size + 1);
+        else _speakerSlots.set(p.name, 0);
+      }
+    }
+  }
+  return _speakerSlots.get(name) || 0;
+}
+
+/** 文档切换后失效说话人配色缓存 */
+function invalidateSpeakerSlots(){ _speakerSlots = null; }
 
 function toggleMorePanel(){
   const panel = document.getElementById('utilityPanel');
@@ -4995,6 +5243,13 @@ function initEvents(){
 
   // 校对模式
   document.getElementById('btnProof').addEventListener('click', toggleProofMode);
+  document.getElementById('btnTheater').addEventListener('click', toggleTheaterMode);
+  // 剧场视图是只读的：点任意气泡即切回表格编辑，不用先去找按钮。
+  // 事件委托挂在 #list（行是虚拟挂载的，逐行绑定会随滚动反复丢失）。
+  document.getElementById('list').addEventListener('click', (e) => {
+    if (!theaterOn) return;
+    if (e.target.closest('.para')) setTheaterMode(false);
+  });
   document.querySelectorAll('.proof-filter').forEach(b => {
     b.addEventListener('click', () => setProofFilter(b.dataset.pf));
   });
@@ -5051,6 +5306,10 @@ function initEvents(){
   document.getElementById('btnGlossExportCsv').addEventListener('click', glossExportCsv);
   document.getElementById('btnGlossApply').addEventListener('click', glossApply);
   document.getElementById('btnNormalize').addEventListener('click', normalizeApply);
+  document.getElementById('btnPersonaAdd').addEventListener('click', addPersonaEntry);
+  document.getElementById('personaAddName').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter'){ e.preventDefault(); addPersonaEntry(); }
+  });
 
   // 词典 / 快捷片段
   document.getElementById('btnDictLookup').addEventListener('click', () => doDictLookup(document.getElementById('dictInput').value));
