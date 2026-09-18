@@ -733,11 +733,25 @@ export function syncRow(i){
 }
 
 // 原文文本与译文 textarea 使用同一个可用宽度，保证两列在相同位置换行。
+/**
+ * 让原文文本与译文 textarea 使用同一个可用宽度，保证两列在相同位置换行。
+ *
+ * ⚠️ 剧场视图下**必须整体跳过**：剧场里 `.orig-cell` 是 `display:none`，
+ *    量到的 rect 全是 0，`transRect.left - origRect.left` 会算出垃圾位移
+ *    （实测 566px）并**作为 inline 样式留在元素上**；退出剧场后 `.orig` 重新可见，
+ *    那个残留的 left 会把它整体推出显示边界（实测右侧溢出 388px）。
+ *    原文此时本就不可见，宽度同步毫无意义，跳过是正确行为。
+ *
+ * ⚠️ 另一个已知坑：本函数写的是 inline 样式，所以**任何时候量到 0 都不能写回** ——
+ *    否则会把坏值永久留在元素上（下面 transRect.width <= 0 的守卫就是这个作用）。
+ */
 function syncOriginalWrapWidth(r){
-  if (!r?.orig || !r.trans || r.el.style.display === 'none') return;
+  if (!r?.orig || !r?.trans) return;
+  if (state.theater && state.theater()) return;
+  if (r.el.style.display === 'none') return;
   const origRect = r.orig.getBoundingClientRect();
   const transRect = r.trans.getBoundingClientRect();
-  if (transRect.width <= 0) return;
+  if (transRect.width <= 0 || origRect.width <= 0) return;
   r.orig.style.width = transRect.width + 'px';
   r.orig.style.position = 'relative';
   r.orig.style.left = (transRect.left - origRect.left) + 'px';
