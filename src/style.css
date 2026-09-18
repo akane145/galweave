@@ -4105,3 +4105,52 @@ button:active:not(:disabled){
 .offline-preview th, .offline-preview td { border-bottom: 1px solid var(--border); padding: 8px; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }
 .offline-format-section input:focus-visible, .offline-format-section textarea:focus-visible, .offline-format-section button:focus-visible, .offline-format-section select:focus-visible { outline: 2px solid var(--text-muted); outline-offset: 2px; }
 @media (max-width: 700px) { .offline-template-grid { grid-template-columns: 1fr; } }
+
+/* ── 多样例布局编辑器 ──
+   每个布局一张卡片；卡内是若干"原文 / 译文"成对的样例区。
+   窄屏下样例对改为上下堆叠（见文件末的媒体查询）。 */
+.of-layout{
+  border: 1px solid var(--border-soft); border-radius: var(--r-sm);
+  padding: var(--sp-2); margin-top: var(--sp-2); background: var(--bg-raised);
+}
+.of-layout-head{ display: flex; align-items: center; gap: var(--sp-2); }
+.of-layout-title{ flex: 1 1 auto; min-width: 0; font-weight: 600; }
+.of-layout-kind{ flex: 0 0 auto; max-width: 15em; }
+.of-layout-del{
+  flex: none; width: 28px; min-width: 28px; height: 28px; min-height: 28px;
+  padding: 0; border: 1px solid var(--border-soft); background: transparent;
+  color: var(--text-dim); cursor: pointer;
+}
+.of-layout-del:hover{ border-color: var(--danger); background: var(--danger); color: #fff; }
+
+.of-samples{ display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-2); }
+.of-sample-pair{ display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
+.of-sample{ display: flex; flex-direction: column; min-width: 0; }
+.of-sample label{ font-size: var(--fs-2xs); color: var(--text-dim); }
+.of-sample textarea{
+  display: block; width: 100%; margin: 4px 0; resize: vertical;
+  min-height: 68px; font-family: var(--font-mono); font-size: var(--fs-sm);
+}
+.of-mark-bar{ margin-top: 2px; }
+.of-mark-bar button{ padding: 0 var(--sp-2); font-size: var(--fs-2xs); }
+
+/* 已标注字段的胶囊：显示字段名与被标的文字，点击撤销 */
+.of-chips{ display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.of-chip{
+  border: 1px solid var(--st-pending-bd, rgba(154,103,0,.3));
+  background: var(--st-pending-bg, rgba(154,103,0,.14));
+  color: var(--st-pending-fg);
+  border-radius: var(--r-pill); padding: 1px var(--sp-2);
+  font-size: var(--fs-2xs); cursor: pointer;
+}
+.of-chip:hover{ filter: brightness(1.15); }
+
+/* 布局归纳状态：成功/冲突。冲突文案可能较长，允许换行。 */
+.of-layout-status{ flex: 1 1 100%; font-size: var(--fs-2xs); line-height: 1.5; white-space: pre-wrap; }
+.of-layout-status.ok{ color: var(--st-approved-fg); }
+.of-layout-status.bad{ color: var(--st-pending-fg); }
+
+@media (max-width: 700px) {
+  .of-sample-pair { grid-template-columns: 1fr; }
+  .of-layout-kind { max-width: 100%; }
+}

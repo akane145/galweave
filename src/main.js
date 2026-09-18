@@ -21,7 +21,7 @@ import { canonicalizeProfile, enrichDetectionProfile, isMirrorFormatText } from 
 
 const NO_MT_BUILD = import.meta.env.MODE === 'no-mt';
 import * as proof from './proof.js';
-import { chooseFormat, formatParas } from './offline-formats.js';
+import { chooseFormatAny, formatParas } from './offline-formats.js';
 import { initOfflineFormats, availableFormats } from './offline-formats-ui.js';
 import * as dictx from './dict.js';
 import { createMdxProvider, createPathMdxProvider, createTauriMdd, mimeFromExt, srcToResourceKey, isMddResourceSrc, linkTarget } from './mdx.js';
@@ -990,7 +990,8 @@ function migrateNameTranslations(paras){
 async function loadSource(file, name){
   const { content } = await fsx.readFileSource(file);
   const fname = name || (file.path ? file.path.split(/[\\/]/).pop() : '');
-  const matched = chooseFormat(content, await availableFormats());
+  // 版本无关的自动匹配：v1 与 v2 档案混在一批里也能匹配，仍要求唯一且无未识别
+  const matched = chooseFormatAny(content, await availableFormats());
   if (matched.length > 1) throw new Error('多个离线格式档案匹配此文件，请在解析规则中选择档案并预览载入。');
   if (matched.length === 1){
     const parsed = { paras: formatParas(matched[0]), nl: content.includes('\r\n') ? '\r\n' : '\n', trailingBlank: false };
