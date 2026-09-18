@@ -1,0 +1,69 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Galweave: 检查当前文件（自动选规则）",
+      "type": "shell",
+      "command": "node",
+      "args": [
+        "scripts/inspect.mjs",
+        "${file}"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Galweave: 检查当前文件（指定规则）",
+      "type": "shell",
+      "command": "node",
+      "args": [
+        "scripts/inspect.mjs",
+        "${file}",
+        "--config",
+        "${input:rulesFile}"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Galweave: 查看规则库",
+      "type": "shell",
+      "command": "node",
+      "args": [
+        "scripts/inspect.mjs",
+        "--list-rules"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "rulesFile",
+      "type": "promptString",
+      "description": "规则 JSON 路径（相对 vscode-extension 目录）",
+      "default": "rules/circle-inline-speaker.json"
+    }
+  ]
+}

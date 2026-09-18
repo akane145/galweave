@@ -1,0 +1,347 @@
+{
+  "name": "galweave-vscode",
+  "displayName": "Galweave",
+  "description": "视觉小说日译中辅助翻译 —— 原生编辑器内的原文/译文与人名/对话/旁白识别",
+  "version": "0.6.0",
+  "publisher": "galweave",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "./extension.cjs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/akane145/galweave.git",
+    "directory": "vscode-extension"
+  },
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=20"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "galweave.inspectDocument",
+        "title": "检查识别结果",
+        "category": "Galweave"
+      },
+      {
+        "command": "galweave.showRules",
+        "title": "查看规则库",
+        "category": "Galweave"
+      },
+      {
+        "command": "galweave.toggleHighlight",
+        "title": "开关语义着色",
+        "category": "Galweave"
+      },
+      {
+        "command": "galweave.gotoCounterpart",
+        "title": "跳到对应原文/译文行",
+        "category": "Galweave"
+      },
+      {
+        "command": "galweave.copyOrigToTrans",
+        "title": "复制原文到译文",
+        "category": "Galweave"
+      },
+      {
+        "command": "galweave.insertTransLine",
+        "title": "补上译文行",
+        "category": "Galweave"
+      },
+      {
+        "command": "galweave.clearTrans",
+        "title": "清空本行译文",
+        "category": "Galweave"
+      },
+      {
+        "command": "galweave.export",
+        "title": "导出译文",
+        "category": "Galweave"
+      },
+      {
+        "command": "galweave.recordBaseline",
+        "title": "记录原文基线",
+        "category": "Galweave"
+      },
+      {
+        "command": "galweave.clearBaseline",
+        "title": "清除原文基线",
+        "category": "Galweave"
+      },
+      {
+        "command": "galweave.toggleLock",
+        "title": "开关原文锁定",
+        "category": "Galweave"
+      },
+      {
+        "command": "galweave.lookupDict",
+        "title": "查词典",
+        "category": "Galweave"
+      },
+      {
+        "command": "galweave.checkEncoding",
+        "title": "检查文件编码",
+        "category": "Galweave"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "galweave.lookupDict",
+          "when": "editorTextFocus",
+          "group": "galweave@1"
+        },
+        {
+          "command": "galweave.gotoCounterpart",
+          "when": "editorTextFocus",
+          "group": "galweave@2"
+        },
+        {
+          "command": "galweave.copyOrigToTrans",
+          "when": "editorTextFocus",
+          "group": "galweave@3"
+        },
+        {
+          "command": "galweave.insertTransLine",
+          "when": "editorTextFocus",
+          "group": "galweave@4"
+        },
+        {
+          "command": "galweave.export",
+          "when": "editorTextFocus",
+          "group": "galweave@5"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "galweave.inspectDocument",
+        "key": "ctrl+alt+g",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "galweave.gotoCounterpart",
+        "key": "ctrl+alt+j",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "galweave.copyOrigToTrans",
+        "key": "ctrl+alt+t",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "galweave.insertTransLine",
+        "key": "ctrl+alt+n",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "galweave.lookupDict",
+        "key": "ctrl+alt+d",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "galweave.nextLine",
+        "key": "enter",
+        "when": "editorTextFocus && galweave.isScript && !suggestWidgetVisible && !inSnippetMode && !editorReadonly"
+      },
+      {
+        "command": "galweave.nextLine",
+        "key": "tab",
+        "when": "editorTextFocus && galweave.isScript && !suggestWidgetVisible && !inSnippetMode && !editorHasSelection && !editorReadonly"
+      },
+      {
+        "command": "galweave.prevLine",
+        "key": "shift+tab",
+        "when": "editorTextFocus && galweave.isScript && !suggestWidgetVisible && !inSnippetMode && !editorHasSelection && !editorReadonly"
+      },
+      {
+        "command": "galweave.blockEdit",
+        "key": "enter",
+        "when": "editorTextFocus && galweave.isScript && galweave.locked && galweave.editBlocked && !suggestWidgetVisible"
+      },
+      {
+        "command": "galweave.blockEdit",
+        "key": "type",
+        "when": "editorTextFocus && galweave.isScript && galweave.locked && galweave.editBlocked"
+      },
+      {
+        "command": "galweave.blockEdit",
+        "key": "ctrl+v",
+        "when": "editorTextFocus && galweave.isScript && galweave.locked && galweave.editBlocked"
+      },
+      {
+        "command": "galweave.blockEdit",
+        "key": "shift+insert",
+        "when": "editorTextFocus && galweave.isScript && galweave.locked && galweave.editBlocked"
+      },
+      {
+        "command": "galweave.blockEdit",
+        "key": "ctrl+x",
+        "when": "editorTextFocus && galweave.isScript && galweave.locked && galweave.editBlocked"
+      },
+      {
+        "command": "galweave.blockEdit",
+        "key": "shift+delete",
+        "when": "editorTextFocus && galweave.isScript && galweave.locked && galweave.editBlocked"
+      },
+      {
+        "command": "galweave.blockEdit",
+        "key": "backspace",
+        "when": "editorTextFocus && galweave.isScript && galweave.locked && galweave.blockBackspace"
+      },
+      {
+        "command": "galweave.blockEdit",
+        "key": "delete",
+        "when": "editorTextFocus && galweave.isScript && galweave.locked && galweave.blockDelete"
+      },
+      {
+        "command": "galweave.blockEdit",
+        "key": "ctrl+backspace",
+        "when": "editorTextFocus && galweave.isScript && galweave.locked && galweave.blockBackspace"
+      },
+      {
+        "command": "galweave.blockEdit",
+        "key": "ctrl+delete",
+        "when": "editorTextFocus && galweave.isScript && galweave.locked && galweave.blockDelete"
+      },
+      {
+        "command": "galweave.blockEdit",
+        "key": "ctrl+shift+k",
+        "when": "editorTextFocus && galweave.isScript && galweave.locked && galweave.editBlocked"
+      }
+    ],
+    "configuration": {
+      "title": "Galweave",
+      "properties": {
+        "galweave.autoHighlight": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "打开脚本文件时自动显示人名/对话/旁白着色。只对识别出段落的文件生效，普通代码文件不受影响。"
+        },
+        "galweave.exportEncoding": {
+          "type": "string",
+          "enum": [
+            "utf8",
+            "source"
+          ],
+          "enumDescriptions": [
+            "一律写 UTF-8（默认，与桌面版一致）：CSV 导出始终是 UTF-8 + BOM，不受此项影响",
+            "跟源文件同编码：源文件是 Shift-JIS 就写回 Shift-JIS —— 引擎只吃原编码时用这一项"
+          ],
+          "default": "utf8",
+          "markdownDescription": "导出文本时用什么编码写盘。\n\n默认 **UTF-8**（与桌面版写文件的行为一致）。改成 `source` 时跟源文件同编码 —— 引擎只肯读 Shift-JIS 时用它。\n\n注意：简体中文有大量汉字不在 JIS X 0208 里（实测仓库里 13 个样本的中文译文**全部**含有这种字，每个 27–72 个），所以 `source` 模式下这类译文会被**拒绝写盘**，并询问是否改用 UTF-8 —— 不会写出一堆问号。"
+        },
+        "galweave.rules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "追加到规则库的规则 JSON 文件（相对工作区根目录或绝对路径）。每个文档会自动选用最能解释它的那条规则，所以一个工作区里混着多种引擎格式也不用手动切换。"
+        },
+        "galweave.rulesFile": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "**强制**所有文档使用这一条规则，跳过自动选择。留空即自动选择。当自动选错时用它兜底。"
+        },
+        "galweave.highlight.maxParagraphs": {
+          "type": "number",
+          "default": 3000,
+          "markdownDescription": "单文档最多着色的段落数。超出部分不再着色（避免超大文件卡顿）。"
+        },
+        "galweave.lockOriginal": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "保护原文行：光标在原文行上（或选区覆盖到原文行）时，拦截键盘输入、粘贴、剪切、删除。\n\nVS Code 没有行级只读 API，这是接管输入命令实现的，覆盖不到拖拽文本与其他扩展写入 —— 所以还有一层原文基线比对兜底。命令面板执行「Galweave: 开关原文锁定」可临时解锁。"
+        },
+        "galweave.autoInsertTransLine": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "按 Enter / Tab 走到还没有译文行的段落时，自动按本文件规则补一条译文行，让「下一行」永远有可编辑的落点（与桌面版「每行都有输入框」一致）。关闭后光标会停在原文行上。"
+        },
+        "galweave.centerOnNavigate": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Enter / Tab 换行时把目标行滚到**视口正中**。逐行翻译时当前行始终在同一高度，不用来回扫。关闭后只在目标行跑出视口时才滚动。"
+        },
+        "galweave.mdxPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "MDX 词典文件路径（相对工作区根目录或绝对路径，可多个）。留空时自动在工作区里找 `**/*.mdx`。只支持 MDX，不支持 MDD（词条内嵌图片/音频）。"
+        },
+        "galweave.autoBaseline": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "首次识别到脚本时自动记录一次原文基线，让「原文被改动」这条检查默认就生效，不必先手动执行命令。已有基线时不会被覆盖。"
+        },
+        "galweave.diagnostics.enable": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "把结构问题（编号不匹配、段内多余行、编号重复、原文与基线不一致）报进「问题」面板。"
+        },
+        "galweave.diagnostics.consistency": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "启用术语与一致性检查：术语未应用、译名冲突、占位符丢失、标点异常。需要项目目录下有 `glossary.json`。"
+        },
+        "galweave.diagnostics.untranslated": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "把「未翻译」也报进「问题」面板。默认关闭 —— 新文件会刷满整屏。"
+        }
+      }
+    },
+    "colors": [
+      {
+        "id": "galweave.dialogueBackground",
+        "description": "对话行的背景色",
+        "defaults": {
+          "light": "#2979ff14",
+          "dark": "#4a9eff1f",
+          "highContrast": "#4a9eff40"
+        }
+      },
+      {
+        "id": "galweave.narrationBackground",
+        "description": "旁白行的背景色",
+        "defaults": {
+          "light": "#2e7d3214",
+          "dark": "#66bb6a1f",
+          "highContrast": "#66bb6a40"
+        }
+      },
+      {
+        "id": "galweave.nameBackground",
+        "description": "人名条目的背景色",
+        "defaults": {
+          "light": "#8e24aa14",
+          "dark": "#ba68c81f",
+          "highContrast": "#ba68c840"
+        }
+      },
+      {
+        "id": "galweave.untranslatedForeground",
+        "description": "未翻译标记的前景色",
+        "defaults": {
+          "light": "#c62828",
+          "dark": "#ef9a9a",
+          "highContrast": "#ff8a80"
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\"",
+    "package": "node scripts/package.mjs"
+  }
+}
