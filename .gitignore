@@ -53,7 +53,8 @@ scripts/snappy_*.ps1
 .superdesign/
 .workbuddy/
 MEMORY.md
-tasks/
+# 注: tasks/ 已于 2026-09-18 纳入版本控制（设计/实施记录，有保留价值）。
+#     该目录只放 .md 文档；临时产物请放各自目录并被忽略，不要再整体忽略 tasks/。
 obsidian-export.json
 test text/dc4ph/
 vscode-extension/.mimosa/

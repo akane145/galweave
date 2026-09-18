@@ -37,16 +37,13 @@
 - **Q6 机翻以逐行为主。** 上下文注入优先做单句链路；批次模式（`translateLinesBatched`）一次请求只能带一份语境，多角色混排会丢其余人设，属有意取舍。
 - **Q7 背景图需要保留。**
 
-## 仍待 master 确认
+## 项目事实（已固化）
 
-（无阻塞项。以下为可延后的字段。）
-
-## 待确认字段（模板默认值，需 master 校正）
-
-- 项目起始日期：_未确认_
-- 目标平台优先级：Windows（推断）/ macOS / Linux
-- 代码规范工具：**ESLint**（`eslint.config.mjs`，仅 `no-undef`(error) + `no-unused-vars`(warn)，不含格式化；`npm run lint`）。格式化工具仍未配置（Prettier 待定）
-- 测试命令：`npm test`（= `node --test "tests/*.test.mjs"`；注意 `node --test tests/` 在 Windows 上会参数解析失败）
+- **目标平台**：Windows x64（构建目标是 `nsis` + `msi`；macOS 与 Linux 未验证）
+- **代码规范工具**：**ESLint**（`eslint.config.mjs`，仅 `no-undef`(error) + `no-unused-vars`(warn)，不含格式化；`npm run lint`）。**不引入 Prettier** —— 引入会一次性重排大量既有文件、污染 `git blame`；现有约定够用
+- **测试命令**：`npm test`（= `node --test "tests/*.test.mjs"`；注意 `node --test tests/` 在 Windows 上会参数解析失败）
+- **文档分工**：`docs/` 放长期使用与维护文档；`tasks/` 放单个功能的设计与实施记录（完成后不删，取舍理由留档）
 
 ---
-_本文件由 agent 创建，字段待 master 确认后固化。_
+
+_本文件由 agent 创建并随项目演进维护；「已定前提」「项目事实」两节为固化内容，改动需在提交信息里说明理由。_
