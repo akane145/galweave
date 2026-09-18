@@ -10,6 +10,56 @@
 //   §8.5 L3 破坏性 —— 标题写具体后果、确认按钮 danger、默认焦点在取消、Esc=取消
 //   机翻比对 —— 原文（JP）| 机翻结果（ZH）并排，采用 / 放弃
 
+export function showAnnotationEditor(text){
+  const previousFocus = document.activeElement;
+  return new Promise(resolve => {
+    const { mask, modal } = mountModal(() => {
+      const el = document.createElement('div');
+      el.className = 'modal annotation-editor';
+      el.setAttribute('role', 'dialog');
+      el.setAttribute('aria-modal', 'true');
+      el.setAttribute('aria-labelledby', 'annotation-edit-title');
+      el.innerHTML = '<h3 id="annotation-edit-title" class="modal-title">编辑批注</h3>' +
+        '<label for="annotation-edit-text">批注内容</label>' +
+        '<textarea id="annotation-edit-text" rows="6" aria-describedby="annotation-edit-hint"></textarea>' +
+        '<p id="annotation-edit-hint" class="modal-body">Ctrl+Enter 保存，Esc 取消。批注不能为空。</p>' +
+        '<div class="actions"><button type="button" class="btn-cancel">取消</button>' +
+        '<button type="button" class="btn-confirm">保存</button></div>';
+      return el;
+    });
+    const input = modal.querySelector('textarea');
+    const cancel = modal.querySelector('.btn-cancel');
+    const save = modal.querySelector('.btn-confirm');
+    input.value = text;
+    const validate = () => { save.disabled = !input.value.trim(); };
+    validate();
+    input.addEventListener('input', validate);
+    let done = false;
+    const finish = value => {
+      if (done) return;
+      done = true;
+      unmount(mask);
+      if (previousFocus?.isConnected) previousFocus.focus();
+      resolve(value);
+    };
+    cancel.addEventListener('click', () => finish(null));
+    save.addEventListener('click', () => { if (input.value.trim()) finish(input.value.trim()); });
+    mask.addEventListener('mousedown', e => { if (e.target === mask) finish(null); });
+    mask.addEventListener('keydown', e => {
+      e.stopPropagation();
+      if (e.key === 'Escape'){ e.preventDefault(); finish(null); }
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.isComposing){ e.preventDefault(); save.click(); }
+      if (e.key === 'Tab'){
+        const focusable = [input, cancel, save].filter(el => !el.disabled);
+        const index = focusable.indexOf(document.activeElement);
+        e.preventDefault();
+        focusable[(index + (e.shiftKey ? -1 : 1) + focusable.length) % focusable.length].focus();
+      }
+    });
+    requestAnimationFrame(() => input.focus());
+  });
+}
+
 function esc(s){
   return String(s ?? '').replace(/[&<>"']/g, c => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
@@ -129,7 +179,7 @@ export function showMtCompare({ orig = '', result = '' } = {}){
 }
 
 /**
- * 历史版本选择器（ROADMAP P1-2）。
+ * 历史版本选择器。
  * 列出一份快照清单，选中一条后点「恢复」返回该条；取消 / Esc / 点遮罩返回 null。
  *
  * 与 showConfirm 的分工：本函数只负责"选哪一条"，**恢复本身是破坏性操作**，
@@ -215,7 +265,7 @@ export function showHistoryList({ title = '历史版本', intro = '', items = []
 }
 
 /**
- * 翻译进度统计面板（ROADMAP P2-4）。
+ * 翻译进度统计面板。
  * 只读展示，不接收回调 —— 数据由 stats.summarize() 算好后传进来，本函数不做推算。
  *
  * @param {Object} o

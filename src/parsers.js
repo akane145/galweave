@@ -9,6 +9,7 @@
    - commentPrefixes: 注释/元信息行前缀(如 #NOTTRANS 的 #),整行跳过不参与原文/译文
    - nameIdPatterns: 名字行编号判定正则(如 ^NAME、^[0-9A-Fa-f]+N$),命中即按名字行处理 */
 import { isMirrorFormatText } from './universal-parser.js';
+import { exportFormat } from './offline-formats.js';
 
 export const DEFAULT_COMMENT_PREFIXES = ['#', ';', '//', '%'];
 export const DEFAULT_NAME_ID_PATTERNS = ['^NAME', '^[0-9A-Fa-f]+N$'];
@@ -375,6 +376,11 @@ export function buildStarPrefix(p){
 // 规则: 原文行始终输出; NAME 条目始终输出 ★ 行; 普通行仅当译文有效时输出 ★ 行
 // trailingBlank: 原文件以空行结尾时保留末尾空行(保证无损还原)
 export function buildExport(paras, nl, trailingBlank){
+  if (paras.some(p => p.offlineKey !== undefined)){
+    const doc = paras[0]?.offlineDocument;
+    if (!doc || paras.some((p, i) => p.offlineKey !== doc.records[i]?.key)) throw new Error('格式档案记录顺序发生变化，已阻止回写');
+    return exportFormat(doc, paras);
+  }
   const lines = [];
   for (const p of paras){
     if (p.comments?.length) lines.push(...p.comments); // 注释行(如 #NOTTRANS/#0x 头)还原回原文行之前

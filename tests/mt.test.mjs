@@ -7,10 +7,10 @@ import assert from 'node:assert/strict';
 
 import {
   normalizeApiUrl, buildGptBody, parseGptResponse, parseSseLine, sseTextToChunks,
-  buildLlmSystemPrompt, buildLlmUserPrompt, buildLlmMessages,
+  buildLlmSystemPrompt, buildLlmUserPrompt, buildLlmMessages, buildContextBlock,
   detectSakuraPromptVersion, buildGlossaryText, buildSakuraMessagesV,
   migrateMtSettings, registerProvider, translateTextProtected, translateLinesBatched,
-  stripControlChars,
+  stripControlChars, translateText, setProviderConfig, resetLlmContext, getLlmContext,
   BATCH_MODES, BATCH_SIZE_MIN, BATCH_SIZE_MAX, BATCH_SIZE_DEFAULT,
   normalizeBatchMode, normalizeBatchSize, buildBatchUserText, parseNumberedLines,
 } from '../src/mt.js';
@@ -307,4 +307,178 @@ test('parseNumberedLines: 多出来的行被忽略（不破坏对齐），不影
   // 只要 1..n 齐全就算成功：多出的行没有序号归属，忽略它比整批失败更划算
   assert.deepEqual(parseNumberedLines('1. 甲\n2. 乙\n3. 丙', 2), ['甲', '乙']);
   assert.deepEqual(parseNumberedLines('以下是翻译：\n1. 甲\n2. 乙\n（完）', 2), ['甲', '乙']);
+});
+
+/* ---------------- 多轮上下文: 跨文档必须清空（回归钉桩） ---------------- */
+//
+// 背景: llmContext 是模块级全局，只由 ensureProviderConfigs / setProviderConfig 清空。
+// 打开或切换文档时若不重置，上一篇的最后几轮对白会被当成"上文"发给模型，
+// 造成人称、语气、称谓跨文件串味。main.js 在 finishLoadSource / afterDocActivated
+// 两处调用 resetLlmContext()，本组测试钉住 mt 侧的行为契约。
+
+/** 最小 localStorage/window/fetch 替身: settings.js 在非 Tauri 环境走 localStorage。 */
+function withMtEnv(fn){
+  const store = new Map();
+  const savedLS = globalThis.localStorage;
+  const savedFetch = globalThis.fetch;
+  const savedWindow = globalThis.window;
+  // isTauri() 读 window.__TAURI_INTERNALS__;置空即为"浏览器/Node 环境",走 localStorage 分支
+  globalThis.window = {};
+  globalThis.localStorage = {
+    getItem: k => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => { store.set(k, String(v)); },
+    removeItem: k => { store.delete(k); },
+  };
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    json: async () => ({ choices: [{ message: { content: '你好' } }] }),
+    text: async () => '',
+  });
+  return Promise.resolve(fn()).finally(() => {
+    globalThis.localStorage = savedLS;
+    globalThis.fetch = savedFetch;
+    globalThis.window = savedWindow;
+  });
+}
+
+test('resetLlmContext: 清空后上下文为空,且 getLlmContext 返回副本', async () => {
+  await withMtEnv(async () => {
+    resetLlmContext();
+    assert.deepEqual(getLlmContext(), []);
+    // 返回的必须是副本: 改动它不应影响内部状态
+    const snap = getLlmContext();
+    snap.push({ user: 'x', assistant: 'y' });
+    assert.deepEqual(getLlmContext(), []);
+  });
+});
+
+test('resetLlmContext: 翻译累积的上下文会被清空（跨文档泄漏的核心断言）', async () => {
+  await withMtEnv(async () => {
+    await setProviderConfig('llm', { baseUrl: 'http://127.0.0.1:9', model: 'm', contextTurns: 3 });
+    // setProviderConfig 自身会清空，起点应为空
+    assert.deepEqual(getLlmContext(), []);
+
+    await translateText('llm', 'おはよう', null);
+    const after = getLlmContext();
+    assert.equal(after.length, 1, '翻译一句后应累积 1 轮上下文');
+    assert.equal(after[0].user, 'おはよう');
+    assert.equal(after[0].assistant, '你好');
+
+    // 模拟"切换文档" —— main.js 正是这样调的
+    resetLlmContext();
+    assert.deepEqual(getLlmContext(), [], '换文档后必须为空,否则上一篇对白会串进下一篇');
+  });
+});
+
+test('resetLlmContext: 上下文按 contextTurns 滚动,不会无限增长', async () => {
+  await withMtEnv(async () => {
+    await setProviderConfig('llm', { baseUrl: 'http://127.0.0.1:9', model: 'm', contextTurns: 2 });
+    for (const t of ['a', 'b', 'c', 'd']) await translateText('llm', t, null);
+    const ctx = getLlmContext();
+    assert.equal(ctx.length, 2, 'contextTurns=2 时只保留最近 2 轮');
+    assert.deepEqual(ctx.map(c => c.user), ['c', 'd']);
+  });
+});
+
+test('resetLlmContext: contextTurns=0 时完全不累积上下文', async () => {
+  await withMtEnv(async () => {
+    await setProviderConfig('llm', { baseUrl: 'http://127.0.0.1:9', model: 'm', contextTurns: 0 });
+    await translateText('llm', 'おはよう', null);
+    assert.deepEqual(getLlmContext(), [], '关闭多轮上下文时不应留下任何历史');
+  });
+});
+
+/* ---------------- 语境参考块（前后文注入，F-②③④） ---------------- */
+
+test('buildContextBlock: 含邻居时给出参考段并写明"只输出目标句"', () => {
+  const block = buildContextBlock([
+    { orig: 'おはよう', translation: '早上好', status: 'approved' },
+    { orig: '今日はいい天気だ', translation: '', status: 'todo', current: true },
+    { orig: 'そうだね', translation: '是啊', status: 'pending' },
+  ]);
+  assert.match(block, /只用于理解语境/);
+  assert.match(block, /只输出【本次要翻译的是这一句】/);
+  assert.match(block, /おはよう/);
+  assert.match(block, /早上好/);
+  assert.match(block, /今日はいい天気だ/);
+  assert.match(block, /そうだね/);
+});
+
+test('buildContextBlock: 标注状态让模型知道哪些邻居可信', () => {
+  const block = buildContextBlock([
+    { orig: 'あ', translation: '甲', status: 'approved' },
+    { orig: 'い', translation: '乙', status: 'pending' },
+    { orig: 'う', status: 'todo', current: true },
+  ]);
+  assert.match(block, /已定稿/);
+  assert.match(block, /待校对/);
+});
+
+test('buildContextBlock: 未翻译的邻居标出"尚未翻译",不放空行', () => {
+  const block = buildContextBlock([
+    { orig: 'あ', status: 'todo' },
+    { orig: 'い', current: true },
+  ]);
+  assert.match(block, /尚未翻译/);
+});
+
+test('buildContextBlock: 只有当前句 → 返回空串（没有语境就不发这一段）', () => {
+  assert.equal(buildContextBlock([{ orig: 'あ', current: true }]), '');
+  assert.equal(buildContextBlock([]), '');
+  assert.equal(buildContextBlock(null), '');
+});
+
+test('buildContextBlock: 空原文的项被跳过', () => {
+  const block = buildContextBlock([
+    { orig: '   ', translation: 'x' },
+    { orig: 'あ', translation: '甲' },
+    { orig: 'い', current: true },
+  ]);
+  assert.ok(!block.includes('   \n'));
+  assert.match(block, /あ/);
+});
+
+test('buildLlmUserPrompt: 语境段在术语段与原文之前', () => {
+  const p = buildLlmUserPrompt('本文', 'A<|sep|>A译', 'CTXBLOCK');
+  assert.ok(p.startsWith('CTXBLOCK'), '语境应在最前');
+  const iCtx = p.indexOf('CTXBLOCK');
+  const iGloss = p.indexOf('术语');
+  const iText = p.indexOf('本文');
+  assert.ok(iCtx < iGloss && iGloss < iText, '顺序应为 语境 → 术语 → 原文');
+});
+
+test('buildLlmUserPrompt: 无语境时行为与既有版本一致（向后兼容）', () => {
+  assert.equal(buildLlmUserPrompt('本文', ''), '本文');
+  assert.equal(buildLlmUserPrompt('本文', 'G'), '翻译时请将以下术语按要求翻译：\nG\n\n本文');
+  assert.equal(buildLlmUserPrompt('本文', '', ''), '本文');
+});
+
+test('buildLlmMessages: 多轮历史与语境块同时生效且互不覆盖', () => {
+  const msgs = buildLlmMessages('本文', '', 'SYS', [{ user: 'u1', assistant: 'a1' }], 'CTX');
+  assert.equal(msgs.length, 4);                       // system + 1 轮历史(2) + 当前
+  assert.equal(msgs[0].content, 'SYS');
+  assert.equal(msgs[1].content, 'u1');
+  assert.equal(msgs[2].content, 'a1');
+  assert.match(msgs[3].content, /CTX/);
+  assert.match(msgs[3].content, /本文/);
+});
+
+test('buildLlmMessages: 省略 contextBlock 时不产生空语境段（向后兼容）', () => {
+  const msgs = buildLlmMessages('本文', '', 'SYS', []);
+  assert.equal(msgs.length, 2);
+  assert.equal(msgs[1].content, '本文');
+});
+
+test('buildSakuraMessagesV: 语境前置且不改动官方模板结构', () => {
+  const msgs = buildSakuraMessagesV('本文', '', 'v1.0', 'CTX');
+  assert.equal(msgs.length, 2);
+  assert.ok(msgs[1].content.startsWith('CTX'), '语境应在 user 消息最前');
+  assert.match(msgs[1].content, /将下面的日文文本翻译成中文：本文/, '官方模板部分保持原样');
+});
+
+test('buildSakuraMessagesV: 无语境时与既有行为一致（向后兼容）', () => {
+  const a = buildSakuraMessagesV('本文', '', 'v1.0');
+  const b = buildSakuraMessagesV('本文', '', 'v1.0', '');
+  assert.deepEqual(a, b);
+  assert.equal(a[1].content, '将下面的日文文本翻译成中文：本文');
 });

@@ -6,7 +6,7 @@
 // 两类结果汇入同一个「漏翻/异常清单」UI（main.js renderMissingList），因此本模块
 // **不重复报 proof 已覆盖的情形**：空译文、照抄原文一律跳过，交回 proof 报。
 //
-// 四类检查（对应 docs/ROADMAP.md P1-1）：
+// 四类检查：
 //   term           源句含术语表词条，译文却没用约定译名
 //   name-conflict  同一源名在本篇出现多个不同译名
 //   token          源文里的数字 / 【…】占位符在译文里缺失
@@ -16,8 +16,10 @@
 //    所以每条阈值都写死成常量、都配单测，且一律**宁漏报不误报**。
 
 import { transValue } from './parsers.js';
+import { checkKinjiru, kinjiruLabel } from './textnorm.js';
+import { tokenizeInline } from './universal-parser.js';
 
-/* ---------------- 阈值（改动需同步 docs/ROADMAP.md 与单测） ---------------- */
+/* ---------------- 阈值（改动需同步 docs/DEVELOPMENT.md 维护契约与单测） ---------------- */
 
 /** 单字词条不做"未应用"检查 —— 「私」「你」「僕」这类命中率过高，纯噪音 */
 export const MIN_TERM_LEN = 2;
@@ -29,6 +31,8 @@ export const MAX_TOKEN_HITS_PER_ROW = 3;
 export const MAX_PUNCT_HITS_PER_ROW = 3;
 /** 【…】里超过这个长度就不当占位符（多半是正文，不是 token） */
 export const MAX_BRACKET_LEN = 20;
+/** 每行最多报几处避头尾问题（一条译文里换行很多时不该刷满胶囊） */
+export const MAX_KINJIRU_HITS_PER_ROW = 2;
 
 /** 全部检查类别，顺序 = 清单里的展示顺序 */
 export const QA_KINDS = ['term', 'name-conflict', 'token', 'punct'];
@@ -213,6 +217,66 @@ export function punctMisses(p){
   return out;
 }
 
+/* ---------------- 控制符核对（手动编辑） ---------------- */
+
+/**
+ * 手改译文时核对引擎控制符：原文里有的记号，译文里该在的还在不在。
+ *
+ * 为什么需要：机翻链路的控制符保护已经很严密（universal-parser 的遮蔽 + 还原 +
+ * 严格性分级，mt.js 在破坏时直接拒绝写入），但**手动编辑那条路完全不校验**
+ * （transInputHandler 直接赋值）。译者挪断点、改语序时敲坏或误删 [r] / <r> /
+ * %p…; 这类记号，脚本行为就变了，而且不会有任何提示。
+ *
+ * 判定刻意保守（沿用本文件的"宁漏报不误报"）：
+ *   - 只比**控制符的多重集合**，不要求顺序 —— 中文语序调整后记号位置本就该变
+ *     （universal-parser.js 也明确写了"译文断行要随中文长度重排"）。
+ *   - 只报"译文里比原文**少**"的记号（丢失/敲坏）；多出来的一律不报，
+ *     因为译者可能有意加断行标签来适配对话框。
+ *   - 全角误输（[r] 敲成 ［ｒ］）是丢失的常见成因，单独给出提示措辞。
+ *
+ * @returns {Array<{ch:string, role:string, count:number, fullwidth:boolean}>}
+ */
+export function controlMisses(p){
+  const c = checkable(p);
+  if (!c) return [];
+  const src = tokenizeInline(c.src).filter(t => t.protected);
+  if (!src.length) return [];                 // 原文没有控制符 → 无从漏起
+
+  const tv = c.tv;
+  const tvTokens = tokenizeInline(tv).filter(t => t.protected);
+
+  // 归一化键：大小写不敏感（[R] 与 [r] 是同一个记号）
+  const key = v => String(v).toLowerCase();
+  const have = new Map();
+  for (const t of tvTokens) have.set(key(t.value), (have.get(key(t.value)) || 0) + 1);
+
+  // 全角误输检测：把译文里的全角括号/字母折成半角再试一次，命中则是"敲成全角"而非真丢了
+  const folded = tv.replace(/［/g, '[').replace(/］/g, ']')
+    .replace(/[＜]/g, '<').replace(/[＞]/g, '>')
+    .replace(/[Ａ-Ｚａ-ｚ０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0));
+  const foldedHave = new Map();
+  for (const t of tokenizeInline(folded).filter(x => x.protected)) {
+    foldedHave.set(key(t.value), (foldedHave.get(key(t.value)) || 0) + 1);
+  }
+
+  const need = new Map();
+  for (const t of src) need.set(key(t.value), (need.get(key(t.value)) || 0) + 1);
+
+  const out = [];
+  for (const [k, n] of need){
+    const got = have.get(k) || 0;
+    if (got >= n) continue;                    // 够用
+    const orig = src.find(t => key(t.value) === k);
+    out.push({
+      ch: orig ? orig.value : k,
+      role: orig ? orig.role : 'command',
+      count: n - got,
+      fullwidth: (foldedHave.get(k) || 0) >= n, // 折半角后够了 → 多半是敲成全角
+    });
+  }
+  return out;
+}
+
 /* ---------------- 汇总 ---------------- */
 
 /**
@@ -251,4 +315,55 @@ export function analyzeQA(paras, gloss){
 
   const total = out.term.length + out['name-conflict'].length + out.token.length + out.punct.length;
   return { ...out, total };
+}
+
+/* ---------------- 单行入口（行级实时门禁） ---------------- */
+
+/**
+ * 单行 QA：判一行有没有术语未用 / 占位符缺失 / 标点异常。
+ *
+ * 供行级实时门禁调用（renderer 的行内胶囊）。**判定与阈值全部复用上面的
+ * termMisses / tokenMisses / punctMisses，不另设一套标准** —— 实时化若放宽阈值，
+ * 行视图会立刻被噪音淹没，这条纪律见文件头的"宁漏报不误报"。
+ *
+ * 不含 name-conflict：那一项按定义就是跨行统计（同一源名的多个译名），
+ * 单行范围内无法判定，由批量 analyzeQA 负责。
+ *
+ * @param {object} p 单行
+ * @param {Array} entries termEntries() 的产物（调用方缓存，勿逐行重建）
+ * @returns {{issues:Array, total:number, term:object|null}}
+ *          issues 扁平列表，每项带 kind；term 为第一条"术语未应用"（供一键填入），无则 null
+ */
+export function analyzeRowQA(p, entries){
+  const issues = [];
+  // termMisses 面向 paras 数组（内部自行 checkable），传单元素数组即可复用同一套判定
+  for (const t of termMisses([p], Array.isArray(entries) ? entries : [])){
+    issues.push({ kind: 'term', term: t.term, expect: t.expect });
+  }
+  for (const t of tokenMisses(p)){
+    issues.push({ kind: 'token', tokenType: t.type, value: t.value });
+  }
+  for (const x of punctMisses(p)){
+    issues.push({ kind: 'punct', ch: x.ch, suggest: x.suggest, unbalanced: !!x.unbalanced });
+  }
+  // 避头尾：只在译者自己按的换行处判断（自动折行归引擎管，报出来是噪音）。
+  // 与上面几类共用同一个胶囊，不另造 UI —— 同一条译文的问题集中在一处提示。
+  const c = checkable(p);
+  if (c){
+    let kHits = 0;
+    for (const k of checkKinjiru(c.tv)){
+      if (kHits >= MAX_KINJIRU_HITS_PER_ROW) break;
+      kHits++;
+      issues.push({ kind: 'kinjiru', ch: k.ch, lineKind: k.kind, label: kinjiruLabel(k) });
+    }
+    // 控制符核对（手动编辑链路的口子，机翻链路由 universal-parser 保护）
+    for (const m of controlMisses(p)){
+      issues.push({ kind: 'control', ch: m.ch, role: m.role, count: m.count, fullwidth: m.fullwidth });
+    }
+  }
+  return {
+    issues,
+    total: issues.length,
+    term: issues.find(x => x.kind === 'term') || null,
+  };
 }

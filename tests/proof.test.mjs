@@ -7,7 +7,7 @@ import * as model from '../src/model.js';
 import { makePara } from '../src/parsers.js';
 import {
   STATUS, resetState, setEnabled, setFilter, statusOf, unresolvedCount,
-  toggleApprove, toggleIssue, addAnnotation, resolveAnnotation, deleteAnnotation,
+  toggleApprove, toggleIssue, addAnnotation, updateAnnotation, resolveAnnotation, deleteAnnotation,
   demoteApproved, recordChange, snapshot, recordDiff, restoreChange,
   stats, rowPassesFilter, getChanges, collect, setKeys, proofKeys, defaultKeys,
   analyzeRow, analyzeRows, noteInput, settleInput, restoreState, snapshotState,
@@ -83,6 +83,23 @@ test('demoteApproved: 文本变化 → 已通过失效', () => {
 });
 
 /* ---------------- 修改记录 ---------------- */
+
+test('编辑批注保留身份、类型、创建时间和解决状态，并保存新内容', () => {
+  model.setParas(paras3());
+  resetState();
+  const a = addAnnotation(0, 'issue', '旧内容');
+  resolveAnnotation(0, a.id);
+  const original = { ...a };
+  assert.equal(updateAnnotation(0, a.id, '  新内容\n第二行  '), true);
+  assert.equal(a.text, '新内容\n第二行');
+  for (const key of ['id', 'type', 'created', 'resolved', 'resolvedAt']) assert.equal(a[key], original[key]);
+  assert.equal(statusOf(0), STATUS.PENDING);
+  assert.equal(collect().annotations[model.getPara(0).orig].annotations[0].text, a.text);
+  assert.equal(updateAnnotation(0, a.id, ' \n '), false);
+  assert.equal(updateAnnotation(0, 'missing', '新内容'), false);
+  assert.equal(updateAnnotation(999, a.id, '新内容'), false);
+  assert.equal(a.text, '新内容\n第二行');
+});
 
 test('recordChange: 仅校对模式开启时记录;字段/来源正确', () => {
   model.setParas(paras3());

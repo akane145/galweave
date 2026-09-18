@@ -8,7 +8,9 @@ import { getParas } from './model.js';
 import { createRowHeightModel } from './virtuallist.js';
 import { currentToken } from './suggest.js';
 import { byteCount, usageLevel, formatByteTitle, encodingLabel, normalizeEncoding } from './bytes.js';
+import { visualWidth, widthLevel, formatWidthTitle, suggestBreak, formatWidth } from './width.js';
 import { rowStatusInfo } from './rowstatus.js';
+import { analyzeRowQA } from './qa.js';
 
 const ROW_MAX = 400;    // textarea 最大高度(px)
 const BUFFER = 10;      // 视口两侧预挂载的可见行数
@@ -58,9 +60,15 @@ let state = {
   onProofAnnoAdd: null,    // (i, type, text)
   onProofAnnoResolve: null,// (i, annoId)
   onProofAnnoDelete: null, // (i, annoId)
+  onProofAnnoEdit: null,   // (i, annoId)
   onProofSessionEnd: null, // (i) 译文/译名失焦 → 结算修改记录
   // 漏翻/异常行判定(main.js 注入): (i) => 'missing'|'placeholder'|'ratio'|null
   rowIssueKind: null,
+  // 行级术语一致性门禁(main.js 注入):
+  //   qaEntries 返回缓存的 termEntries() 结果 —— 必须由调用方缓存,逐行重建会退化成 O(行数×词条数)
+  //   issueDetail 把一条问题说成人话(复用侧栏清单同一套文案,避免两处措辞不一致)
+  qaEntries: () => [],
+  issueDetail: null,       // (issue) => string
   // 输入建议与划词查词(main.js 注入)
   getSuggestions: null,    // (token) => [{kind:'term'|'snippet', src, dst}]
   onSuggestionApply: null, // (i, item) 采纳建议(替换光标前词元)
@@ -336,6 +344,47 @@ function buildRow(i){
   byteMeter.append(byteNum, byteTotal, byteEnc);
   byteMeter.setAttribute('aria-live', 'off');
 
+  // 显示宽度指示器（width.js）：与本行的字节计同排，回答"这一行放不放得下"。
+  // 字节回答"占多少字节"，宽度回答"占几个全角字位"——引擎按字形宽度排版，
+  // 两者会得出不同结论（60 个半角数字 = 60 字节但只有 30 个字位）。
+  // 同一套 ok/mid/near/over 四态与 CSS 配色，用户不必学第二套视觉语言。
+  // 超限时给折行建议（悬停可见），点一下把建议断点处的换行符插进译文。
+  const widthMeter = document.createElement('div');
+  widthMeter.className = 'width-meter';
+  widthMeter.dataset.level = 'ok';
+  const widthNum = document.createElement('b');
+  widthNum.className = 'width-num';
+  const widthTotal = document.createElement('span');
+  widthTotal.className = 'width-total';
+  const widthUnit = document.createElement('span');
+  widthUnit.className = 'width-unit';
+  widthUnit.textContent = '字位';
+  widthMeter.append(widthNum, widthTotal, widthUnit);
+  widthMeter.setAttribute('aria-live', 'off');
+
+  // 行级术语门禁胶囊(qa.js): 原文命中术语表、译文却没用约定译名时提示,点一下填入该术语。
+  // 位置在 .row-status 之后、.byte-meter 之前 —— 与行状态、字数计同属"这一行怎么样"的即时信号。
+  // 判定与阈值全部复用 qa.js,不另设标准;点按只做"把术语插到光标处",不擅自改写整句译文。
+  //
+  // ⚠️ 常态用 visibility（保留占位）而不是 hidden（display:none）：本行是 flex 行里除 textarea
+  //    之外唯一会随时增减的项，一旦让它收起，textarea 就会吃掉/吐出这几十像素，
+  //    再经 syncOriginalWrapWidth 传导给 .orig —— 打字时原文会跟着重新折行。
+  //    与 .copy-btn / .byte-meter 的既有约定一致（都是常态占位、按需显隐）。
+  const qaCapsule = document.createElement('button');
+  qaCapsule.className = 'qa-capsule';
+  qaCapsule.type = 'button';
+  const qaGlyph = document.createElement('span');
+  qaGlyph.className = 'qa-glyph';
+  qaGlyph.textContent = '◈';
+  const qaText = document.createElement('span');
+  qaText.className = 'qa-text';
+  qaCapsule.append(qaGlyph, qaText);
+  qaCapsule.addEventListener('click', (e) => {
+    e.preventDefault();
+    const q = rows[i] && rows[i].qaTerm;
+    if (q && q.expect) insertTermAtCursor(i, q.expect);
+  });
+
   // ---- 事件(仅创建时绑定一次) ----
   nameInput.addEventListener('input', () => {
     if (state.onNameInput) state.onNameInput(i, nameInput.value);
@@ -504,11 +553,11 @@ function buildRow(i){
     if (hit && state.onTermClick) state.onTermClick(i, hit.getAttribute('data-dst') || '');
   });
 
-  rows[i] = { el: row, num, pid, origCaption, origName, orig, nameInput, trans: input, bOpen, bClose, copy: copyBtn, inputRow, translationBlock, transCaption, speakerPlate, prBadge, btnApprove, btnIssue, btnNotes, notes, notesType, notesInput, notesList, proofRow, byteMeter, byteNum, byteTotal, byteEnc, statusPill, rsGlyph, rsLabel };
+  rows[i] = { el: row, num, pid, origCaption, origName, orig, nameInput, trans: input, bOpen, bClose, copy: copyBtn, inputRow, translationBlock, transCaption, speakerPlate, prBadge, btnApprove, btnIssue, btnNotes, notes, notesType, notesInput, notesList, proofRow, byteMeter, byteNum, byteTotal, byteEnc, widthMeter, widthNum, widthTotal, widthUnit, statusPill, rsGlyph, rsLabel, qaCapsule, qaGlyph, qaText, qaTerm: null };
   // 原文阅读层 → 译者角色名牌 + 译文创作层 → 校对上下文。
   speakerPlate.append(nameInput);
-  inputRow.append(input, copyBtn, statusPill);
-  translationBlock.append(transCaption, speakerPlate, inputRow, byteMeter);
+  inputRow.append(input, copyBtn, statusPill, qaCapsule);
+  translationBlock.append(transCaption, speakerPlate, inputRow, byteMeter, widthMeter);
   body.append(origCell, translationBlock, proofRow);
   row.append(num, body);
   insertRowDom(i, row); // 窗口化渲染: 按下标序插入挂载区
@@ -543,6 +592,14 @@ function renderNotesList(i, r){
     meta.className = 'pr-anno-meta';
     meta.textContent = fmtAnnoTime(a.created);
     item.append(tag, text, meta);
+    if (state.onProofAnnoEdit){
+      const btn = document.createElement('button');
+      btn.className = 'pr-btn pr-anno-edit';
+      btn.textContent = '编辑';
+      btn.title = '编辑该批注';
+      btn.addEventListener('click', () => state.onProofAnnoEdit(i, a.id));
+      item.appendChild(btn);
+    }
     if (!a.resolved && state.onProofAnnoResolve){
       const btn = document.createElement('button');
       btn.className = 'pr-btn pr-anno-resolve';
@@ -639,6 +696,8 @@ export function syncRow(i){
   const uc = (p.pr && p.pr.annotations) ? p.pr.annotations.filter(a => !a.resolved).length : 0;
   r.prBadge.textContent = uc ? String(uc) : '';
   updateByteMeter(r);
+  updateWidthMeter(r);
+  updateRowQA(i, r);
   r.prBadge.classList.toggle('show', uc > 0);
   r.btnNotes.textContent = '📝' + (uc ? ' ' + uc : '');
   r.btnApprove.classList.toggle('on', st === 'approved');
@@ -1021,6 +1080,38 @@ export function setByteLimit(limit){
   for (const r of Object.values(rows)) if (r && r.byteMeter) { r.byteMeter.classList.remove("breathe"); updateByteMeter(r); }
 }
 
+/* ---------------- 显示宽度上限（与字节计同构） ---------------- */
+
+// 上限读自 CSS 变量 --width-limit，读一次缓存；setWidthLimit() 失效缓存。
+// 与 byteLimit 完全同构：同一套"0 = 未配置 = 隐藏"，避免两套语义。
+let _widthLimit = null;
+function widthLimit(){
+  if (_widthLimit === null){
+    const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--width-limit'));
+    _widthLimit = Number.isFinite(v) && v > 0 ? v : 0;
+  }
+  return _widthLimit;
+}
+
+/** 当前显示宽度上限（0 = 未配置，指示器隐藏），供设置界面回填 */
+export function getWidthLimit(){
+  return widthLimit();
+}
+
+/**
+ * 设置显示宽度上限（单位：全角字位）。写回 :root 的 `--width-limit`。
+ *
+ * ⚠️ 与 setByteLimit 同样的坑：`0` 是**显式"不校验"**，必须写成内联 `--width-limit:0`，
+ * 不能 removeProperty —— 移除内联覆盖会退回样式表默认值，用户选了关闭又被开启。
+ */
+export function setWidthLimit(limit){
+  const n = Number(limit);
+  if (!Number.isFinite(n) || n < 0) return;
+  document.documentElement.style.setProperty('--width-limit', String(Math.round(n)));
+  _widthLimit = null;
+  for (const r of Object.values(rows)) if (r && r.widthMeter) updateWidthMeter(r);
+}
+
 // 计数口径：默认 UTF-8，可在「主题与字体 → 文本排印」切换为 Shift-JIS（设置项持久化）。
 let _byteEnc = 'utf8';
 
@@ -1050,6 +1141,111 @@ function updateByteMeter(r){
   if (r.byteEnc.textContent !== enc) r.byteEnc.textContent = enc;
   const title = formatByteTitle(n, limit, _byteEnc);
   if (r.byteMeter.title !== title) r.byteMeter.title = title;
+}
+
+/**
+ * 刷新某行的显示宽度指示器。
+ *
+ * 与 updateByteMeter 同构（四态 data-level + 数字/上限），差别有两点：
+ *   1. 单位是"全角字位"而非字节，由 width.js 按字形宽度累计；
+ *   2. 超限时**给出折行建议位置** —— 这是本项相对字节计的真正增量。
+ *      只在 over 时算建议（suggestBreak 要遍历字符串，没必要每行都跑）。
+ *
+ * ⚠️ 建议**纯提示、不代填**：折行符的写法随引擎而异（[r] / <r> / \n …），
+ *    master 已定不做引擎预设，工具不该替用户猜该插哪一种。给出"断在哪个字位"
+ *    即可，怎么断由译者按目标引擎决定。
+ */
+function updateWidthMeter(r){
+  if (!r || !r.widthMeter) return;
+  const limit = widthLimit();
+  r.widthMeter.hidden = limit <= 0;         // 未配置上限就不显示，避免无意义的 0/0
+  if (limit <= 0) return;
+  const text = r.trans.value || '';
+  const w = visualWidth(text);
+  const lv = widthLevel(w, limit);
+  if (r.widthMeter.dataset.level !== lv) r.widthMeter.dataset.level = lv;
+  const numTxt = formatWidth(w);
+  if (r.widthNum.textContent !== numTxt) r.widthNum.textContent = numTxt;
+  const totTxt = '/ ' + limit;
+  if (r.widthTotal.textContent !== totTxt) r.widthTotal.textContent = totTxt;
+  let title = formatWidthTitle(w, limit);
+  const brk = lv === 'over' ? suggestBreak(text, limit) : null;
+  if (brk){
+    title += '\n建议在第 ' + formatWidth(visualWidth(brk.before)) + ' 字位后折行'
+      + '\n断点前：「' + brk.before + '」'
+      + '\n断点后：「' + brk.after + '」';
+  }
+  if (r.widthMeter.title !== title) r.widthMeter.title = title;
+}
+
+/* ---------------- 行级术语门禁 ---------------- */
+
+/**
+ * 刷新某行的术语/占位符/标点提示胶囊。
+ *
+ * 判定复用 qa.js 的 analyzeRowQA（同一套阈值，"宁漏报不误报"）；词条表由
+ * state.qaEntries() 提供且**必须已缓存** —— 本函数在窗口化渲染的每次 syncRow 里都会跑，
+ * 逐行重建 termEntries 会把滚动退化成 O(行数 × 词条数)。
+ *
+ * 不额外做防抖：单词条的比对开销远小于同一次 syncRow 里已有的 innerHTML 重建，
+ * 且编辑时即时反馈正是这一项的价值（译名一打进去提示就消失）。
+ */
+function updateRowQA(i, r){
+  if (!r || !r.qaCapsule) return;
+  const p = state.paras()[i];
+  // 该行数据缺失时清空，避免卸载/换文档后残留上一行的提示
+  if (!p){
+    r.qaTerm = null;
+    r.qaCapsule.classList.remove('show');
+    return;
+  }
+  const entries = state.qaEntries ? state.qaEntries() : [];
+  const q = (entries && entries.length) ? analyzeRowQA(p, entries) : { issues: [], total: 0, term: null };
+  r.qaTerm = q.term;                 // 供点击时取用（一键填入）
+  const shown = q.total > 0;
+  r.qaCapsule.classList.toggle('show', shown);
+  if (!shown) return;
+  const label = String(q.total);
+  if (r.qaText.textContent !== label) r.qaText.textContent = label;
+  // 文案复用侧栏清单的 issueDetail，保证同一问题在两处说法一致
+  const lines = state.issueDetail ? q.issues.map(x => state.issueDetail(x)).filter(Boolean) : [];
+  const tip = lines.length ? lines.join('\n') : ('本行有 ' + q.total + ' 处术语/标点提示');
+  const full = q.term ? (tip + '\n（点击把「' + q.term.expect + '」插入光标处）') : tip;
+  if (r.qaCapsule.title !== full) r.qaCapsule.title = full;
+  r.qaCapsule.setAttribute('aria-label', '第 ' + (i + 1) + ' 行术语提示：' + (lines[0] || full));
+}
+
+/**
+ * 术语表非空时为所有行**预留**胶囊占位。
+ *
+ * 预留是为了让译文框宽度恒定：胶囊平时不可见但占位，出现/消失都不会挤动 textarea，
+ * 原文因此不会跟着重新折行。术语表为空时整项不占位，避免从不用术语表的用户
+ * 平白少掉一截译文宽度。
+ */
+export function setQaEnabled(on){
+  if (list) list.classList.toggle('has-qa', !!on);
+}
+
+/**
+ * 把术语插入译文的**光标处**（有选区则替换），随后走既有输入链路。
+ *
+ * 只做插入、不改写整句：漏译该放句首还是句尾需要译者判断，工具不该替他决定。
+ * 关键走 state.onTransInput 而非直接赋值 —— 撤销栈、修改记录、自动存档、
+ * 影子同步都挂在那条链路上，绕过它会让这一笔改动"不可撤销"。
+ */
+function insertTermAtCursor(i, text){
+  const r = rows[i];
+  if (!r || !r.trans || !text) return;
+  const el = r.trans;
+  const v = el.value;
+  const s = Number.isFinite(el.selectionStart) ? el.selectionStart : v.length;
+  const e = Number.isFinite(el.selectionEnd) ? el.selectionEnd : s;
+  const next = v.slice(0, s) + text + v.slice(e);
+  const caret = s + text.length;
+  el.value = next;
+  if (state.onTransInput) state.onTransInput(i, next);
+  el.focus();
+  try { el.setSelectionRange(caret, caret); } catch (err) { /* 只读/已卸载时忽略 */ }
 }
 
 // 呼吸只在最后活动的那一行触发：其余行的指示器本来就不显示，没必要排队。

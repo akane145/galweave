@@ -1,13 +1,29 @@
 // settings.js — 应用设置(解析规则 / 机翻配置)
 // 存储: 桌面端写入软件目录(与 exe 同目录)的 settings.json;浏览器降级用 localStorage。
 // 结构: { parse: { open, close, regex }, mt: { provider, ... } }
+//
+// ⚠️ 本文件只放**小体积**设置。浏览器端 localStorage 有 ~5MB 硬配额，写满即失败，
+//    且失败会连带影响同一 blob 里的所有设置（主题、字体、上限一起丢）。
+//    大块数据（背景图等）一律走 IndexedDB，见下方「背景图设置」。
 
-import { isTauri } from './fs.js';
+import { isTauri, kvGet, kvPut, kvDel } from './fs.js';
 
 const LS_KEY = 'galtrans_settings_v1';
 const FILE = 'settings.json';
 
 let cache = null;
+
+/** localStorage 配额超限判定（各浏览器 code/name 不一致，全部兜一遍） */
+export function isQuotaError(e){
+  if (!e) return false;
+  return e.name === 'QuotaExceededError'
+    || e.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+    || e.code === 22 || e.code === 1014;
+}
+
+/** 配额超限时给用户看的说法：说清原因与可操作的出路，而不是裸的 DOMException */
+export const QUOTA_HINT = '设置保存失败：浏览器本地存储已满（约 5MB）。'
+  + '请在浏览器设置里清理本站数据，或改用桌面版（设置写入文件，没有此上限）。';
 
 async function readFile(){
   if (isTauri()){
@@ -19,13 +35,27 @@ async function readFile(){
   try { return JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (e) { return null; }
 }
 
+/**
+ * 写设置文件，**从不抛异常**，返回 { ok, error? }。
+ *
+ * 设置保存散落在十余处调用点（主题/字体/上限/收藏/机翻配置…），任何一处抛出去
+ * 都会打断用户当前正在做的事，而多数调用点并不关心中间失败。故改为返回状态：
+ * 不关心的调用点照旧忽略返回值，关心的（如背景图保存）可以据此提示用户。
+ */
 async function writeFile(obj){
   if (isTauri()){
-    const { writeAppFile } = await import('./fs.js');
-    await writeAppFile(FILE, JSON.stringify(obj, null, 2));
-    return;
+    try {
+      const { writeAppFile } = await import('./fs.js');
+      await writeAppFile(FILE, JSON.stringify(obj, null, 2));
+      return { ok: true };
+    } catch (e){ return { ok: false, error: e }; }
   }
-  localStorage.setItem(LS_KEY, JSON.stringify(obj));
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(obj));
+    return { ok: true };
+  } catch (e){
+    return { ok: false, error: isQuotaError(e) ? new Error(QUOTA_HINT) : e };
+  }
 }
 
 /** 加载设置(内存缓存) */
@@ -38,10 +68,10 @@ export async function loadSettings(){
   return cache;
 }
 
-/** 保存设置(更新缓存) */
+/** 保存设置(更新缓存)。返回 { ok, error? }；写失败不抛异常，见 writeFile 说明。 */
 export async function saveSettings(s){
   cache = s;
-  await writeFile(s);
+  return await writeFile(s);
 }
 
 export function clearSettingsCache(){ cache = null; }
@@ -50,27 +80,55 @@ export function clearSettingsCache(){ cache = null; }
 export function defaultParse(){ return { open: '☆', close: '★', regex: '' }; }
 
 /* ---------------- 背景图设置 ---------------- */
+//
+// 背景图是 base64 data URL，动辄数 MB。放在 settings 里会顶爆浏览器 localStorage 的
+// 配额，把主题、字体等一并拖没；桌面端则会把 settings.json 撑成几十万行、不再可读。
+// 因此**图片本体存 IndexedDB**（`ui:background` 键），settings 里只留不占空间的显示参数。
+//
+// 桌面版同样走 IndexedDB（WebView2 支持；fs.js 的进度存储已有"文件优先、IndexedDB 兜底"
+// 的同款先例）。kvGet/kvPut/kvDel 内部自吞异常，不可用时静默降级，不会打断启动流程。
+
+const BG_KEY = 'ui:background';
 
 /**
- * 保存背景图(base64 data URL)与显示设置。
- * fit: cover=铺满裁剪(默认) / contain=完整显示 / stretch=拉伸铺满 / tile=平铺 / auto=原始大小居中
+ * 保存背景图(base64 data URL)与显示设置。dataUrl 传空 = 移除背景。
+ * @returns {{ok:boolean, error?:Error}} 设置部分的写盘状态（图片写 IndexedDB，失败静默）
  */
 export async function saveBackground(dataUrl, opacity, fit){
   const s = await loadSettings();
   if (!s.ui) s.ui = {};
-  s.ui.background = dataUrl || null;
+  if (dataUrl){
+    await kvPut(BG_KEY, { dataUrl });
+    s.ui.hasBackground = true;
+  } else {
+    await kvDel(BG_KEY);
+    s.ui.hasBackground = false;
+  }
+  delete s.ui.background; // 旧字段一律清掉，避免两份副本各占一份空间
   s.ui.backgroundOpacity = opacity !== undefined ? opacity : 0.82;
   s.ui.backgroundFit = fit || 'cover';
-  await saveSettings(s);
-  return s.ui;
+  return await saveSettings(s);
 }
 
 /** 读取背景图设置 → { dataUrl, opacity, fit } */
 export async function loadBackground(){
   const s = await loadSettings();
   const ui = s.ui || {};
+  const rec = await kvGet(BG_KEY);
+  let dataUrl = (rec && typeof rec.dataUrl === 'string') ? rec.dataUrl : null;
+
+  // 迁移：旧版把整张图存在 settings.ui.background 里 → 搬到 IndexedDB 并从设置里抹掉。
+  // 仅在 IndexedDB 尚无图时搬，避免把新图覆盖回旧图。
+  if (!dataUrl && typeof ui.background === 'string' && ui.background){
+    dataUrl = ui.background;
+    await kvPut(BG_KEY, { dataUrl });
+    delete ui.background;
+    ui.hasBackground = true;
+    await saveSettings(s);
+  }
+
   return {
-    dataUrl: ui.background || null,
+    dataUrl,
     opacity: ui.backgroundOpacity !== undefined ? ui.backgroundOpacity : 0.82,
     fit: ui.backgroundFit || 'cover'
   };
@@ -79,7 +137,8 @@ export async function loadBackground(){
 /** 清除背景图(保留用户选的 fit 值,重设时沿用) */
 export async function clearBackground(){
   const s = await loadSettings();
-  if (s.ui) { s.ui.background = null; s.ui.backgroundOpacity = 0.82; }
+  await kvDel(BG_KEY);
+  if (s.ui) { delete s.ui.background; s.ui.hasBackground = false; s.ui.backgroundOpacity = 0.82; }
   await saveSettings(s);
 }
 
@@ -189,6 +248,43 @@ export async function saveByteEncoding(enc){
   const s = await loadSettings();
   if (!s.ui) s.ui = {};
   s.ui.byteEncoding = enc;
+  await saveSettings(s);
+}
+
+/**
+ * 读取显示宽度上限（单位：全角字位）。未设置返回 null（调用方用 width.WIDTH_LIMIT_DEFAULT）。
+ * 存 settings.ui.widthLimit；0 / 非法值语义是"不设上限"，由 width.normalizeWidthLimit 判。
+ * 与 byteLimit 完全同构——两者是"字数校验"的两把不同尺子，用法必须一致。
+ */
+export async function loadWidthLimit(){
+  const s = await loadSettings();
+  return (s.ui && Number.isFinite(Number(s.ui.widthLimit))) ? Number(s.ui.widthLimit) : null;
+}
+
+/** 保存显示宽度上限到 settings.ui.widthLimit */
+export async function saveWidthLimit(limit){
+  const s = await loadSettings();
+  if (!s.ui) s.ui = {};
+  s.ui.widthLimit = limit;
+  await saveSettings(s);
+}
+
+/**
+ * 读取机翻语境句数（当前句前后各取几句作为上下文参考）。
+ * 未设置返回 null（调用方用默认 2）；0 = 显式关闭。
+ * 存 settings.ui.mtAround —— 刻意不放进 mt.providers：它作用于**两个** provider，
+ * 而 providers 是分引擎存的，放进去会出现"切引擎后语境设置不一致"。
+ */
+export async function loadMtAround(){
+  const s = await loadSettings();
+  return (s.ui && Number.isFinite(Number(s.ui.mtAround))) ? Number(s.ui.mtAround) : null;
+}
+
+/** 保存机翻语境句数到 settings.ui.mtAround */
+export async function saveMtAround(n){
+  const s = await loadSettings();
+  if (!s.ui) s.ui = {};
+  s.ui.mtAround = n;
   await saveSettings(s);
 }
 

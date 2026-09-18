@@ -473,7 +473,9 @@ export async function savedState(name){
   if (f) return f;
   const v = await idbGet(name);
   if (v !== undefined) return v;
-  // 兼容旧版 localStorage 进度
+  // 兼容旧版 localStorage 进度：**只读**兜底，当前版本已不再写入此键。
+  // 刻意保留 —— 它不占配额压力（读不写），却能让 v5.0 及更早版本升上来的用户
+  // 仍拿到"是否恢复上次进度"的提示；删掉等于悄悄丢掉这部分人的进度。
   try {
     const o = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
     return o[name];

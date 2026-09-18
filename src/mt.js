@@ -267,20 +267,62 @@ export function buildLlmSystemPrompt(custom){
     .replace('{tgtlang}', 'Chinese');
 }
 
-/** 用户消息正文: 术语表段 + 原文 */
-export function buildLlmUserPrompt(text, glossaryText){
+/** 用户消息正文: 语境参考段 + 术语表段 + 原文 */
+export function buildLlmUserPrompt(text, glossaryText, contextBlock){
+  const ctx = contextBlock ? (contextBlock + '\n\n') : '';
   const gloss = glossaryText ? '翻译时请将以下术语按要求翻译：\n' + glossaryText + '\n\n' : '';
-  return gloss + String(text);
+  return ctx + gloss + String(text);
 }
 
-/** 构造 messages: system + 多轮历史 + 当前 user */
-export function buildLlmMessages(text, glossaryText, systemPrompt, history){
+/* ---------------- 语境参考块（前后文注入） ----------------
+   与「多轮历史」(llmContext) 是**两种不同的注入语义**，刻意分开：
+     · 多轮历史：把上一轮的原文/译文作为对话轮次喂回，模型看到的是"我们刚才聊过什么"；
+     · 语境参考块：把眼前这几句的邻居**同一批**发给模型，让它知道"这句处在什么上下文里"。
+   合并成一个机制会丢掉两者各自的语义（尤其批量翻译时历史轮次是错位的）。 */
+
+/** 单条语境行的状态标注：让模型知道哪些邻居已经定稿、哪些还没定 */
+const CTX_STATUS = { approved: '已定稿', pending: '待校对', todo: '未翻译', issue: '有问题' };
+
+/**
+ * 构造语境参考块。
+ *
+ * @param {Array<{orig:string, translation?:string, status?:string, current?:boolean}>} items
+ *        按**文档顺序**排列的邻居行（含当前行时给它 current: true）
+ * @returns {string} 可直接拼进提示词的文本；无可注入内容时返回 ''
+ */
+export function buildContextBlock(items){
+  const list = Array.isArray(items) ? items : [];
+  const rows = [];
+  let hasNeighbor = false;
+  for (const it of list){
+    if (!it) continue;
+    const orig = String(it.orig == null ? '' : it.orig).trim();
+    if (!orig) continue;
+    if (it.current){
+      rows.push('【本次要翻译的是这一句】\n' + orig);
+      continue;
+    }
+    hasNeighbor = true;
+    const tr = String(it.translation == null ? '' : it.translation).trim();
+    const st = CTX_STATUS[it.status] || '';
+    rows.push('· ' + orig
+      + (tr ? '\n  译文：' + tr : (st === CTX_STATUS.todo ? '\n  （尚未翻译）' : ''))
+      + (st ? '（' + st + '）' : ''));
+  }
+  if (!hasNeighbor) return '';   // 只有当前句 = 没有语境可参考，不要平白发一段
+  return '以下是上下文的参考，**只用于理解语境**（人物关系、称谓、语气、前后呼应）。\n'
+    + '请只输出【本次要翻译的是这一句】那一条的译文，不要翻译或复述其余内容：\n\n'
+    + rows.join('\n');
+}
+
+/** 构造 messages: system + 多轮历史 + 当前 user(带语境与术语) */
+export function buildLlmMessages(text, glossaryText, systemPrompt, history, contextBlock){
   const messages = [{ role: 'system', content: systemPrompt }];
   for (const t of history || []){
     messages.push({ role: 'user', content: t.user });
     messages.push({ role: 'assistant', content: t.assistant });
   }
-  messages.push({ role: 'user', content: buildLlmUserPrompt(text, glossaryText) });
+  messages.push({ role: 'user', content: buildLlmUserPrompt(text, glossaryText, contextBlock) });
   return messages;
 }
 
@@ -371,12 +413,16 @@ export function buildSakuraUserTextV(text, glossaryText, version){
   return buildSakuraUserText(text, glossaryText);
 }
 
-/** OpenAI 兼容消息数组(按版本) */
-export function buildSakuraMessagesV(text, glossaryText, version){
+/** OpenAI 兼容消息数组(按版本)。contextBlock 非空时前置为语境段。 */
+export function buildSakuraMessagesV(text, glossaryText, version, contextBlock){
   const v = version || 'v1.0';
+  const body = buildSakuraUserTextV(text, glossaryText, v);
+  // Sakura 各版本的 user 模板是官方固定形状，**不改结构**，只在前面对一段语境说明。
+  // 后接换行分隔，避免语境段与模板指令黏成一句被模型误读。
+  const content = contextBlock ? (contextBlock + '\n\n' + body) : body;
   return [
     { role: 'system', content: sakuraSystemForVersion(v) },
-    { role: 'user', content: buildSakuraUserTextV(text, glossaryText, v) }
+    { role: 'user', content }
   ];
 }
 
@@ -543,18 +589,20 @@ export function extractQuoteContent(text){
 }
 
 /** Sakura 核心调用(按配置版本构造提示词;流式时 onChunk 逐块回调) */
-async function sakuraTranslateCore(text, glossary, onChunk){
+async function sakuraTranslateCore(text, glossary, onChunk, context){
   const conf = currentSakuraConf();
   if (!conf.host) throw new Error('尚未配置 Sakura 本地服务。请先打开「⚙ 机翻配置」。');
   const version = resolveSakuraVersion(conf.promptVersion, conf.model);
   const gt = (conf.useGlossary && glossary && version !== 'v0.9')
     ? buildGlossaryText(glossary.names, glossary.terms, version) : '';
   const content = extractQuoteContent(text);
+  // 语境只发「」内正文对应的邻居原文即可；context 由调用方按文档顺序组织好
+  const ctx = context || '';
   return chatCompletions({
     base: conf.host,
     apiKey: '',
     model: conf.model || 'sakura',
-    messages: buildSakuraMessagesV(content, gt, version),
+    messages: buildSakuraMessagesV(content, gt, version, ctx),
     params: { temperature: conf.temperature, topP: conf.topP, maxTokens: conf.maxTokens },
     streaming: !!(conf.streaming && onChunk),
     onChunk,
@@ -564,18 +612,18 @@ async function sakuraTranslateCore(text, glossary, onChunk){
 }
 
 /** 翻译入口(供 UI 调用): 携带当前项目术语表;对话只发「」内原文 */
-export async function sakuraTranslate(text, glossary){
-  return sakuraTranslateCore(text, glossary, null);
+export async function sakuraTranslate(text, glossary, context){
+  return sakuraTranslateCore(text, glossary, null, context);
 }
 
 const SakuraProvider = {
   id: 'sakura',
   name: 'Sakura 本地',
   isConfigured(){ const c = configs.sakura; return !!(c && c.host); },
-  async translate(text, glossary, onChunk){ return sakuraTranslateCore(text, glossary, onChunk); },
-  async translateBatch(texts, glossary){
+  async translate(text, glossary, onChunk, context){ return sakuraTranslateCore(text, glossary, onChunk, context); },
+  async translateBatch(texts, glossary, context){
     const out = [];
-    for (const t of texts) out.push(await sakuraTranslateCore(t, glossary, null)); // 串行
+    for (const t of texts) out.push(await sakuraTranslateCore(t, glossary, null, context)); // 串行
     return out;
   }
 };
@@ -588,6 +636,18 @@ registerProvider(SakuraProvider);
 
 let llmContext = []; // 多轮上下文滚动历史 {user, assistant}
 
+/**
+ * 清空多轮上下文。
+ *
+ * llmContext 是模块级全局，**不随文档切换自动失效**：换文件后若不清空，上一篇的
+ * 最后几轮对白会被当作"上文"发给模型，造成人称、语气、称谓跨文件串味。
+ * 调用时机：打开/切换文档（main.js 在文档激活处调用）、改动 LLM 配置（本模块内部）。
+ */
+export function resetLlmContext(){ llmContext = []; }
+
+/** 当前多轮上下文快照（副本）。供 UI 观察与单测断言，避免直接暴露可变内部数组。 */
+export function getLlmContext(){ return llmContext.map(t => ({ ...t })); }
+
 const LlmProvider = {
   id: 'llm',
   name: '通用大模型',
@@ -595,7 +655,7 @@ const LlmProvider = {
     const c = configs.llm;
     return !!(c && c.baseUrl && c.model);
   },
-  async translate(text, glossary, onChunk){
+  async translate(text, glossary, onChunk, context){
     const conf = configs.llm || LLM_DEFAULTS;
     if (!conf.baseUrl || !conf.model) throw new Error('尚未配置通用大模型接口。请在「⚙ 机翻配置」中填写接口地址与模型。');
     const system = buildLlmSystemPrompt(conf.systemPrompt);
@@ -608,7 +668,7 @@ const LlmProvider = {
       base: conf.baseUrl,
       apiKey: conf.apiKey,
       model: conf.model,
-      messages: buildLlmMessages(content, gt, system, history),
+      messages: buildLlmMessages(content, gt, system, history, context || ''),
       params: {
         temperature: conf.temperature,
         topP: conf.topP,
@@ -624,9 +684,9 @@ const LlmProvider = {
     }
     return out;
   },
-  async translateBatch(texts, glossary){
+  async translateBatch(texts, glossary, context){
     const out = [];
-    for (const t of texts) out.push(await this.translate(t, glossary, null)); // 串行,批量复用上下文
+    for (const t of texts) out.push(await this.translate(t, glossary, null, context)); // 串行,批量复用上下文
     return out;
   }
 };
@@ -634,10 +694,10 @@ const LlmProvider = {
 registerProvider(LlmProvider);
 
 /** 翻译一段文本。未配置时抛错,由调用方提示用户。onChunk 可选(流式逐块)。 */
-export async function translateText(providerId, text, glossary, onChunk){
+export async function translateText(providerId, text, glossary, onChunk, context){
   const p = getProvider(providerId) || NotConfiguredProvider;
   if (!p.isConfigured()) throw new Error('尚未配置机器翻译服务。请在「⚙ 机翻配置」中配置。');
-  return p.translate(text, glossary, onChunk);
+  return p.translate(text, glossary, onChunk, context);
 }
 
 /** 受保护 token 出错时的中文说法（换行类丢失已在 restoreProtectedTokens 内回填，不在错误里）。 */
@@ -673,12 +733,12 @@ export function stripControlChars(text){
 }
 
 /** 翻译正文并严格保护 Galgame 行内控制标签；标签异常时拒绝返回可写入结果。 */
-export async function translateTextProtected(providerId, text, glossary){
+export async function translateTextProtected(providerId, text, glossary, context){
   const mask = maskProtectedTokens(text);
   // 双向清洗：控制字符（含换行）不进模型，也不进译文。
   // 此时引擎标签已被遮蔽成占位符（占位符本身不含控制字符），清洗不伤保护体系；
   // 批量协议的换行在逐行清洗**之后**才拼装，所以也不会被误删。
-  const translated = await translateText(providerId, stripControlChars(mask.text), glossary);
+  const translated = await translateText(providerId, stripControlChars(mask.text), glossary, null, context);
   const restored = restoreProtectedTokens(stripControlChars(String(translated)), mask);
   if (!restored.ok){
     const detail = [...new Set(restored.errors.map(describeTokenError))].join('、');
@@ -688,10 +748,10 @@ export async function translateTextProtected(providerId, text, glossary){
 }
 
 /** 批量翻译。未配置时抛错。 */
-export async function translateBatch(providerId, texts, glossary){
+export async function translateBatch(providerId, texts, glossary, context){
   const p = getProvider(providerId) || NotConfiguredProvider;
   if (!p.isConfigured()) throw new Error('尚未配置机器翻译服务。请在「⚙ 机翻配置」中配置。');
-  return p.translateBatch(texts, glossary);
+  return p.translateBatch(texts, glossary, context);
 }
 
 /* ============================================================

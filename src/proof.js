@@ -108,6 +108,18 @@ export function addAnnotation(i, type, text){
   return anno;
 }
 
+export function updateAnnotation(i, id, text){
+  if (typeof text !== 'string' || !text.trim()) return false;
+  const a = model.getPara(i)?.pr?.annotations?.find(x => x.id === id);
+  if (!a) return false;
+  const next = text.trim();
+  if (a.text === next) return true;
+  a.text = next;
+  a.updated = Date.now();
+  touch(i);
+  return true;
+}
+
 export function resolveAnnotation(i, id){
   const pr = prOf(i);
   if (!pr) return;

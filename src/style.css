@@ -124,6 +124,7 @@
   --ctrl-h:26px;
   --row-pad-y:12px;
   --byte-limit:120;   /* 依赖阻塞项 Q3，默认 NScripter 常见值 */
+  --width-limit:30;   /* 显示宽度上限（全角字位）。不做引擎预设，30 是中性起点，用户按目标调整 */
 
   /* ── 滚动条 ── */
   --scroll-thumb:#333A48;
@@ -911,7 +912,7 @@ dialog.obsidian-export::backdrop{ background:rgba(0,0,0,.6) }
 .dict-lookup-row{ display:flex; gap:var(--sp-1); margin-bottom:var(--sp-2)}
 .dict-lookup-row input{ flex:1 1 auto; min-width:0 }
 
-/* ── 最近查询（ROADMAP P2-5）：chip 行，点击重查 ── */
+/* ── 最近查询：chip 行，点击重查 ── */
 .dict-history{
   display:flex; flex-wrap:wrap; align-items:center; gap:var(--sp-1);
   margin-bottom:var(--sp-2);
@@ -2844,6 +2845,61 @@ kbd{ border-radius:0; background:transparent; color:var(--smoke); font-size:var(
 .byte-meter[data-level="over"]{ color:var(--st-issue-fg); }
 .byte-meter[data-level="over"] .byte-num{ font-weight:600; }
 
+/* ── 显示宽度指示器（width.js）──
+   与字节计同排、同构：回答"这一行放不放得下"。
+   字节答"占多少字节"，宽度答"占几个全角字位"——引擎按字形宽度排版，两者会不同
+   （60 个半角数字 = 60 字节，但只有 30 个字位）。超限时 title 里给折行建议位置。
+
+   常态与字节计一致地隐藏（:hover / .active 才露出），避免 2000 行全是数字的噪音。 */
+.width-meter{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:4px;
+  margin:calc(var(--sp-1) * -1) 0 0 auto;   /* 紧跟字节计之下，收掉重复间距 */
+  padding-left:var(--sp-2);
+  opacity:0;
+  color:var(--text-dim);
+  font-family:var(--font-mono);
+  font-size:var(--fs-2xs);
+  font-variant-numeric:tabular-nums;   /* 位数变化时宽度不能跳 */
+  line-height:1.4;
+  transition:opacity var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.para:hover .width-meter,
+.para.active .width-meter{ opacity:1; }
+.width-meter[hidden]{ display:none; }   /* 未配置上限 → 不占位（display:flex 会盖掉 [hidden]） */
+
+/* 2px 色条：与字节计同一视觉语言，进入 near 才出现 */
+.width-meter::before{
+  width:0;
+  height:10px;
+  border-radius:1px;
+  background:currentColor;
+  content:"";
+  transition:width var(--t-fast) var(--ease);
+}
+.width-meter[data-level="near"]::before,
+.width-meter[data-level="over"]::before{ width:2px; }
+.width-num{ font-weight:400; }
+.width-unit{ opacity:.7; }
+
+/* 四段阈值：与字节计同一套配色（复用 --st-* 语义色，不新造色板） */
+.width-meter[data-level="ok"]{ color:var(--text-dim); }
+.width-meter[data-level="mid"]{ color:var(--text-mid); }
+.width-meter[data-level="near"]{ color:var(--st-pending-fg); }
+.width-meter[data-level="over"]{ color:var(--st-issue-fg); }
+.width-meter[data-level="over"] .width-num{ font-weight:600; }
+
+/* 输入框底边：宽度超限也用虚线区分于字节超限的实线 —— 两种超限原因不同，
+   视觉上要能分辨"字节超了"还是"字位超了"（也可能同时超，实线优先）。 */
+.para:has(.width-meter[data-level="over"]) textarea.trans{
+  border-bottom:1px dashed var(--st-issue);
+}
+.para:has(.byte-meter[data-level="over"]) textarea.trans{
+  border-bottom-style:solid;
+}
+
 /* 输入框底边随阈值收紧：超限用 1px 实线，不用更粗的边框——粗边框会顶动行高 */
 .para:has(.byte-meter[data-level="near"]) textarea.trans{ border-bottom-color:var(--border-strong); }
 .para:has(.byte-meter[data-level="over"]) textarea.trans{
@@ -2883,6 +2939,41 @@ kbd{ border-radius:0; background:transparent; color:var(--smoke); font-size:var(
 .row-status.rs-pending{   color:var(--st-pending-fg);  background:var(--st-pending-bg,  rgba(154,103,0,.14));  border-color:var(--st-pending-bd,  rgba(154,103,0,.30)); }
 .row-status.rs-issue{     color:var(--st-issue-fg);                                                      background:var(--st-issue-bg);                                                       border-color:var(--st-issue-bd); }
 .row-status.rs-approved{  color:var(--st-approved-fg);                                                   background:var(--st-approved-bg);                                                    border-color:var(--st-approved-bd); }
+
+/* ── 行级术语门禁胶囊（qa.js）──
+   原文命中术语表、译文却没用约定译名时，出现在 .row-status 之后、.byte-meter 之前。
+   与行状态 pill 同形（形状编码 ◈ + 数字，不靠色区分），但**可点**：点一下把该术语
+   插到译文光标处。用橙色提示级，与 proof 的红色"漏翻"条纹区分开——漏译是错，
+   术语没用多半是还没顾上，两者不该长成一样。
+
+   ⚠️ 常态 `visibility:hidden` 而**不是** display:none —— 必须保留占位。
+   它是 .row-input 这个 flex 行里除 textarea 外唯一会随时增减的项；一旦让它收起，
+   textarea 就会吃掉/吐出这几十像素，而 .orig 的宽度是跟着 textarea 走的
+   （renderer.js 的 syncOriginalWrapWidth），于是**打字时原文会跟着重新折行**。
+   同为按需出现的 .copy-btn / .byte-meter 也都是常态占位、只切 opacity，遵守同一约定。
+
+   占位只在术语表非空时才保留（#list.has-qa）：从不用术语表的用户不该平白少一截宽度。 */
+.qa-capsule{
+  flex:none; align-self:center;
+  display:inline-flex; align-items:center; gap:4px;
+  /* 必须显式压 min-height：button 全局带 min-height:var(--control-h)(34px)，
+     不压就会被顶到 34px，比旁边的 .row-status(18px) 高出一截（见文件头控件高度两档的说明）。 */
+  height:18px; min-height:18px; padding:0 8px; margin-left:6px;
+  border-radius:var(--r-pill);
+  border:1px solid var(--st-pending-bd, rgba(154,103,0,.30));
+  background:var(--st-pending-bg, rgba(154,103,0,.14));
+  color:var(--st-pending-fg);
+  font:var(--fs-2xs)/1 var(--font-ui);
+  white-space:nowrap; cursor:pointer; user-select:none;
+  visibility:hidden;   /* 占位不显示；visibility 同时把它移出 Tab 次序与读屏 */
+}
+/* 术语表为空 → 整项不占位（display:none 才是对的，此时不需要宽度稳定） */
+#list:not(.has-qa) .qa-capsule{ display:none; }
+.qa-capsule.show{ visibility:visible; }
+.qa-capsule .qa-glyph{ font-size:10px; line-height:1; }
+.qa-capsule .qa-text{ font-weight:var(--fw-600, 600); }
+.qa-capsule.show:hover{ filter:brightness(1.15); }
+.qa-capsule.show:active{ transform:translateY(1px); }
 
 /* ══════════════════════════════════════════════════════════════
    P2-4 控件六态统一
@@ -3034,7 +3125,7 @@ button:active:not(:disabled){
 
 .modal.mt-compare{ width:min(680px, calc(100vw - 32px)) }
 
-/* ── 翻译进度统计面板（ROADMAP P2-4）── */
+/* ── 翻译进度统计面板 ── */
 .modal.stats-panel{ width:min(600px, calc(100vw - 32px)) }
 .modal.stats-panel .modal-title{ margin:0 0 var(--sp-4); color:var(--text); font-size:var(--fs-md); font-weight:600 }
 .modal.stats-panel .modal-body{ margin:var(--sp-3) 0 0; color:var(--text-muted); font-size:var(--fs-xs); line-height:1.7 }
@@ -3069,7 +3160,7 @@ button:active:not(:disabled){
 .stats-col i.empty{ background:color-mix(in srgb, var(--text-dim) 34%, transparent) }
 .stats-col b{ margin-top:3px; color:var(--quiet); font-size:9px; font-weight:500; font-variant-numeric:tabular-nums }
 
-/* ── 机翻对比视图（ROADMAP P2-7）：改动模式分类卡 + 明细行 ── */
+/* ── 机翻对比视图：改动模式分类卡 + 明细行 ── */
 .mt-diff-summary{
   display:flex; flex-wrap:wrap; gap:var(--sp-2);
   margin-bottom:var(--sp-2); padding:var(--sp-2) var(--sp-3);
@@ -3094,7 +3185,7 @@ button:active:not(:disabled){
 .mt-row .mt-text.mt-after{ color:var(--text) }
 
 
-/* ── 历史版本选择器（ROADMAP P1-2）──
+/* ── 历史版本选择器 ──
    与统计面板同属"信息型模态"，共用 .modal.confirm 的标题/正文/按钮样式。 */
 .modal.history-picker{ width:min(560px, calc(100vw - 32px)) }
 .modal.history-picker .modal-title{ margin:0 0 var(--sp-3); color:var(--text); font-size:var(--fs-md); font-weight:600 }
@@ -3877,3 +3968,18 @@ button:active:not(:disabled){
   .theme-choice,
   .source-choice{ transition:none; }
 }
+
+.annotation-editor { width: min(520px, calc(100vw - 32px)); }
+.annotation-editor textarea { display: block; box-sizing: border-box; width: 100%; margin: 8px 0; padding: 10px; resize: vertical; min-height: 120px; max-height: 50vh; font: inherit; color: var(--text); background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px; }
+.annotation-editor textarea:focus-visible { outline: 2px solid var(--text-muted); outline-offset: 2px; }
+
+.offline-format-section > label { display: block; margin-top: 12px; }
+.offline-format-section > input[type=text], .offline-format-section > select, .offline-format-section textarea { box-sizing: border-box; width: 100%; }
+.offline-template-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.offline-template-grid textarea { display: block; margin: 6px 0; resize: vertical; min-height: 90px; }
+.offline-format-section .row { flex-wrap: wrap; margin-top: 8px; gap: 6px; }
+.offline-preview { overflow: auto; max-height: 320px; margin-top: 12px; }
+.offline-preview table { width: 100%; border-collapse: collapse; }
+.offline-preview th, .offline-preview td { border-bottom: 1px solid var(--border); padding: 8px; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }
+.offline-format-section input:focus-visible, .offline-format-section textarea:focus-visible, .offline-format-section button:focus-visible, .offline-format-section select:focus-visible { outline: 2px solid var(--text-muted); outline-offset: 2px; }
+@media (max-width: 700px) { .offline-template-grid { grid-template-columns: 1fr; } }

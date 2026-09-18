@@ -63,6 +63,7 @@
       <div class="tool-group" data-command-panel="project" aria-label="进度操作">
         <span class="tool-label">进度</span>
         <button id="btnRestore" class="secondary">恢复进度</button>
+        <button id="btnNormalize" class="secondary" title="统一译文标点：连续半角点 → ……，破折号 → ——，波浪号 → ～（只动译文）">规范化标点</button>
         <button id="btnClearProgress" class="secondary" title="删除当前文件的已保存翻译进度,重新导入不再恢复">清除进度</button>
         <button id="btnClear" class="danger">清空翻译</button>
       </div>
@@ -700,7 +701,17 @@
             <input type="number" id="byteLimitInput" min="20" max="4000" step="1" placeholder="留空 = 不校验">
             <small>按当前口径的字节数计。留空或填 0 = 关闭超限提示（指示器隐藏）。默认 120 是 NScripter 常见文本框容量。</small>
           </div>
-          <p class="settings-caption">目标引擎确定后把上限改成该引擎的文本框规格即可；口径与上限互不影响。</p>
+          <div class="field">
+            <div class="field-label-row"><label for="widthLimitInput">每行显示宽度上限</label><output id="widthLimitVal" for="widthLimitInput"></output></div>
+            <input type="number" id="widthLimitInput" min="10" max="200" step="1" placeholder="留空 = 不校验">
+            <small>按<b>全角字位</b>计（1 个汉字 = 1，1 个半角字符 = 0.5），与字体无关。超限时指示器会给出折行建议位置。留空或填 0 = 关闭。</small>
+          </div>
+          <div class="field">
+            <div class="field-label-row"><label for="mtAroundInput">机翻语境句数</label><output id="mtAroundVal" for="mtAroundInput"></output></div>
+            <input type="number" id="mtAroundInput" min="0" max="10" step="1" placeholder="留空 = 默认 2">
+            <small>翻译时附带当前句<b>前后各 N 句</b>作为语境参考（解决代词指代、语气连贯）。0 = 关闭。与「机翻配置」里的多轮上下文是两种机制，可同时生效。</small>
+          </div>
+          <p class="settings-caption">字节与显示宽度是两个不同的问题：引擎按<b>字形宽度</b>排版，所以「60 个半角数字」占 60 字节却只有 30 个字位。同一行可能只超其中一个，也可能都超。目标引擎确定后按它的文本框规格调整上限即可。</p>
         </section>
       </div>
     </div>

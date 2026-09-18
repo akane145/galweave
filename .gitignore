@@ -61,3 +61,6 @@ vscode-extension/dist/
 
 # 测试文本仅保留在本地
 test text/
+
+# 浏览器自检产物(Playwright MCP 的快照/截图,不入库)
+.playwright-mcp/

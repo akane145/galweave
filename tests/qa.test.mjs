@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   MIN_TERM_LEN, MAX_TERM_HITS_PER_ROW, QA_KINDS,
   normalizeDigits, termEntries, extractTokens,
-  termMisses, nameConflicts, tokenMisses, punctMisses, analyzeQA,
+  termMisses, nameConflicts, tokenMisses, punctMisses, analyzeQA, analyzeRowQA, controlMisses,
 } from '../src/qa.js';
 
 /** 造一条普通（非 NAME）段落；brackets=false 时 transValue === translation */
@@ -216,4 +216,118 @@ test('QA_KINDS: 与 analyzeQA 返回的类别键一一对应', () => {
   const r = analyzeQA([], null);
   for (const k of QA_KINDS) assert.ok(Array.isArray(r[k]), `缺少类别 ${k}`);
   assert.deepEqual(QA_KINDS, ['term', 'name-conflict', 'token', 'punct']);
+});
+
+/* ---------------- analyzeRowQA: 行级实时门禁的单行入口 ---------------- */
+
+const ENTRIES = termEntries({ names: { 'アリス': '爱丽丝' }, terms: { '先輩': '前辈' } });
+
+test('analyzeRowQA: 与批量 analyzeQA 判定一致（同一套阈值，不另设标准）', () => {
+  const p = P('先輩、おはよう', '早上好');   // 命中术语却没用译名
+  const row = analyzeRowQA(p, ENTRIES);
+  const batch = analyzeQA([p], { names: { 'アリス': '爱丽丝' }, terms: { '先輩': '前辈' } });
+  assert.equal(row.total, batch.total, '单行入口不得比批量多报或少报');
+  assert.deepEqual(row.issues.map(x => x.kind).sort(), batch.term.concat(batch.token, batch.punct).map(x => x.kind).sort());
+  assert.equal(row.term.term, '先輩');
+  assert.equal(row.term.expect, '前辈');
+});
+
+test('analyzeRowQA: 译文已用约定译名则无问题', () => {
+  const r = analyzeRowQA(P('先輩、おはよう', '前辈，早上好'), ENTRIES);
+  assert.equal(r.total, 0);
+  assert.equal(r.term, null);
+});
+
+test('analyzeRowQA: 空译文/照抄原文交给 proof,不由本项重复报（避免双份噪音）', () => {
+  assert.equal(analyzeRowQA(P('先輩', ''), ENTRIES).total, 0);
+  assert.equal(analyzeRowQA(P('先輩', '先輩'), ENTRIES).total, 0);
+});
+
+test('analyzeRowQA: NAME 行不参与（译名走另一条链路）', () => {
+  const r = analyzeRowQA({ isName: true, brackets: false, content: 'アリス', translation: '' }, ENTRIES);
+  assert.equal(r.total, 0);
+});
+
+test('analyzeRowQA: 无术语表 / 非法输入安全', () => {
+  assert.equal(analyzeRowQA(P('先輩', '早上好'), null).total, 0);
+  assert.equal(analyzeRowQA(P('先輩', '早上好'), undefined).total, 0);
+  assert.equal(analyzeRowQA(null, ENTRIES).total, 0);
+});
+
+test('analyzeRowQA: 术语条目按上限截断（沿用 MAX_TERM_HITS_PER_ROW）', () => {
+  const gloss = { names: {}, terms: { 'あ': 'A', 'い': 'B', 'う': 'C', 'え': 'D', 'お': 'E' } };
+  const ents = termEntries(gloss, 1);          // 放宽最短长度以便命中
+  const p = P('あいうえお', '无关译文');
+  const r = analyzeRowQA(p, ents);
+  assert.equal(r.issues.filter(x => x.kind === 'term').length, MAX_TERM_HITS_PER_ROW);
+});
+
+test('analyzeRowQA: 占位符与标点也纳入单行判定', () => {
+  const r = analyzeRowQA(P('第3話', '第话'), ENTRIES);   // 数字 3 丢失
+  assert.ok(r.issues.some(x => x.kind === 'token' && x.value === '3'));
+  const r2 = analyzeRowQA(P('そう', '这样,对吧'), ENTRIES);  // 半角逗号紧贴中文
+  assert.ok(r2.issues.some(x => x.kind === 'punct' && x.ch === ','));
+});
+
+test('analyzeRowQA: term 字段取第一条术语问题,供胶囊一键填入', () => {
+  const gloss = { names: {}, terms: { '先輩': '前辈', 'アリス': '爱丽丝' } };
+  const ents = termEntries(gloss);
+  const r = analyzeRowQA(P('アリスと先輩', '早上好'), ents);
+  assert.ok(r.term, '有术语问题时必须给出可一键填入的条目');
+  assert.ok(['前辈', '爱丽丝'].includes(r.term.expect));
+  assert.equal(r.term.kind, 'term');
+});
+
+/* ---------------- controlMisses: 手改译文的控制符核对 ---------------- */
+
+test('controlMisses: 原文有控制符而译文丢了 → 报（含缺几个）', () => {
+  const p = P('こんにちは[r]そうだ[r]', '你好，是这样');
+  const miss = controlMisses(p);
+  assert.equal(miss.length, 1);
+  assert.equal(miss[0].ch, '[r]');
+  assert.equal(miss[0].role, 'line-break');
+  assert.equal(miss[0].count, 2);
+  assert.equal(miss[0].fullwidth, false);
+});
+
+test('controlMisses: 译文保留了全部控制符 → 不报', () => {
+  assert.deepEqual(controlMisses(P('そうだ%p250,0;', '是这样%p250,0;')), []);
+  assert.deepEqual(controlMisses(P('あ[r]い', '啊[r]咦')), []);
+});
+
+test('controlMisses: 原文没有控制符 → 不参与（无从漏起）', () => {
+  assert.deepEqual(controlMisses(P('こんにちは', '你好')), []);
+});
+
+test('controlMisses: 只报"少"，多出来的不报（译者可能有意加断行）', () => {
+  const p = P('こんにちは', '你好[r]朋友');
+  assert.deepEqual(controlMisses(p), [], '多出来的控制符不报，视为有意为之');
+});
+
+test('controlMisses: 全角误输单独标记（敲成 ［ｒ］ 而非真丢失）', () => {
+  const p = P('そうだ[r]', '是这样［ｒ］');
+  const miss = controlMisses(p);
+  assert.equal(miss.length, 1);
+  assert.equal(miss[0].fullwidth, true, '折半角后够了 → 判定为全角误输');
+});
+
+test('controlMisses: 大小写不敏感（[R] 与 [r] 同一记号）', () => {
+  assert.deepEqual(controlMisses(P('あ[r]い', '啊[R]咦')), []);
+});
+
+test('controlMisses: 语序变化不算问题（只比集合，不要求顺序）', () => {
+  const p = P('あ[r]い%p100,0;', '咦[r]啊%p100,0;');
+  assert.deepEqual(controlMisses(p), [], '中文语序本就该重排，顺序不同不是错');
+});
+
+test('controlMisses: 空译文/照抄原文跳过（归 proof 管）', () => {
+  assert.deepEqual(controlMisses(P('あ[r]い', '')), []);
+  assert.deepEqual(controlMisses(P('あ[r]い', 'あ[r]い')), []);
+});
+
+test('controlMisses: 经 analyzeRowQA 汇总时 kind 为 control', () => {
+  const r = analyzeRowQA(P('あ[r]い', '啊咦'), null);
+  const ctl = r.issues.filter(x => x.kind === 'control');
+  assert.equal(ctl.length, 1);
+  assert.equal(ctl[0].ch, '[r]');
 });

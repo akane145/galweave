@@ -1,6 +1,6 @@
 // history.js — 行级版本快照 / 本地历史（纯逻辑 + 薄 IO）
 //
-// 动机（docs/ROADMAP.md P1-2）：持久化只有单槽 `saveState` + 内存 undo（UNDO_LIMIT=100，
+// 动机：持久化只有单槽 `saveState` + 内存 undo（UNDO_LIMIT=100，
 // 关掉就没了）。"想回到昨天翻的那版"目前不可行；批量机翻 / 术语表批量替换这类
 // **一次性改很多行**的操作更是没有后悔药。
 //

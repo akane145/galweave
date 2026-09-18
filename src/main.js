@@ -2,7 +2,7 @@
 // 职责: 初始化各模块,绑定事件,编排 导入/导出/保存/搜索/术语表/机翻/文件夹 流程。
 
 import { parseFile, buildExport, transValue, stripBrackets, setParseConf, getParseConf, parsePrefix, validateParseConf, migrateNameTranslations as migrateNameTranslationsPure, mergeSavedState } from './parsers.js';
-import { loadSettings, saveSettings, loadBackground, saveBackground, clearBackground, loadFontSettings, saveFontSettings, loadFontLibrary, saveFontLibrary, loadTextAreaTransparency, saveTextAreaTransparency, loadThemeMode, saveThemeMode, loadFavorites, saveFavorites, loadDensity, saveDensity, loadByteEncoding, saveByteEncoding, loadByteLimit, saveByteLimit, loadDictHistory, saveDictHistory } from './settings.js';
+import { loadSettings, saveSettings, loadBackground, saveBackground, clearBackground, loadFontSettings, saveFontSettings, loadFontLibrary, saveFontLibrary, loadTextAreaTransparency, saveTextAreaTransparency, loadThemeMode, saveThemeMode, loadFavorites, saveFavorites, loadDensity, saveDensity, loadByteEncoding, saveByteEncoding, loadByteLimit, saveByteLimit, loadWidthLimit, saveWidthLimit, loadMtAround, saveMtAround, loadDictHistory, saveDictHistory } from './settings.js';
 import * as theme from './theme.js';
 import * as fonts from './fonts.js';
 import * as fontloader from './fontloader.js';
@@ -21,6 +21,8 @@ import { canonicalizeProfile, enrichDetectionProfile, isMirrorFormatText } from 
 
 const NO_MT_BUILD = import.meta.env.MODE === 'no-mt';
 import * as proof from './proof.js';
+import { chooseFormat, formatParas } from './offline-formats.js';
+import { initOfflineFormats, availableFormats } from './offline-formats-ui.js';
 import * as dictx from './dict.js';
 import { createMdxProvider, createPathMdxProvider, createTauriMdd, mimeFromExt, srcToResourceKey, isMddResourceSrc, linkTarget } from './mdx.js';
 import * as mdx from './mdx.js';
@@ -33,14 +35,17 @@ import { initPalette } from './palette.js';
 import { bindRowContextMenu } from './rowmenu.js';
 import { countStates, segments, percentText, isComplete, hasData, summaryText } from './filestats.js';
 import * as bytes from './bytes.js';
+import * as width from './width.js';
+import * as textnorm from './textnorm.js';
+import * as uiStats from './ui/stats-ui.js';
+import * as mtForm from './ui/mt-form.js';
 import * as qa from './qa.js';
 import * as exporter from './exporter.js';
 import * as recovery from './recovery.js';
 import * as dhist from './dict-history.js';
 import * as tm from './tm.js';
-import { showConfirm, showMtCompare, showExitConfirm, showHistoryList, showStatsPanel } from './modals.js';
+import { showConfirm, showMtCompare, showExitConfirm, showHistoryList, showStatsPanel, showAnnotationEditor } from './modals.js';
 import * as history from './history.js';
-import * as stats from './stats.js';
 import * as mtbase from './mtbaseline.js';
 import { showObsidianExport } from './obsidian-ui.js';
 import { snapshotChange } from './obsidian.js';
@@ -87,6 +92,22 @@ function pushUndoAll(){
 
 /* ---------------- 渲染器状态注入 ---------------- */
 
+/* ---------------- 行级术语门禁：词条表缓存 ---------------- */
+//
+// renderer 的 syncRow 每帧可能跑几十行，每行都要判"原文命中术语却没用到译名"。
+// termEntries 内部要遍历并排序整张术语表，必须缓存；失效点收敛到 renderGlossTables()
+// —— 术语编辑与换文档都会经过它，见该函数内的 invalidateQaEntries()。
+
+let _qaEntriesCache = null;
+
+/** 当前术语表的可检查条目（缓存）。无术语表时返回空数组，调用方据此跳过判定。 */
+function qaEntriesCached(){
+  if (!_qaEntriesCache) _qaEntriesCache = qa.termEntries(glossData);
+  return _qaEntriesCache;
+}
+
+function invalidateQaEntries(){ _qaEntriesCache = null; }
+
 rdr.setRendererState({
   paras: model.getParas,
   matches: () => matches,
@@ -95,6 +116,9 @@ rdr.setRendererState({
   scope: () => $scope.value,
   terms: () => (glossData ? glossData.terms : {}),
   rowIssueKind: (i) => proof.analyzeRow(model.getPara(i)),
+  // 行级术语门禁：词条表走缓存；文案复用侧栏清单的 issueDetail，两处说法保持一致
+  qaEntries: qaEntriesCached,
+  issueDetail,
   onTermClick: insertTerm,
   // 输入建议(术语/片段)与划词查词
   getSuggestions: (token) => suggest.matchSuggestions(token, glossData ? glossData.terms : {}, snippetData.merged),
@@ -119,9 +143,13 @@ rdr.setRendererState({
   },
   onProofAnnoResolve: (i, id) => proof.resolveAnnotation(i, id),
   onProofAnnoDelete: (i, id) => proof.deleteAnnotation(i, id),
+  onProofAnnoEdit: editProofAnnotation,
   onProofSessionEnd: (i) => proof.settleInput(i),
 });
 proof.setProofUI({ refreshRow: rdr.refreshRow, refreshAll: rdr.refreshAllRows, refreshUI: refreshProofUI });
+
+// 统计编排已拆到 src/ui/stats-ui.js：注入依赖而非让它反向 import main.js（会成环）
+uiStats.initStatsUI({ model, showStatsPanel, toastError });
 
 /* ---------------- 主题 / 字体 / 背景 ---------------- */
 
@@ -203,6 +231,42 @@ function updateByteLimitLabel(){
   out.textContent = v > 0 ? (v + ' 字节') : '不校验';
 }
 
+/**
+ * 应用显示宽度上限（width.js）。语义与 applyByteLimit 完全一致：
+ * null = 从未配置 → 不写内联覆盖，样式表默认生效；0 = 显式"不校验"。
+ */
+function applyWidthLimit(limit){
+  if (limit === null || limit === undefined) return;
+  rdr.setWidthLimit(width.normalizeWidthLimit(limit));
+}
+
+/** 设置项里的宽度上限说明 */
+function updateWidthLimitLabel(){
+  const el = document.getElementById('widthLimitInput');
+  const out = document.getElementById('widthLimitVal');
+  if (!el || !out) return;
+  const raw = String(el.value || '').trim();
+  if (!raw) { out.textContent = '不校验'; return; }
+  const v = width.normalizeWidthLimit(raw);
+  out.textContent = v > 0 ? (v + ' 字位') : '不校验';
+}
+
+/** 应用机翻语境句数（0 = 关闭；null = 用默认 2） */
+function applyMtAround(n){
+  _mtAroundCache = (n === null || n === undefined) ? 2 : Math.max(0, Math.min(10, Math.round(Number(n) || 0)));
+}
+
+/** 设置项里的语境句数说明 */
+function updateMtAroundLabel(){
+  const el = document.getElementById('mtAroundInput');
+  const out = document.getElementById('mtAroundVal');
+  if (!el || !out) return;
+  const raw = String(el.value || '').trim();
+  if (!raw){ out.textContent = '默认 2 句'; return; }
+  const v = Math.max(0, Math.min(10, Math.round(Number(raw) || 0)));
+  out.textContent = v > 0 ? ('前后各 ' + v + ' 句') : '关闭';
+}
+
 /** 统一应用外观(主题模式 + 字体 + 背景 + 密度 + 字节口径),启动时调用 */
 async function applyAppearance(){
   // 旧版 localStorage 主题一次性迁移到 settings.ui.mode
@@ -229,6 +293,8 @@ async function applyAppearance(){
   applyDensity(await loadDensity());
   applyByteEncoding(await loadByteEncoding());
   applyByteLimit(await loadByteLimit());
+  applyWidthLimit(await loadWidthLimit());
+  applyMtAround(await loadMtAround());
 }
 
 /** 快速切换按钮: 深色→浅色→黑白→深色 循环 */
@@ -629,6 +695,7 @@ function nameInputHandler(i, value){
   }
   rdr.refreshRow(i);
   updateProgress();
+  updateUndoButtons(); // 输入后撤销栈已变；不刷新按钮会一直显示"不可撤销"（Ctrl+Z 其实可用，纯误导）
   markDirty();
   if (_synced) wkr.syncSearchShadow({ changes: [{ i, nameTr: value }] });
 }
@@ -643,7 +710,13 @@ function transInputHandler(i, value){
     // 兜底历史误输入),译文正文保持为空。
     p.nameTr = value;
     model.recalcDone(p);
-    if (p.nameTr && p.nameTr !== p.name) gloss.recordNameIfNew(glossData.names, p.name, p.nameTr);
+    // 与 nameInputHandler 保持一致:新译名要落表并刷新。此前这里丢掉了返回值,
+    // 于是"在 NAME 行译文框里填译名"会静默往 glossData 里加条目,界面与
+    // 行级门禁的占位判断却停在旧状态(renderGlossTables 是唯一收口点)。
+    if (p.nameTr && p.nameTr !== p.name && gloss.recordNameIfNew(glossData.names, p.name, p.nameTr)){
+      renderGlossTables();
+      persistGloss();
+    }
   } else {
     p.translation = p.brackets ? ('「' + value + '」') : value;
     model.recalcDone(p);
@@ -652,6 +725,7 @@ function transInputHandler(i, value){
   model.scheduleAutosave();
   rdr.refreshRow(i);
   updateProgress();
+  updateUndoButtons(); // 同上：让"可撤销"立即可见（含一键填入术语这条路径）
   markDirty();
   if (_synced) wkr.syncSearchShadow({ changes: [{ i, translation: p.translation, nameTr: p.nameTr }] });
 }
@@ -909,6 +983,17 @@ function migrateNameTranslations(paras){
 async function loadSource(file, name){
   const { content } = await fsx.readFileSource(file);
   const fname = name || (file.path ? file.path.split(/[\\/]/).pop() : '');
+  const matched = chooseFormat(content, await availableFormats());
+  if (matched.length > 1) throw new Error('多个离线格式档案匹配此文件，请在解析规则中选择档案并预览载入。');
+  if (matched.length === 1){
+    const parsed = { paras: formatParas(matched[0]), nl: content.includes('\r\n') ? '\r\n' : '\n', trailingBlank: false };
+    model.setRawText(content);
+    model.setCanonicalDoc(false);
+    model.setParas(parsed.paras);
+    model.setFileInfo({ name: fname, path: file.path || null, nl: parsed.nl, trailingBlank: false });
+    await finishLoadSource(fname, parsed, file, '已使用离线格式档案：' + matched[0].rule.name);
+    return;
+  }
   // 镜像格式(dc4ph 等)在 parsers 内原生解析: // 行=原文行、普通行=译文行、#0x 头=结构行,
   // 全程不做任何格式转换,保存时按原格式写回。
   const isMirror = isMirrorFormatText(content);
@@ -968,6 +1053,7 @@ async function finishLoadSource(fname, parsed, file, note){
   if (note) showToast(note);
   docDirty = false; // 全新导入,尚未有未写回的改动
   lastSnapshotAt = 0; // 换文档 → 留档节流重新计时
+  mt.resetLlmContext(); // 换文档 → 清空机翻多轮上下文,避免上一篇对白串味
   setHeaderSaveState('已载入', 'saved');
   await proof.loadForFile(); // 加载该文件的校对数据(批注/状态/修改记录)
   rdr.fullRender();
@@ -1080,6 +1166,7 @@ async function switchDoc(key){
 
 // 标签切换/恢复后的公共重渲染尾(与 loadSource 尾部一致)
 function afterDocActivated(){
+  mt.resetLlmContext(); // 切标签 → 同上,机翻上下文不跨文档
   renderGlossTables();
   updateGlossProjectLabel();
   initSnippets();
@@ -1257,7 +1344,7 @@ async function importWithPicker(){
 // format 省略 = 'original'（保持既有调用点行为不变）。
 function saveSuggestedName(format = 'original'){
   const f = model.getFilename() || '译文.txt';
-  const base = model.isCanonicalDoc() ? f.replace(/\.(txt|ks)$/i, '') + '.canonical.txt' : f;
+  const base = model.isCanonicalDoc() && !model.getPara(0)?.offlineDocument ? f.replace(/\.(txt|ks)$/i, '') + '.canonical.txt' : f;
   return exporter.suggestExportName(base, format);
 }
 
@@ -1266,10 +1353,12 @@ async function saveDirect(){
   await proof.flushSave(); // 先落盘校对数据(与源文件保持一致)
   await model.flushAutosave();
   await harvestTm();       // 译文此刻已稳定 → 收割进翻译记忆（含人工改动）
-  await snapshotHistory('save'); // 写回原文件前留档（ROADMAP P1-2）
-  touchStats();            // 记一笔当天进度（ROADMAP P2-4）
+  await snapshotHistory('save'); // 写回原文件前留档
+  touchStats();            // 记一笔当天进度
   await flushStats();
-  const content = buildExport(model.getParas(), model.getNl(), model.getTrailingBlank());
+  let content;
+  try { content = buildExport(model.getParas(), model.getNl(), model.getTrailingBlank()); }
+  catch (e){ toastError('无法安全保存：' + e.message); return; }
   setHeaderSaveState('保存中…', 'saving');
   try {
     if (fsx.isTauri() && model.getFilePath()){
@@ -1323,7 +1412,8 @@ async function exportFile(){
   let content;
   if (format === 'original'){
     // 原行为：回写引擎文本格式
-    content = buildExport(paras, model.getNl(), model.getTrailingBlank());
+    try { content = buildExport(paras, model.getNl(), model.getTrailingBlank()); }
+    catch (e){ toastError('无法安全导出：' + e.message); return; }
   } else {
     content = exporter.buildExportText(format, paras, {
       nl: model.getNl(),
@@ -1430,6 +1520,10 @@ function updateGlossProjectLabel(){
 }
 
 function renderGlossTables(){
+  invalidateQaEntries(); // 术语表可能已变 → 行级门禁必须重建词条表（本函数是唯一收口点）
+  // 术语表非空才为胶囊预留占位（保证译文框宽度恒定，原文不跟着重排）。
+  // 这里顺手把缓存建起来，省得等第一次 syncRow 再算。
+  rdr.setQaEnabled(qaEntriesCached().length > 0);
   const names = glossData.names, terms = glossData.terms;
   const nt = document.getElementById('nameTable');
   nt.innerHTML = '';
@@ -1615,6 +1709,51 @@ async function glossApply(){
   refreshProofUI();  // 译文变了 → 漏翻/异常清单与术语一致性 QA 需重算
   if (n > 0 || total > 0) markDirty(); // 应用结果未写回原文件
   toast('已应用术语表:\n人名自动填充 ' + n + ' 行\n译文批量修正 ' + total + ' 行');
+}
+
+/* ---------------- 标点规范化（批量） ----------------
+   只作用于译文，绝不碰原文：原文是日文，…/〜/-- 是它的原貌。
+   预览驱动 —— 先列出真正会变的行，用户确认后才动手；未改动行不进列表，避免"要改 800 行"的惊吓。 */
+
+async function normalizeApply(){
+  if (!model.getParas().length){ toastError('请先导入文本文件'); return; }
+  const ids = textnorm.normalizeRuleIds(await loadNormRules());
+  const hits = textnorm.collectNormalizable(model.getParas(), ids);
+  if (!hits.length){ toast('译文标点已经是规范形式，无需改动。'); return; }
+
+  const preview = hits.slice(0, 8)
+    .map(h => '  第 ' + (h.i + 1) + ' 行：「' + h.from.slice(0, 24) + '」→「' + h.to.slice(0, 24) + '」')
+    .join('\n');
+  const more = hits.length > 8 ? '\n  …另有 ' + (hits.length - 8) + ' 行' : '';
+  const ok = await showConfirm({
+    title: '规范化译文标点',
+    message: '将修改 ' + hits.length + ' 行译文（只动译文，不影响原文）：\n\n' + preview + more
+      + '\n\n规范化内容：连续半角点 → …… ／ 破折号 → —— ／ 波浪号 → ～',
+    confirmText: '应用',
+  });
+  if (!ok) return;
+
+  pushUndoAll();
+  const snap = proof.isEnabled() ? proof.snapshot() : null;
+  const paras = model.getParas();
+  for (const h of hits){
+    const p = paras[h.i];
+    if (p) p.translation = p.brackets ? ('「' + h.to + '」') : h.to;
+  }
+  if (snap) proof.recordDiff(snap, 'batch');
+  model.scheduleAutosave();
+  rdr.fullRender();
+  recomputeMatchesUI(true);
+  updateProgress();
+  refreshProofUI();
+  markDirty(); // 规范化结果未写回原文件
+  toast('已规范化 ' + hits.length + ' 行译文的标点');
+}
+
+/** 当前启用的规范化规则（设置项 settings.ui.normRules；未配置 = 全部启用） */
+async function loadNormRules(){
+  const s = await loadSettings();
+  return (s.ui && s.ui.normRules) || null;
 }
 
 /* ================= 词典 / 快捷片段 ================= */
@@ -2136,7 +2275,7 @@ async function initDictFavorites(){
   dictFavorites = await loadFavorites();
 }
 
-/* ---- 最近查询（ROADMAP P2-5）---- */
+/* ---- 最近查询 ---- */
 
 let dictHistory = [];
 
@@ -2615,9 +2754,11 @@ function cancelParseSettings(){
 /* ---------------- 文本格式识别(GUI) ---------------- */
 
 let recogState = null; // { profile, canonicalText }
+let recogExternal = null; // Preserve file line endings; textarea normalizes them for display.
 
 // 打开「格式/规则」弹窗时初始化识别区块(来源/报告清空)
 function initRecogSection(){
+  initOfflineFormats({ getSource: recogSourceText, load: loadOfflineDocument, notify: showToast });
   const srcFile = document.getElementById('recogSrcFile');
   const srcPaste = document.getElementById('recogSrcPaste');
   const hasFile = !!model.getRawText();
@@ -2649,14 +2790,32 @@ function toggleRecogSource(){
   document.getElementById('recogFileRow').hidden = !paste;
 }
 
+async function loadOfflineDocument(doc){
+  if (docDirty && !await showConfirm({ title: '重新按档案载入文本？', message: '当前编辑尚未写回文件。重新载入会替换当前编辑内容，请先保存需要保留的修改。', confirmText: '重新载入', danger: true })) return;
+  // The source is a preview/import; never retain another file's writable handle.
+  const useCurrent = document.getElementById('recogSrcFile').checked;
+  const filename = useCurrent ? model.getFilename() : (recogExternal?.name || '离线格式文本.txt');
+  await proof.flushSave();
+  await model.flushAutosave();
+  const parsed = { paras: formatParas(doc), nl: doc.text.includes('\r\n') ? '\r\n' : '\n', trailingBlank: false };
+  model.setParas(parsed.paras);
+  model.setFileInfo({ name: filename, path: null, nl: parsed.nl, trailingBlank: false });
+  fsx.setBrowserFileHandle(null);
+  model.setCanonicalDoc(true);
+  model.setRawText(doc.text);
+  await finishLoadSource(filename, parsed, null, '离线格式已载入；保存/原格式导出会校验并还原原有结构。');
+  document.getElementById('setModal').classList.remove('show');
+}
+
 function recogSourceText(){
   if (document.getElementById('recogSrcFile').checked){
     const raw = model.getRawText();
     if (!raw) return { text: '', err: '当前没有已打开的文件,请改用「粘贴/选择文本」。' };
     return { text: raw, err: '' };
   }
-  const pasted = document.getElementById('recogText').value.trim();
-  if (pasted) return { text: pasted, err: '' };
+  const pasted = document.getElementById('recogText').value;
+  if (recogExternal && pasted === recogExternal.display) return { text: recogExternal.text, err: '' };
+  if (pasted.trim()) return { text: pasted, err: '' };
   return { text: '', err: '请粘贴文本,或选择文本文件。' };
 }
 
@@ -2666,6 +2825,8 @@ async function pickRecogFile(){
     if (!res) return;
     const { content } = await fsx.readFileSource({ path: res.path });
     document.getElementById('recogText').value = content;
+    recogExternal = { text: content, display: document.getElementById('recogText').value, name: res.name };
+    document.getElementById('recogText').dispatchEvent(new Event('input'));
     document.getElementById('recogFileHint').textContent = '已载入: ' + res.name;
     return;
   }
@@ -2673,6 +2834,8 @@ async function pickRecogFile(){
   if (!picked) return;
   const text = await picked.file.text();
   document.getElementById('recogText').value = text;
+  recogExternal = { text, display: document.getElementById('recogText').value, name: picked.name };
+  document.getElementById('recogText').dispatchEvent(new Event('input'));
   document.getElementById('recogFileHint').textContent = '已载入: ' + picked.name;
 }
 
@@ -2856,6 +3019,11 @@ function issueDetail(x){
     case 'name-conflict': return `译名不统一：${x.values.map((v, k) => `${v}×${x.counts[k]}`).join(' / ')}`;
     case 'token': return `占位符「${x.value}」在译文中缺失`;
     case 'punct': return x.unbalanced ? `引号不配对：「」数量不等` : `半角「${x.ch}」建议改为全角「${x.suggest}」`;
+    case 'kinjiru': return x.label || `避头尾：「${x.ch}」位置不当`;
+    case 'control': {
+      const what = x.fullwidth ? '被敲成了全角' : '在译文中不见了';
+      return `控制符「${x.ch}」${what}` + (x.count > 1 ? `（缺 ${x.count} 个）` : '');
+    }
     default: return '';
   }
 }
@@ -2938,6 +3106,17 @@ function renderAnnoOverview(){
   done.forEach(x => doneEl.appendChild(annoOverviewItem(x, false)));
 }
 
+async function editProofAnnotation(i, id){
+  const para = model.getPara(i);
+  const annotation = para?.pr?.annotations?.find(a => a.id === id);
+  if (!annotation) return;
+  const text = await showAnnotationEditor(annotation.text);
+  if (text === null) return;
+  if (model.getPara(i) !== para || !proof.updateAnnotation(i, id, text)){
+    toastError('该批注已不存在或文档已切换，请重新打开批注。');
+  }
+}
+
 function annoOverviewItem(x, isOpen){
   const el = document.createElement('div');
   el.className = 'proof-item';
@@ -2952,6 +3131,15 @@ function annoOverviewItem(x, isOpen){
   txt.className = 'proof-item-text';
   txt.textContent = x.a.text;
   el.append(head, tag, txt);
+  const edit = document.createElement('button');
+  edit.className = 'pr-btn pr-anno-edit';
+  edit.textContent = '编辑';
+  edit.title = '编辑该批注';
+  edit.addEventListener('click', e => {
+    e.stopPropagation();
+    editProofAnnotation(x.i, x.a.id);
+  });
+  el.appendChild(edit);
   el.addEventListener('click', () => {
     rdr.scrollRowIntoView(x.i);
     rdr.focusIdx(x.i);
@@ -3290,12 +3478,18 @@ async function openThemeSettings(){
   fontLibrary = fonts.mergeFontLibrary(await loadFontLibrary());
   renderFontLibraryUI();
   renderFontPresetOptions();
-  // 阅读密度 / 字节计数口径 / 字数上限
+  // 阅读密度 / 字节计数口径 / 字数与宽度上限
   document.getElementById('densitySelect').value = theme.normalizeDensity(await loadDensity());
   document.getElementById('byteEncSelect').value = bytes.normalizeEncoding(await loadByteEncoding());
   const savedLimit = await loadByteLimit();
   document.getElementById('byteLimitInput').value = savedLimit === null ? '' : String(savedLimit);
   updateByteLimitLabel();
+  const savedWidth = await loadWidthLimit();
+  document.getElementById('widthLimitInput').value = savedWidth === null ? '' : String(savedWidth);
+  updateWidthLimitLabel();
+  const savedAround = await loadMtAround();
+  document.getElementById('mtAroundInput').value = savedAround === null ? '' : String(savedAround);
+  updateMtAroundLabel();
   // 打开时重置到「界面设置」页
   thSwitchTab(document.querySelector('#thTabs button[data-thpage="0"]'));
   document.getElementById('themeModal').classList.add('show');
@@ -3355,7 +3549,13 @@ async function saveBgSettings(){
   const fit = document.getElementById('bgFit').value;
   const bg = await loadBackground();
   const dataUrl = pending || bg.dataUrl; // 没选新图则保留旧的
-  await saveBackground(dataUrl, opacity, fit);
+  const saved = await saveBackground(dataUrl, opacity, fit);
+  if (!saved.ok){
+    // 图片本体已改存 IndexedDB，这里失败多半是 settings 写盘问题（桌面端磁盘/权限、
+    // 浏览器端配额）。提示用户，但**继续应用** —— 本次会话内设置仍然生效，只是没落盘。
+    console.warn('背景设置保存失败:', saved.error);
+    showToast('⚠ 背景设置未保存（本地存储可能已满）', true);
+  }
   applyBackground(dataUrl, opacity, fit);
   // 文本区透明度(与遮罩强度互补: 遮罩压图片, 透明度让对白行透出图片)
   const textAlpha = theme.normalizeTextAreaTransparency(document.getElementById('textAreaOpacity').value);
@@ -3381,6 +3581,16 @@ async function saveBgSettings(){
   const limit = limitRaw ? bytes.normalizeByteLimit(limitRaw) : 0;
   applyByteLimit(limit);
   await saveByteLimit(limit);
+  // 显示宽度上限：语义与字节上限一致（空 = 不校验 = 存 0）
+  const wRaw = String(document.getElementById('widthLimitInput').value || '').trim();
+  const wLimit = wRaw ? width.normalizeWidthLimit(wRaw) : 0;
+  applyWidthLimit(wLimit);
+  await saveWidthLimit(wLimit);
+  // 机翻语境句数：空 = 恢复默认 2
+  const aRaw = String(document.getElementById('mtAroundInput').value || '').trim();
+  const around = aRaw ? Math.max(0, Math.min(10, Math.round(Number(aRaw) || 0))) : 2;
+  applyMtAround(around);
+  await saveMtAround(around);
   document.getElementById('bgFile').value = '';
   delete document.getElementById('bgFile').dataset.pending;
   document.getElementById('themeModal').classList.remove('show');
@@ -3445,77 +3655,11 @@ async function setMTProvider(id){
   updateMTButtons();
 }
 
-/* ---- 机翻配置弹窗: 按引擎动态渲染表单 ---- */
+/* ---- 机翻配置弹窗: 按引擎动态渲染表单 ----
+   表单构造已拆到 src/ui/mt-form.js（纯 HTML 字符串拼接，不碰 DOM 与状态）。 */
 
-function mtField(label, html, hint){
-  return '<div class="field"><label>' + label + '</label>' + html + (hint ? '<div class="hint">' + hint + '</div>' : '') + '</div>';
-}
-function mtInput(id, value, ph){
-  return '<input type="text" id="' + id + '" value="' + String(value || '').replace(/"/g, '&quot;') + '" placeholder="' + (ph || '') + '" autocomplete="off">';
-}
-function mtNum(id, value, min, max){
-  return '<input type="number" id="' + id + '" min="' + min + '" max="' + max + '" step="any" value="' + value + '">';
-}
-function mtCheck(id, label, checked){
-  return '<label class="check-label modal-check"><input type="checkbox" id="' + id + '"' + (checked ? ' checked' : '') + '> ' + label + '</label>';
-}
-/** 采样参数网格: [{label,id,value,min,max}] → 每参数一列 */
-function mtParams(list){
-  return '<div class="mt-params">' + list.map(p =>
-    '<div class="p"><label>' + p.label + '</label>' + mtNum(p.id, p.value, p.min, p.max) + '</div>'
-  ).join('') + '</div>';
-}
-
-/** 批量策略两个字段（Q6）：两种引擎共用，放在「采样参数」页 */
-function mtBatchFields(conf){
-  return mtField('批量策略（批次模式以返回的行号对齐；行数或控制标签对不上时该批自动退回逐行，不会错位写入）',
-    '<select id="mtBatchMode">' +
-      '<option value="perLine"' + (conf.batchMode === 'batched' ? '' : ' selected') + '>逐行（默认 · 最稳，失败只影响该行）</option>' +
-      '<option value="batched"' + (conf.batchMode === 'batched' ? ' selected' : '') + '>按批次合并请求（一次翻译多行，省往返与时间）</option>' +
-    '</select>') +
-  mtField('每批行数（仅「按批次合并请求」生效）', mtNum('mtBatchSize', conf.batchSize, 2, 20));
-}
-
-function mtFormLlm(conf){
-  const page1 =
-    mtField('接口地址（OpenAI 兼容，如 https://api.openai.com/v1）', mtInput('mtBaseUrl', conf.baseUrl, 'https://api.openai.com/v1')) +
-    mtField('API Key（留空则不发送；llama.cpp 本地可留空）', mtInput('mtApiKey', conf.apiKey, 'sk-…')) +
-    mtField('模型名', mtInput('mtModel', conf.model, 'gpt-4o-mini')) +
-    mtField('系统提示词（留空使用默认翻译提示词）',
-      '<textarea id="mtSystem" rows="3" placeholder="You are a translator…">' + String(conf.systemPrompt || '').replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</textarea>') +
-    mtField('多轮上下文（>0 时翻译/批量自动附带最近 N 句原文与译文，使人物语气、指代更连贯；批量逐句累积，切引擎/改配置后清空）', mtNum('mtContextTurns', conf.contextTurns, 0, 20));
-  const page2 =
-    mtField('采样参数', mtParams([
-      { label: '温度 temperature', id: 'mtTemperature', value: conf.temperature, min: 0, max: 2 },
-      { label: 'top_p', id: 'mtTopP', value: conf.topP, min: 0, max: 1 },
-      { label: 'max_tokens', id: 'mtMaxTokens', value: conf.maxTokens, min: 1, max: 32768 },
-      { label: 'frequency_penalty', id: 'mtFreqPenalty', value: conf.frequencyPenalty, min: -2, max: 2 },
-    ])) +
-    mtField('选项', mtCheck('mtStreaming', '流式输出（翻译当前行时逐字显示）', conf.streaming) +
-      '<br>' + mtCheck('mtUseGlossary', '翻译时附加当前项目的 glossary.json 术语', conf.useGlossary)) +
-    mtBatchFields(conf);
-  return '<div id="mtP0">' + page1 + '</div><div id="mtP1" class="hidden">' + page2 + '</div>';
-}
-
-function mtFormSakura(conf){
-  const page1 =
-    mtField('Sakura / llama.cpp 服务地址（Sakura_Launcher_GUI 或 llama-server 显示的地址/端口）',
-      '<div class="row">' + mtInput('mtHost', conf.host, 'http://127.0.0.1:8080') +
-      '<button id="btnMtDetect" class="toolbtn secondary nowrap">检测端口</button></div>') +
-    mtField('模型名（用于提示词版本自动识别，可留空）', mtInput('mtModel', conf.model, '如 sakura-qwen2.5-7b-v1.0')) +
-    mtField('提示词版本（auto=按模型名自动识别）',
-      '<select id="mtPromptVersion">' + mt.SAKURA_PROMPT_VERSIONS.map(v => '<option value="' + v + '"' + (conf.promptVersion === v ? ' selected' : '') + '>' + v + '</option>').join('') + '</select>');
-  const page2 =
-    mtField('采样参数', mtParams([
-      { label: '温度 temperature', id: 'mtTemperature', value: conf.temperature, min: 0, max: 2 },
-      { label: 'top_p', id: 'mtTopP', value: conf.topP, min: 0, max: 1 },
-      { label: 'max_tokens', id: 'mtMaxTokens', value: conf.maxTokens, min: 1, max: 32768 },
-    ])) +
-    mtField('选项', mtCheck('mtStreaming', '流式输出（翻译当前行时逐字显示）', conf.streaming) +
-      '<br>' + mtCheck('mtUseGlossary', '翻译时附加当前项目的 glossary.json 术语', conf.useGlossary)) +
-    mtBatchFields(conf);
-  return '<div id="mtP0">' + page1 + '</div><div id="mtP1" class="hidden">' + page2 + '</div>';
-}
+function mtFormLlm(conf){ return mtForm.mtFormLlm(conf); }
+function mtFormSakura(conf){ return mtForm.mtFormSakura(conf); }
 
 /* ---- 机翻/主题配置 tab 切换 ---- */
 function mtSwitchTab(btn){
@@ -3690,7 +3834,7 @@ async function mtTranslateCurrent(){
   clearPushTimers();
   try {
     // 取完整结果（非流式），交给比对面板由译者裁定是否采用
-    const result = await mt.translateTextProtected($mtProvider.value, p.content, glossData);
+    const result = await mt.translateTextProtected($mtProvider.value, p.content, glossData, mtContextBlock(i));
     const cleaned = stripBrackets(String(result).trim());
     const finalText = p.brackets ? ('「' + cleaned + '」') : cleaned;
     const ok = await showMtCompare({ orig: p.content, result: finalText });
@@ -3960,75 +4104,63 @@ function setSidebarWidth(sb, width){
  * 全部动作复用既有函数,本函数不实现任何业务逻辑。
  * 译文 textarea 上不接管右键(见 rowmenu.js 顶部设计说明),保留原生粘贴/输入法候选。
  */
-/* ---------------- 翻译进度统计（ROADMAP P2-4） ---------------- */
+/* ---------------- 翻译进度统计 ----------------
+   编排逻辑已拆到 src/ui/stats-ui.js（依赖经 initStatsUI 注入，避免循环 import）。
+   这里的四个薄转发保持既有调用点不变。 */
 
-let statsStore = null;          // 当前项目的统计库（懒加载）
-let statsProjectPath = null;    // 落盘位置（源文件绝对路径；浏览器为 null）
-let statsWriteTimer = null;
+async function loadStatsForProject(p){ return uiStats.loadStatsForProject(p); }
+function touchStats(){ return uiStats.touchStats(); }
+async function flushStats(){ return uiStats.flushStats(); }
+function recordStatsNow(){ return uiStats.recordStatsNow(); }
+async function openStats(){ return uiStats.openStats(); }
 
-async function loadStatsForProject(sourcePath){
-  statsProjectPath = sourcePath || null;
-  statsStore = await stats.loadStats(statsProjectPath);
+/* ---------------- 机翻语境参考块（前后文注入） ----------------
+   与 LLM 的「多轮上下文」(llmContext) 是不同机制：
+     · 多轮历史 = 把上一轮的原文/译文作为对话轮次喂回（跨句累积）；
+     · 本函数 = 把当前句的**左右邻居**一起发过去（同一批），解决单句孤立翻译时
+       代词指代不明、语气不连贯的问题。
+   两者可以同时生效，互不冲突。 */
+
+/** 单行状态 → buildContextBlock 用的状态键 */
+function rowCtxStatus(p){
+  if (!p) return 'todo';
+  if (!String(p.translation || '').trim()) return 'todo';
+  const st = (p.pr && p.pr.status) || 'pending';
+  if (st === 'approved') return 'approved';
+  if (st === 'issue') return 'issue';
+  return 'pending';
 }
 
 /**
- * 把当前进度写进"当天"记录（覆盖写，不是累加）。
- * 口径说明：done/total 用 filestats.countStates（与进度条、场景树同一来源），
- * 来源构成用 stats.countBySource（内部同样以 p.done 为准），两者不会分叉。
+ * 取第 i 行的语境块（前 N 句 + 后 M 句，N/M 取自设置 ui.mtContextAround）。
+ * 默认前后各 2 句；设 0 = 关闭。
+ *
+ * 前后都取是刻意的：日语里代词与省略主语常要靠**后文**才能定（「彼女」指谁，
+ * 往往下一句才交代），只看前文解决不了。
  */
-function recordStatsNow(){
-  if (!statsProjectPath || !statsStore) return false;
+function mtContextBlock(i){
+  const n = _mtAroundCache === null ? 2 : _mtAroundCache;
+  if (n <= 0) return '';
   const paras = model.getParas();
-  const counts = countStates(paras);
-  if (!counts.total) return false;
-  const bySrc = stats.countBySource(paras);
-  statsStore = stats.recordDay(statsStore, model.getStateKey(), {
-    name: model.getFilename() || '',
-    at: Date.now(),
-    done: counts.done,
-    total: counts.total,
-    byMt: bySrc.mt, byTm: bySrc.tm, byHuman: bySrc.human,
-  });
-  return true;
+  const p = paras[i];
+  if (!p) return '';
+  const items = [];
+  for (let k = Math.max(0, i - n); k <= Math.min(paras.length - 1, i + n); k++){
+    const q = paras[k];
+    if (!q || q.isName) continue;          // NAME 行对语境没帮助，跳过后自然收缩窗口
+    items.push({
+      orig: q.content,
+      translation: q.translation,
+      status: rowCtxStatus(q),
+      current: k === i,
+    });
+  }
+  return mt.buildContextBlock(items);
 }
 
-/** 落盘节流：连续保存/批量机翻之间不反复写盘 */
-function saveStatsSoon(){
-  if (statsWriteTimer || !statsProjectPath) return;
-  statsWriteTimer = setTimeout(async () => {
-    statsWriteTimer = null;
-    try { await stats.saveStats(statsProjectPath, statsStore); } catch (e) { /* 统计写不进不阻塞业务 */ }
-  }, 15000);
-}
+let _mtAroundCache = null;
 
-/** 记录一次进度（改内存 + 排一次落盘） */
-function touchStats(){
-  if (recordStatsNow()) saveStatsSoon();
-}
-
-/** 立刻落盘（开面板前 / 关窗前） */
-async function flushStats(){
-  if (statsWriteTimer){ clearTimeout(statsWriteTimer); statsWriteTimer = null; }
-  if (!statsProjectPath || !statsStore) return;
-  try { await stats.saveStats(statsProjectPath, statsStore); } catch (e) { /* 忽略 */ }
-}
-
-async function openStats(){
-  if (!model.getParas().length){ toastError('请先导入文本文件'); return; }
-  recordStatsNow();
-  await flushStats();
-  const paras = model.getParas();
-  const counts = countStates(paras);
-  const summary = stats.summarize({
-    history: stats.historyOf(statsStore, model.getStateKey()),
-    done: counts.done,
-    total: counts.total,
-    bySrc: stats.countBySource(paras),
-  });
-  await showStatsPanel({ docName: model.getFilename() || '', summary });
-}
-
-/* ---------------- 机翻基线 / 机翻对比（ROADMAP P2-7） ---------------- */
+/* ---------------- 机翻基线 / 机翻对比 ---------------- */
 
 let mtBaseline = mtbase.emptyBaseline();
 let mtProjectPath = null;      // 基线落盘位置（源文件绝对路径；浏览器版为 null）
@@ -4192,7 +4324,7 @@ async function clearMtBaseline(){
   showToast('已清空机翻基线（译文未改动）');
 }
 
-/* ---------------- 翻译记忆 TM（ROADMAP P1-3） ---------------- */
+/* ---------------- 翻译记忆 TM ---------------- */
 
 let tmData = tm.emptyTm();     // { version, entries }
 let tmProjectPath = null;      // 记忆库定位用的源文件绝对路径（浏览器版为 null）
@@ -4252,7 +4384,7 @@ function applyTmToRow(i){
  * 全部动作复用既有函数,本函数不实现任何业务逻辑。
  * 译文 textarea 上不接管右键(见 rowmenu.js 顶部设计说明),保留原生粘贴/输入法候选。
  */
-/* ---------------- 行级版本快照 / 本地历史（ROADMAP P1-2） ---------------- */
+/* ---------------- 行级版本快照 / 本地历史 ---------------- */
 
 let lastSnapshotAt = 0;   // 当前文档上次留档时间（同一文档 5 分钟内不重复留档）
 
@@ -4681,7 +4813,7 @@ function initEvents(){
   // 主题设置(主题模式 + 背景 + 字体)
   document.getElementById('btnThemeModal').addEventListener('click', openThemeSettings);
   document.getElementById('btnStats').addEventListener('click', openStats);
-  // 机翻对比（ROADMAP P2-7）
+  // 机翻对比
   document.getElementById('btnMtDiffRefresh').addEventListener('click', async () => {
     await loadMtBaselineForProject(model.getFilePath());
     renderMtDiff();
@@ -4731,6 +4863,17 @@ function initEvents(){
     updateByteLimitLabel();
     const raw = String(e.target.value || '').trim();
     applyByteLimit(raw ? bytes.normalizeByteLimit(raw) : 0);
+  });
+  // 显示宽度上限：同样即时预览（与字节上限同一交互约定）
+  document.getElementById('widthLimitInput').addEventListener('input', (e) => {
+    updateWidthLimitLabel();
+    const raw = String(e.target.value || '').trim();
+    applyWidthLimit(raw ? width.normalizeWidthLimit(raw) : 0);
+  });
+  document.getElementById('mtAroundInput').addEventListener('input', (e) => {
+    updateMtAroundLabel();
+    const raw = String(e.target.value || '').trim();
+    applyMtAround(raw ? raw : null);
   });
   document.getElementById('bgOpacity').addEventListener('input', () => {
     updateBgOpacityLabel();
@@ -4907,6 +5050,7 @@ function initEvents(){
   document.getElementById('btnGlossExport').addEventListener('click', glossExport);
   document.getElementById('btnGlossExportCsv').addEventListener('click', glossExportCsv);
   document.getElementById('btnGlossApply').addEventListener('click', glossApply);
+  document.getElementById('btnNormalize').addEventListener('click', normalizeApply);
 
   // 词典 / 快捷片段
   document.getElementById('btnDictLookup').addEventListener('click', () => doDictLookup(document.getElementById('dictInput').value));
@@ -5021,7 +5165,7 @@ function afterUndoRedo(){
   model.scheduleAutosave();
 }
 
-/* ---------------- 异常退出检测（ROADMAP P2-8） ---------------- */
+/* ---------------- 异常退出检测 ---------------- */
 
 // 会话标记：启动时写入，正常退出时封存（补 closedAt）。
 // 下次启动若读到"未封存"的标记 → 说明上次没走完退出流程 → 提示恢复。
@@ -5180,7 +5324,7 @@ async function init(){
   updateUndoButtons();
   setSidebar(true);
   syncEditorialMeta();
-  await checkRecovery();  // 上次未正常关闭 → 提示恢复进度（ROADMAP P2-8）
+  await checkRecovery();  // 上次未正常关闭 → 提示恢复进度
   // 开发调试: ?autoload=<文件名> 在 Vite dev 下直接 fetch 加载本地文本(生产 file:// 下无参数不触发)
   const autoload = new URLSearchParams(location.search).get('autoload');
   // 开发调试: ?mdx=<文件名> 在 Vite dev 下 fetch 本地 .mdx 加载为词典源(生产同上不触发);
