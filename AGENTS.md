@@ -12,10 +12,12 @@
 
 | 目录 | 内容 |
 |---|---|
-| `src/` | 前端源码（49 个 .js + style.css）。纯逻辑模块不得依赖 DOM |
+| `src/` | 前端源码（56 个 .js + style.css）。纯逻辑模块不得依赖 DOM |
 | `src/workers/` | Web Worker（解析、搜索等重活，2 个 worker） |
-| `docs/` | `DEVELOPMENT.md`（含**维护契约**：阈值/上限的约定值与改动纪律）、`USER_GUIDE.md`、`obsidian-integration.md`、`RELEASE_NOTES.md` |
-| `tests/` | node --test 单测（35 个 .test.mjs） |
+| `src/ui/` | 从 main.js 拆出的编排/表单模块（见 `docs/DEVELOPMENT.md` 的拆分约定） |
+| `docs/` | `DEVELOPMENT.md`（含**维护契约**：阈值/上限的约定值与改动纪律）、`USER_GUIDE.md`、`dictionary-plugins.md`（词典源格式）、`obsidian-integration.md`、`RELEASE_NOTES.md` |
+| `tests/` | node --test 单测（44 个 .test.mjs） |
+| `tasks/` | 单功能的设计与实施记录（`plan.md` + `todo.md`，完成后不删，取舍理由留档） |
 | `scripts/` | 构建 / 打包 PowerShell + mjs 脚本 |
 | `src-tauri/` | Rust 侧（target/ 为构建产物，勿提交） |
 

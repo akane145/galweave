@@ -257,6 +257,31 @@ export async function lookupAllFuzzy(word, list){
   return { word: String(word || ''), results, errors };
 }
 
+/**
+ * 是否有**直接命中**（词头或读音精确等于查询词）。
+ *
+ * ⚠️ 为什么不能用「results 非空」代替：
+ *    MDX provider 在精确未命中时会返回**前缀补全**（`src/mdx.js:535-544`，最多 6 条）。
+ *    于是「查 食べた 得到 食べすぎ/食べる/食べ物…」这种情况 results 非空，
+ *    但**没有一条是 食べた**。若按非空判断，变形还原因误以为"查到了"而永不生效。
+ *
+ * JSON/HTTP provider 只返回精确或前缀命中，同样适用：只有 headword/reading 全等于
+ * 查询词才算直接命中。
+ *
+ * @param {Array} results lookupAll 的 results
+ * @param {string} word 查询词
+ */
+export function hasDirectHit(results, word){
+  const want = String(word == null ? '' : word).trim();
+  if (!want) return false;
+  return (Array.isArray(results) ? results : []).some(r => {
+    if (!r) return false;
+    const head = String(r.headword == null ? '' : r.headword).trim();
+    const reading = String(r.reading == null ? '' : r.reading).trim();
+    return head === want || reading === want;
+  });
+}
+
 /* ================= 内置适配器 ================= */
 
 /** 本地 JSON 词典适配器。

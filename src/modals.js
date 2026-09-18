@@ -84,6 +84,73 @@ export function showAnkiSettings({ conf = {}, decks = [], models = [], status = 
   });
 }
 
+/**
+ * 由词典词条加入术语表的小框。
+ *
+ * 为什么**不预填释义**当译名：词典释义是"解释"（如「食物を口に入れること」），
+ * 不是"译名选择"。预填会让用户顺手点保存，往术语表里塞进一句解释 —— 那比空着更糟。
+ * 所以译文留空等用户填，释义只作参考显示。
+ *
+ * @param {{src:string, definition?:string, exists?:boolean, current?:string}} opt
+ * @returns {Promise<{src:string,dst:string}|null>} 取消返回 null
+ */
+export function showGlossQuickAdd({ src = '', definition = '', exists = false, current = '' } = {}){
+  const previousFocus = document.activeElement;
+  return new Promise(resolve => {
+    const { mask, modal } = mountModal(() => {
+      const el = document.createElement('div');
+      el.className = 'modal gloss-quick-add';
+      el.setAttribute('role', 'dialog');
+      el.setAttribute('aria-modal', 'true');
+      el.setAttribute('aria-labelledby', 'gqa-title');
+      el.innerHTML =
+        '<h3 id="gqa-title" class="modal-title">加入术语表</h3>' +
+        (exists
+          ? '<p class="modal-body gqa-exists">术语表里已有「' + esc(src) + '」（当前译名：' + esc(current || '—') + '），保存会覆盖它。</p>'
+          : '') +
+        '<label for="gqa-src">原文</label>' +
+        '<input type="text" id="gqa-src" value="' + esc(src) + '">' +
+        '<label for="gqa-dst">译名（请填写）</label>' +
+        '<input type="text" id="gqa-dst" value="" placeholder="要写进术语表的译名">' +
+        (definition
+          ? '<label>词典释义（仅供参考，不会写入）</label><pre class="gqa-def">' + esc(definition) + '</pre>'
+          : '') +
+        '<p class="modal-body" id="gqa-hint">两栏都填好才能保存。译名留空时保存按钮不可用。</p>' +
+        '<div class="actions"><button type="button" class="btn-cancel">取消</button>' +
+        '<button type="button" class="btn-confirm">保存</button></div>';
+      return el;
+    });
+    const srcIn = modal.querySelector('#gqa-src');
+    const dstIn = modal.querySelector('#gqa-dst');
+    const cancel = modal.querySelector('.btn-cancel');
+    const save = modal.querySelector('.btn-confirm');
+    const validate = () => { save.disabled = !srcIn.value.trim() || !dstIn.value.trim(); };
+    validate();
+    srcIn.addEventListener('input', validate);
+    dstIn.addEventListener('input', validate);
+    let done = false;
+    const finish = value => {
+      if (done) return;
+      done = true;
+      unmount(mask);
+      if (previousFocus?.isConnected) previousFocus.focus();
+      resolve(value);
+    };
+    cancel.addEventListener('click', () => finish(null));
+    save.addEventListener('click', () => {
+      if (save.disabled) return;
+      finish({ src: srcIn.value.trim(), dst: dstIn.value.trim() });
+    });
+    mask.addEventListener('mousedown', e => { if (e.target === mask) finish(null); });
+    mask.addEventListener('keydown', e => {
+      e.stopPropagation();
+      if (e.key === 'Escape'){ e.preventDefault(); finish(null); }
+      if (e.key === 'Enter' && !e.isComposing && !save.disabled){ e.preventDefault(); save.click(); }
+    });
+    requestAnimationFrame(() => dstIn.focus());
+  });
+}
+
 export function showAnnotationEditor(text){
   const previousFocus = document.activeElement;
   return new Promise(resolve => {

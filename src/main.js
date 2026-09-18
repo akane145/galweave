@@ -24,6 +24,7 @@ import * as proof from './proof.js';
 import { chooseFormatAny, formatParas } from './offline-formats.js';
 import { initOfflineFormats, availableFormats } from './offline-formats-ui.js';
 import * as dictx from './dict.js';
+import * as deinflectx from './deinflect.js';
 import { createMdxProvider, createPathMdxProvider, createTauriMdd, mimeFromExt, srcToResourceKey, isMddResourceSrc, linkTarget } from './mdx.js';
 import * as mdx from './mdx.js';
 import * as suggest from './suggest.js';
@@ -44,7 +45,7 @@ import * as exporter from './exporter.js';
 import * as recovery from './recovery.js';
 import * as dhist from './dict-history.js';
 import * as tm from './tm.js';
-import { showConfirm, showMtCompare, showExitConfirm, showHistoryList, showStatsPanel, showAnnotationEditor, showAnkiSettings } from './modals.js';
+import { showConfirm, showMtCompare, showExitConfirm, showHistoryList, showStatsPanel, showAnnotationEditor, showAnkiSettings, showGlossQuickAdd } from './modals.js';
 import * as history from './history.js';
 import * as mtbase from './mtbaseline.js';
 import { showObsidianExport } from './obsidian-ui.js';
@@ -2049,24 +2050,24 @@ function dictSrcRow(src){
     edit.addEventListener('click', () => openDictHttpModal(src));
     row.appendChild(edit);
   }
-  if (!src.fixed){
-    const del = document.createElement('button');
-    del.className = 'toolbtn secondary';
-    del.textContent = '✕';
-    del.title = '删除该词典源';
-    del.addEventListener('click', async () => {
-      const ok = await showConfirm({ title: '删除词典源「' + src.name + '」', message: '该词典源将被移除，相关查询缓存一并清除。', confirmText: '删除', danger: true });
-      if (!ok) return;
-      dictSettings.sources = dictSettings.sources.filter(x => x.id !== src.id);
-      sessionDictEntries.delete(src.id);
-      const mp = mdxProviders.get(src.id);
-      if (mp && mp.dispose) mp.dispose();
-      mdxProviders.delete(src.id);
-      if (fsx.isTauri()){ dbx.dbRemoveSource(src.id).then(() => { rebuildDictProviders(); renderDictSourceList(); }); }
-      else saveDictSettings().then(() => { rebuildDictProviders(); renderDictSourceList(); });
-    });
-    row.appendChild(del);
-  }
+  // 每个源都可删除。此前这里有个 `if (!src.fixed)` 守卫，但 `fixed` 字段全仓库无人写入
+  // （恒为 undefined，等于永远为真）—— 是死逻辑，已移除。
+  const del = document.createElement('button');
+  del.className = 'toolbtn secondary';
+  del.textContent = '✕';
+  del.title = '删除该词典源';
+  del.addEventListener('click', async () => {
+    const ok = await showConfirm({ title: '删除词典源「' + src.name + '」', message: '该词典源将被移除，相关查询缓存一并清除。', confirmText: '删除', danger: true });
+    if (!ok) return;
+    dictSettings.sources = dictSettings.sources.filter(x => x.id !== src.id);
+    sessionDictEntries.delete(src.id);
+    const mp = mdxProviders.get(src.id);
+    if (mp && mp.dispose) mp.dispose();
+    mdxProviders.delete(src.id);
+    if (fsx.isTauri()){ dbx.dbRemoveSource(src.id).then(() => { rebuildDictProviders(); renderDictSourceList(); }); }
+    else saveDictSettings().then(() => { rebuildDictProviders(); renderDictSourceList(); });
+  });
+  row.appendChild(del);
   return row;
 }
 
@@ -2120,7 +2121,8 @@ async function installJsonDictSource(raw, path, fallbackName){
 
 /** 探测同名 .mdd 资源包(含分卷 .1/.2…)与同名 .css(独立样式文件,如新明解 XMJRH.css)并关联到词典(桌面版)。
  *  资源解析顺序: 同名 mdd → 分卷 mdd → 词典目录磁盘文件(KogoGaiji.ttf / 小学馆 image/** 这类同目录资源)。
- *  成功返回资源链,无任何资源源时也返回磁盘兜底(独立 CSS 读入 prov.extraCss({key,text}))。 */
+ *  成功返回资源链；无任何资源源时也返回磁盘兜底。独立 CSS 通过 `prov.extraAssets = assets`
+ *  挂到 provider 上（见下方的赋值处），不使用额外方法。 */
 async function tryPairMdd(prov, mdxPath, sourceId){
   if (!fsx.isTauri() || !prov || !mdxPath) return null;
   const profileInfo = dictionaryCssCandidates(mdxPath);
@@ -2314,8 +2316,61 @@ async function doDictLookup(word, isFuzzy, source){
   loading.className = 'dict-empty';
   loading.textContent = '查询「' + word + '」中…';
   box.appendChild(loading);
+
   const res = fuzzy ? await dictx.lookupAllFuzzy(word) : await dictx.lookupAll(word);
-  renderDictResults(res, fuzzy);
+
+  // 变形还原兜底：只有在**没有任何直接命中**时才试原形。
+  // ⚠️ 不能用「results 非空」判断 —— MDX 未精确命中时会返回前缀补全
+  //    （mdx.js:535-544），那种情况 results 非空但没有一条是查询词。
+  if (dictx.hasDirectHit(res.results, word)){
+    renderDictResults(res, fuzzy);   // 直接命中 → 行为与以前完全一致
+    return;
+  }
+
+  const fallback = await lookupByDeinflection(word, fuzzy);
+  if (!fallback) { renderDictResults(res, fuzzy); return; }
+
+  // 把候选结果并到主结果之前：用户要的是"这个词的意思"，不是前缀补全列表
+  renderDictResults({ ...res, results: [...fallback.results, ...res.results] }, fuzzy);
+  prependDeinflectNotice(word, fallback);
+}
+
+/**
+ * 按变形还原的候选词查词典，返回第一个真正命中的候选。
+ *
+ * ⚠️ **必须并行查**：候选最多 20 个，串行遇上 HTTP 词典（8 秒超时）会变成
+ *    分钟级等待。并行下延迟 = 一次往返，取序号最小者（deinflect 已按"最可能是原形"排序）。
+ *
+ * @returns {{word:string, results:Array, candidate:object}|null} 无命中返回 null
+ */
+async function lookupByDeinflection(word, fuzzy){
+  const candidates = deinflectx.deinflect(word);
+  if (!candidates.length) return null;
+  const settled = await Promise.all(candidates.map(c =>
+    (fuzzy ? dictx.lookupAllFuzzy(c.word) : dictx.lookupAll(c.word))
+      .then(r => ({ c, r })).catch(() => null)
+  ));
+  for (const item of settled){
+    if (!item) continue;
+    const results = item.r.results || [];
+    if (dictx.hasDirectHit(results, item.c.word)){
+      return { word: item.c.word, results, candidate: item.c };
+    }
+  }
+  return null;
+}
+
+/** 在结果列表顶部插入"这是按原形查到的"提示条 */
+function prependDeinflectNotice(word, fallback){
+  const box = document.getElementById('dictResults');
+  if (!box) return;
+  const el = document.createElement('div');
+  el.className = 'dict-deinflect';
+  const path = deinflectx.describePath(fallback.candidate);
+  // 多步时显示完整链条（如 食べさせられなかった → … → 食べる），对译者有参考价值
+  el.textContent = '未直接命中「' + word + '」→ 已按原形「' + fallback.word + '」显示'
+    + (path ? '（' + path + '）' : '');
+  box.insertBefore(el, box.firstChild);
 }
 
 function renderDictResults(res, fuzzy){
@@ -2349,6 +2404,27 @@ function renderDictResults(res, fuzzy){
       favBtn.classList.toggle('on', dictx.isFavorite(dictFavorites, favData));
     });
     head.appendChild(favBtn);
+
+    // 联动按钮：把查到的词用到别处。
+    // 与 ☆ 收藏并排（同一个作用域 = 这一个词条），风格一致、无需选中态。
+    const ankiBtn = document.createElement('button');
+    ankiBtn.className = 'dc-act';
+    ankiBtn.type = 'button';
+    ankiBtn.textContent = '🃏';
+    ankiBtn.title = '做成 Anki 卡片（正面生词，背面释义与当前行语境）';
+    ankiBtn.setAttribute('aria-label', '把「' + (g.headword || '') + '」做成 Anki 卡片');
+    ankiBtn.addEventListener('click', () => { ankiFromDictEntry(g); });
+    head.appendChild(ankiBtn);
+
+    const glossBtn = document.createElement('button');
+    glossBtn.className = 'dc-act';
+    glossBtn.type = 'button';
+    glossBtn.textContent = '＋';
+    glossBtn.title = '加入项目术语表（词条表）';
+    glossBtn.setAttribute('aria-label', '把「' + (g.headword || '') + '」加入术语表');
+    glossBtn.addEventListener('click', () => { glossQuickAddFromDict(g); });
+    head.appendChild(glossBtn);
+
     const hw = document.createElement('span');
     hw.textContent = g.headword || '';
     head.appendChild(hw);
@@ -4631,6 +4707,74 @@ async function ankiAddForRow(i){
   };
   if (!String(card.word).trim()){ toastError('这一行没有可制卡的原文'); return; }
   await ankiAddCard(card, '第 ' + (i + 1) + ' 行');
+}
+
+/**
+ * 由词典词条制卡：正面生词+读音，背面释义 + **当前行**的原句与译文作为语境。
+ *
+ * 语境取自当前活动行（currentActiveIdx），未打开文档或没聚焦行时优雅缺省 ——
+ * buildCardFields 对空字段本来就能正确处理（见 src/anki.js）。
+ */
+async function ankiFromDictEntry(g){
+  if (!g || !String(g.headword || '').trim()){ toastError('这个词条没有词头，无法制卡'); return; }
+  const card = {
+    word: g.headword || '',
+    reading: g.reading || '',
+    meaning: dictEntryPlainText(g),
+    source: (g.sources[0] && g.sources[0].source) || '',
+  };
+  // 语境：当前行（有文档时）
+  try {
+    const paras = model.getParas();
+    if (paras.length){
+      const p = paras[currentActiveIdx()];
+      if (p && !p.isName){
+        card.sentence = p.content || '';
+        card.translation = transValue(p);
+        card.speaker = p.nameTr || p.name || '';
+      }
+    }
+  } catch (e){ /* 无文档时忽略，卡片退化为"只有词与释义" */ }
+  await ankiAddCard(card, '词典「' + card.word + '」');
+}
+
+/**
+ * 取词条释义的纯文本（优先用第一条来源的第一条释义）。
+ * MDX 的释义是 HTML，必须过 htmlToPlainText —— 否则标签会被 Anki 当标记解析、
+ * 也会把术语表塞满样式。
+ */
+function dictEntryPlainText(g){
+  const seg = (g && g.sources && g.sources[0]) || null;
+  if (!seg) return '';
+  const parts = [];
+  for (const s of seg.senses || []){
+    if (!s) continue;
+    if (s.html){ const t = mdx.htmlToPlainText(s.html); if (t) parts.push(t); }
+    else if (s.gloss){ parts.push(String(s.gloss)); }
+    if (parts.length >= 3) break;   // 卡片/术语栏都不需要整篇释义，取前几条即可
+  }
+  return parts.join('\n');
+}
+
+/** 由词典词条加入术语表：弹小框让你填译名（不替你决定译名） */
+async function glossQuickAddFromDict(g){
+  if (!g || !String(g.headword || '').trim()){ toastError('这个词条没有词头，无法加入术语表'); return; }
+  const exists = glossData && glossData.terms && (g.headword in glossData.terms);
+  const r = await showGlossQuickAdd({
+    src: g.headword || '',
+    definition: dictEntryPlainText(g),
+    exists,
+    current: exists ? glossData.terms[g.headword] : '',
+  });
+  if (!r) return;
+  const src = String(r.src || '').trim();
+  const dst = String(r.dst || '').trim();
+  if (!src || !dst){ toastError('原文与译名都不能为空'); return; }
+  mutateGloss(() => {
+    if (!glossData.terms) glossData.terms = {};
+    glossData.terms[src] = dst;
+  });
+  showToast('✅ 已加入术语表：' + src + ' → ' + dst);
 }
 
 /** 通用制卡：先探测连通性，再添加，成功/失败都给明确文案 */

@@ -434,6 +434,60 @@ export function cleanGaijiInHtml(html){
   return root.innerHTML;
 }
 
+/**
+ * 词典释义 HTML → 纯文本。供"一词一件"的用途（Anki 卡片、加入术语表）。
+ *
+ * 为什么要它：MDX 的释义是带样式与结构的 HTML（`<red>`、ruby、`<img>` 等），
+ * 直接塞进 Anki 字段会被当标签解析、塞进术语表会带一堆标记。
+ *
+ * 实现刻意用正则而非 DOMParser：本函数要在 **node --test 里可测**（项目硬规则），
+ * 而 Node 无 DOMParser。代价是它不认识嵌套语义，只做"去标签 + 保留文本"，
+ * 这对"取释义文字"这个用途足够。
+ *
+ * 处理顺序（顺序有意义）：
+ *   1. 去掉 `<style>` / `<script>` 整块 —— 否则 CSS 文本会被当成释义
+ *   2. `<br>` / 块级标签 → 换行（保留可读的分行）
+ *   3. 去 ruby 的注音 `<rt>`/`<rp>`（它是读音标注，混进释义会读不通）
+ *   4. 去其余标签，解 HTML 实体
+ *   5. 压平连续空白
+ */
+export function htmlToPlainText(html){
+  let s = String(html == null ? '' : html);
+  if (!s) return '';
+  s = s.replace(/<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
+  s = s.replace(/<(rt|rp)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
+  s = s.replace(/<br\s*\/?>/gi, '\n');
+  for (const tag of ['div','p','li','tr','h[1-6]']){
+    s = s.replace(new RegExp('</' + tag + '\\s*>', 'gi'), '\n');
+  }
+  s = s.replace(/<[^>]*>/g, '');
+  s = decodeHtmlEntities(s);
+  // 压平：行内连续空白 → 单空格；连续空行 → 单个换行；去首尾空白
+  s = s.split('\n').map(line => line.replace(/[ \t\u3000]+/g, ' ').trim()).join('\n');
+  s = s.replace(/\n{2,}/g, '\n').trim();
+  return s;
+}
+
+/** 解 HTML 实体。只覆盖词典释义里实际会出现的那些（含数字实体） */
+export function decodeHtmlEntities(s){
+  const named = {
+    amp: '&', lt: '<', gt: '>', quot: '"', apos: "'",
+    nbsp: ' ', ensp: ' ', emsp: ' ', thinsp: ' ',
+    mdash: '—', ndash: '–', hellip: '…',
+  };
+  return String(s == null ? '' : s).replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, body) => {
+    if (body[0] === '#'){
+      const hex = body[1] === 'x' || body[1] === 'X';
+      const code = parseInt(hex ? body.slice(2) : body.slice(1), hex ? 16 : 10);
+      // 码点非法时原样返回，不产出乱码
+      if (!Number.isFinite(code) || code < 1 || code > 0x10FFFF) return m;
+      try { return String.fromCodePoint(code); } catch (e){ return m; }
+    }
+    const v = named[body.toLowerCase()];
+    return v === undefined ? m : v;
+  });
+}
+
 /** 词典 CSS 字号统一: 把 font-size 的固定 px 和 rem 值转成 em(基准 16px)。
  * 词典自带的固定 px 字号(如 XSJRH 的 12px/14px)与 rem 字号(如 jitendex 的 0.7rem)
  * 不跟随容器字号——px 是绝对值,rem 相对根元素——导致不同词典、不同用户字号下

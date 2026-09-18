@@ -12,6 +12,7 @@ import { sanitizeMdxHtml, sanitizeCss, extractCssUrls, hydrateCssUrls,
   createTauriMdxProvider, createTauriMdd, mddPartPaths, createCompositeMdd,
   createDiskResourceMdd, diskResourceKeyCandidates, soundResourceKey,
   extractHtmlHeadword, displayHeadword, cleanGaijiMarkers, unifyCssFontSize,
+  htmlToPlainText, decodeHtmlEntities,
   normalizeDictionaryColors, scopeDictionaryCss, normalizeDictionaryCss,
   mimeFromExt, srcToResourceKey, isMddResourceSrc, isEntryLink, isSoundLink, linkTarget } from '../src/mdx.js';
 import { base64ToArrayBuffer } from '../src/fs.js';
@@ -651,4 +652,63 @@ test('soundResourceKey: 剥掉 sound:// 协议头与斜杠,data-sound 裸 key �
   assert.equal(soundResourceKey(null), '');
   // mime 覆盖 .aac(发音文件的真实扩展名)
   assert.equal(mimeFromExt('s00013366.aac'), 'audio/aac');
+});
+
+/* ---------------- htmlToPlainText：释义 HTML → 纯文本（供 Anki/术语用） ---------------- */
+
+test('htmlToPlainText: 去标签保留文本', () => {
+  assert.equal(htmlToPlainText('<b>太い</b>'), '太い');
+  assert.equal(htmlToPlainText('<span class="x">あ</span><span>い</span>'), 'あい');
+  assert.equal(htmlToPlainText('素のテキスト'), '素のテキスト');
+});
+
+test('htmlToPlainText: 块级标签与 <br> 变成换行（保留可读分行）', () => {
+  assert.equal(htmlToPlainText('① 甲<br>② 乙'), '① 甲\n② 乙');
+  assert.equal(htmlToPlainText('<div>甲</div><div>乙</div>'), '甲\n乙');
+  assert.equal(htmlToPlainText('<p>甲</p><p>乙</p>'), '甲\n乙');
+  assert.equal(htmlToPlainText('<li>甲</li><li>乙</li>'), '甲\n乙');
+});
+
+test('htmlToPlainText: 剔除 style 与 script 整块（否则 CSS 会被当释义）', () => {
+  assert.equal(htmlToPlainText('<style>.x{color:red}</style>本体'), '本体');
+  assert.equal(htmlToPlainText('前<script>var a=1;</script>后'), '前后');
+});
+
+test('htmlToPlainText: 去掉注音 rt/rp（混进释义会读不通）', () => {
+  assert.equal(htmlToPlainText('<ruby>食<rt>た</rt></ruby>べる'), '食べる');
+  assert.equal(htmlToPlainText('<ruby>食<rp>(</rp><rt>た</rt><rp>)</rp></ruby>'), '食');
+});
+
+test('htmlToPlainText: 解 HTML 实体', () => {
+  assert.equal(htmlToPlainText('A&amp;B'), 'A&B');
+  assert.equal(htmlToPlainText('&lt;tag&gt;'), '<tag>');
+  assert.equal(htmlToPlainText('&quot;q&quot;'), '"q"');
+  assert.equal(htmlToPlainText('&#12354;'), 'あ', '十进制实体');
+  assert.equal(htmlToPlainText('&#x3042;'), 'あ', '十六进制实体');
+  assert.equal(htmlToPlainText('a&nbsp;b'), 'a b');
+});
+
+test('htmlToPlainText: 压平多余空白与空行', () => {
+  assert.equal(htmlToPlainText('  甲   乙  '), '甲 乙');
+  assert.equal(htmlToPlainText('甲<br><br><br>乙'), '甲\n乙');
+  assert.equal(htmlToPlainText('<div>甲</div>\n\n\n<div>乙</div>'), '甲\n乙');
+});
+
+test('htmlToPlainText: 空/非法输入安全', () => {
+  assert.equal(htmlToPlainText(''), '');
+  assert.equal(htmlToPlainText(null), '');
+  assert.equal(htmlToPlainText(undefined), '');
+});
+
+test('htmlToPlainText: 不依赖 DOMParser（node --test 可跑，这是刻意的实现选择）', () => {
+  // 若实现改用 DOMParser，本测试在 Node 下会失败 —— 借此钉住"必须保持可测"
+  assert.ok(typeof htmlToPlainText('<b>x</b>') === 'string');
+});
+
+test('decodeHtmlEntities: 非法码点原样返回（不产出乱码）', () => {
+  assert.equal(decodeHtmlEntities('&#0;'), '&#0;');
+  assert.equal(decodeHtmlEntities('&#xFFFFFF;'), '&#xFFFFFF;');
+  assert.equal(decodeHtmlEntities('&unknownent;'), '&unknownent;');
+  assert.equal(decodeHtmlEntities(''), '');
+  assert.equal(decodeHtmlEntities(null), '');
 });

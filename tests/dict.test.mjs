@@ -11,7 +11,7 @@ import {
   parseDictJson, matchEntries, extractPath, httpToResults, lookupAll,
   createJsonDictProvider, createHttpDictProvider,
   registerProvider, clearProviders, getProviders,
-  groupDictResults, favoriteKey, isFavorite, toggleFavorite,
+  groupDictResults, favoriteKey, isFavorite, toggleFavorite, hasDirectHit,
 } from '../src/dict.js';
 
 /* ---------------- CSV 解析 ---------------- */
@@ -363,4 +363,40 @@ test('personaText: 字段顺序稳定（便于模型与测试预期一致）', (
   const iTone = t.indexOf('语气');
   const iNote = t.indexOf('备注');
   assert.ok(iGender < iTone && iTone < iNote, '应按 PERSONA_FIELDS 顺序输出');
+});
+
+/* ---------------- hasDirectHit：变形还原兜底的判定依据 ---------------- */
+
+test('hasDirectHit: 词头或读音精确相等才算命中', () => {
+  const r = [{ headword: '食べる', reading: 'たべる' }];
+  assert.equal(hasDirectHit(r, '食べる'), true, '词头相等');
+  assert.equal(hasDirectHit(r, 'たべる'), true, '读音相等也算');
+  assert.equal(hasDirectHit(r, '食べた'), false, '不同词不算');
+});
+
+test('hasDirectHit: ⚠️ 只拿到前缀补全时不算命中（本函数存在的理由）', () => {
+  // MDX provider 未精确命中时会返回前缀补全，导致 results 非空但都不是查询词。
+  // 若用「results 非空」判断，变形还原将永不生效。
+  const prefixOnly = [
+    { headword: '食べすぎる', reading: 'たべすぎる' },
+    { headword: '食べ物', reading: 'たべもの' },
+  ];
+  assert.equal(hasDirectHit(prefixOnly, '食べた'), false, '前缀补全不是直接命中');
+});
+
+test('hasDirectHit: 前后空白不影响判定', () => {
+  assert.equal(hasDirectHit([{ headword: '食べる', reading: '' }], '  食べる  '), true);
+});
+
+test('hasDirectHit: 空/非法输入安全', () => {
+  assert.equal(hasDirectHit([], 'x'), false);
+  assert.equal(hasDirectHit(null, 'x'), false);
+  assert.equal(hasDirectHit([{ headword: 'x' }], ''), false);
+  assert.equal(hasDirectHit([{ headword: 'x' }], null), false);
+  assert.equal(hasDirectHit([null, undefined, {}], 'x'), false);
+});
+
+test('hasDirectHit: 多条结果里任一条命中即可', () => {
+  const r = [{ headword: '食べすぎる', reading: '' }, { headword: '食べた', reading: '' }];
+  assert.equal(hasDirectHit(r, '食べた'), true);
 });
