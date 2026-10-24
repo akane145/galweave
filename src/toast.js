@@ -1,8 +1,8 @@
 // toast.js — 轻量提示条（v3 视觉层 #toast 的 JS 实现）
 // 视觉契约（src/style.css）：
-//   #toast        固定顶栏下方，默认 opacity:0 + pointer-events:none
+//   #toast        固定底部状态栏上方，默认 opacity:0 + pointer-events:none
 //   #toast.show   触发显示（旧层 opacity transition，新层 toast-in 动画）
-//   #toast.error  警示色（var(--st-issue)），默认是成功色（var(--st-approved)）
+//   #toast.error  左侧警示色描边（--st-issue），默认成功色描边（--st-approved）
 //   CSS 侧 white-space:nowrap + text-overflow:ellipsis 兜底长文本
 // 纯逻辑（normalizeMessage / nextRepeat / composeText）无 DOM 依赖，配 node --test。
 

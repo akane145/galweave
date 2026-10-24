@@ -119,6 +119,24 @@ export function groupDictResults(results){
 
 /* ---------------- 收藏(纯逻辑) ---------------- */
 
+/**
+ * 按 (source, headword, reading) 去重查询结果，保留首次出现。不改原数组。
+ * 用于：①变形还原命中与主查询(MDX 前缀补全)合并时，同一词头可能来自两路；
+ *      ②Provider 自身返回重复条目的兜底。分组键与 groupDictResults 对齐(词头+读音)。
+ */
+export function dedupeResults(results){
+  const seen = new Set();
+  const out = [];
+  for (const r of results || []){
+    if (!r) continue;
+    const k = (r.source || '') + '\u0000' + r.headword + '\u0000' + (r.reading || '');
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+  return out;
+}
+
 /** 收藏条目唯一键: word|reading|source */
 export function favoriteKey(f){
   return (f && f.word || '') + '\u0000' + (f && f.reading || '') + '\u0000' + (f && f.source || '');
@@ -236,8 +254,14 @@ async function fuzzyLookup(p, word){
   if (typeof p.search === 'function'){
     const heads = await p.search(word, 20);
     const out = [];
+    const seen = new Set();
     for (const h of heads){
-      try { const hits = await p.lookup(h); out.push(...(hits || [])); } catch (e) { /* 单条失败跳过 */ }
+      // 词头去重:MDX 词表里同一 key_text 可能登记多次(同义词组/@@@LINK 变体),
+      // 不去重会对同一个词发起多次 lookup 并把同一条目重复并入结果(Rust 侧已去重,此处兜底)。
+      const k = String(h == null ? '' : h).trim();
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      try { const hits = await p.lookup(k); out.push(...(hits || [])); } catch (e) { /* 单条失败跳过 */ }
     }
     return out;
   }

@@ -17,11 +17,28 @@
 执行 npm test 运行 tests/*.test.mjs；执行 npm run lint 检查未声明变量及未使用变量。
 执行 npm run build 构建前端；执行 npm run tauri -- build --bundles nsis 构建 Windows 安装包。
 
+⚠️ **构建前必须清空输出目录**。`vite.config.js` 设了 `emptyOutDir: false`（原因见该文件注释：
+WorkBuddy 环境给 node 的 rmSync 套了 safe-delete shim，删除计数超阈值会要求交互确认，
+在 tauri 的非交互子进程里直接抛错），清空改由 `scripts/clean-dist.mjs` 负责，且已接进
+`npm run build` / `build:no-mt` / `build:html` 三个脚本。
+
+**不要绕过这三个脚本直接跑 `vite build`** —— 输出目录不清空时，上一版带哈希的资源会留在
+`dist/` 里**并被原样打进安装包**。实际踩过：`dist/assets` 积了 72 个文件（其中 17 个是历次构建的
+`index-*.js`），安装包因此虚增约 600 KB。排查判据：`dist/assets` 里出现多个 `index-*.js`。
+`clean-dist.mjs` 清空失败时**只告警不中断打包**（清空是优化，不该阻断发版），但会把剩余文件数说清楚。
+
 纯逻辑模块应保持无 DOM 依赖。修改记录的测试位于 tests/proof.test.mjs，包含超过 500 行、反复输入、状态恢复和输入结算等场景。
 
 ## 发布约定
 
 源代码提交到 Git，二进制放在 GitHub Releases；不提交 node_modules、target、个人配置、真实词典、临时截图或新增真实游戏脚本。发布标签对应被测试的源码提交。
+
+发版前需同步四处版本号：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`
+（`Cargo.lock` 随构建自动更新）。三处不一致时产物版本会与预期不符。
+
+打包产物放入 `release-vX.Y.Z/`（该目录被 `.gitignore` 的 `release-v*/` 忽略，不入库）：
+`Galweave_X.Y.Z_x64-setup.exe`（NSIS 安装包）、`Galweave_X.Y.Z_x64.exe`（直接运行版，
+即 `src-tauri/target/release/galweave.exe`）、`SHA256SUMS.txt`（两行的 SHA-256 校验值）。
 
 当前校对记录按行号、原文标识和字段合并；首次记录的 before 保留，后续只更新 after。旧版数据按原有最新在前的顺序合并。若旧版已丢失最早记录，只能保留尚存的最早文本，不能重建已丢失内容。
 
@@ -29,7 +46,22 @@
 
 ## 维护契约
 
+### 自定义标点规则（src/textnorm.js）
+
+- `MAX_CUSTOM_NORM_RULES = 100`；`MAX_CUSTOM_NORM_LENGTH = 200`（匹配和替换各自的 UTF-16 码元数），由 `tests/textnorm.test.mjs` 锁定。空匹配拒绝；空替换表示删除。
+- `MAX_NORMALIZED_TEXT_LENGTH = 1000000` 限制单行自定义替换的结果长度；在分配拼接结果前检查，防止链式扩写耗尽内存。这是操作安全上限，不是目标引擎字节上限。
+- 内置规则先执行，自定义规则按列表顺序各执行一次，使用 split/join 字面替换，`$&` 没有特殊含义，不支持正则。
+- 复用 tokenizeInline 保护控制符；不能匹配/插入控制符或换行，替换后再校验完整受保护序列。
+- collectNormalizable 返回完整 translation，应用时不能再包一层引号。提交前检查段落数组和原译文与预览一致。
+- 本机设置位于 settings.ui.normRules / customNormRules。记录包携带 normRules（内置选择与自定义列表），导入后只作用于独立记录包项目。
+
 代码里多处阈值与上限是**经过取舍的约定值**，改动它们需要同步本表与对应单测。原先这些契约挂在 docs/ROADMAP.md 上，该文档已在提交 096b28c 中删除，故集中到此处。
+
+UI 视觉与交互规范（Design Tokens、三主题、字阶、热区、焦点环）的权威源是 `docs/ui-design-spec-v4.md` + `src/style.css` 头部 token 块；三主题色对比度由 `tests/contrast.test.mjs` 验证，改色必须过该测试。本表继续管阈值类契约，两处冲突时以本表为准（视觉 token 不属于阈值）。
+
+UI 整改验收（2026-10-13）：不引入基于 CSS 行号或字面量总次数的“卫生阈值”。颜色修改同时检查语义前景配对和浏览器实际计算样式；搜索/侧栏布局在 1280×800 与 960×600 验证。行号状态以 `data-state` 的四态为准，不能用 `.done` 代替已定稿。行间距保留 compact/cozy/loose = 6/12/20px，与 `renderer.js` 的 `ROW_GAP_BY_DENSITY` 同步；行内 padding/border 由现有实际测高处理，改布局后仍须检查滚动和换行。背景图变量与容量阈值不变。复核及脚本入口见 `tasks/ui-polish/review.md`、`todo.md`。
+
+2026-10-14 补充：状态栏 token `--statusbar-h` 按 v4 为 32px，toast 使用它定位于底栏上方；token 必须有可解析的定义。`main.js` 在模式切换时重算主区高度，并用 ResizeObserver 观察顶栏、底栏的 border box，防止搜索换行或字体变化后主区越过窗口底部。
 
 ### 质量检查阈值（src/qa.js、src/proof.js）
 
@@ -84,7 +116,9 @@
 - **多轮历史**（`mt.js` `llmContext`，设置 `mt.providers.llm.contextTurns`）：把上一轮的原文/译文作为对话轮次喂回，跨句累积。
 - **语境参考块**（`mt.js` `buildContextBlock`，设置 `ui.mtAround`）：把当前句左右邻居一起发过去，同一批。解决单句孤立翻译时代词指代不明。
 - **角色人设**（`glossary.personas`）：按当前行说话人查人设，经 `mt.buildSpeechPrompt` 与语境块合并成一段注入（人设在前、语境在后）。
-- 三者可同时生效。`llmContext` 是模块级全局，**不跨文档保留**：打开/切换文档必须调 `resetLlmContext()`（`main.js` 在 `finishLoadSource` 与 `afterDocActivated` 两处调用），否则上一篇对白会串味。
+- 三者在**通用大模型**中可同时生效。`llmContext` 是模块级全局，**不跨文档保留**：打开/切换文档必须调 `resetLlmContext()`（`main.js` 在 `finishLoadSource` 与 `afterDocActivated` 两处调用），否则上一篇对白会串味。
+- **Sakura 使用按版本的专用翻译模板与术语表，不注入上述语境参考块或角色人设。** 这类模型可能将状态标记、邻居台词与说明指令一并翻译/复述；不得把通用模型的参考块直接拼入其 user 消息。旧 `/completion` 回退必须由相同版本的 messages 构造 ChatML，避免端点变化时提示词版本丢失。
+- Sakura 返回包含应用翻译指令/语境标记、且输入正文中没有对应片段时，按异常响应拒绝返回可写入译文；流式聚合结果同样检查。不得靠删掉指令后的文字或截取第一句猜译文；普通“未翻译”“术语表”等词本身不是拒绝依据。回归见 `tests/mt-sakura.test.mjs`。
 
 ⚠️ **人设靠 `p.name` 匹配**，而 `p.name` 来自脚本前缀解析（`parsers.parsePrefix`，需 `☆编号☆角色名☆台词` 这类格式）。解析不出说话人时人设**静默失效**——因此术语面板的「角色人设」区有一行匹配情况提示，无说话人时显示警告。改动解析规则或人设逻辑时不要删掉该提示，它是用户判断"人设到底有没有生效"的唯一入口。
 
@@ -98,15 +132,102 @@
 - `history.shouldSnapshotByChanges(changedRows)` —— 改动量维度，阈值 `HISTORY_CHANGE_THRESHOLD = 50`。按**行去重**计数（同一行反复输入只算一行），语义是"有多少行与上次快照不同"，不是按键次数。
 - 留档后必须 `resetChangeCounter()`；写盘失败也要清零，否则每次输入都会重试写盘、越积越慢。
 
-### 剧场视图（body.theater）
-- 实现是**纯 CSS 覆盖**，不另建 DOM：虚拟滚动、行高模型、搜索/术语高亮都长在 `.para` 上，复制一套会立刻产生两份需要同步的渲染逻辑。
-- 只读靠 `textarea.readOnly`（不是 `disabled`，保留聚焦与 Tab 导航），由 `renderer` 读 `state.theater()` 决定。
-- 说话人配色按**文档中首次出现顺序**分配槽位（`main.speakerSlot`），保证同角色全篇同色且不随滚动漂移；只给前 3 个角色上色（再多区分度不够）。换文档要 `invalidateSpeakerSlots()`。
-- 与校对模式**互斥**：进入剧场会先退出校对（批注框、漏翻条纹在阅读态是噪音，且会撑变形气泡）。
-- ⚠️ 切换后必须**下一帧再 `refreshAllRows()` 一次**：`autoResize` 读的是当前 `scrollHeight`，而刚加的 body class 在同一任务内尚未生效，会量到旧字号的高度，气泡撑不开。
-- ⚠️ **任何在剧场模式下量元素尺寸的函数都必须显式跳过**。剧场里 `.orig-cell` 是 `display:none`，`getBoundingClientRect()` 全返回 0，据此算出的位移是垃圾值；而 `syncOriginalWrapWidth` 写的是 **inline 样式**，坏值会**留在元素上**。已踩过一次：`left` 被算成 566px，退出剧场后原文行整体右推、超出显示边界 388px（v5.6.0 引入，v5.9.0 修复）。
-  修法见 `renderer.js` 的 `syncOriginalWrapWidth`：入口 `if (state.theater && state.theater()) return;`，且**量到 0 也不写回**（`transRect.width <= 0 || origRect.width <= 0`）。
-  新增同类函数时照此办理；排查判据是"开剧场 → 关剧场 → 看 `element.style` 有无残留"。
+### 量尺寸并写 inline 样式的函数（历史教训）
+
+「剧场视图」已于 2026-09-19 整功能移除（见 `docs/ui-design-spec-v4.md`），本节只保留它留下的通用经验，不再有对应代码。
+
+- ⚠️ **凡是用 `getBoundingClientRect()` 量尺寸、再把结果写进 inline 样式的函数，量到 0 时不得写回**。元素被 `display:none`（或祖先被隐藏）时所有矩形都是 0，据此算出的位移是垃圾值；而 inline 样式写上去就**留在元素上**，显示态恢复后依旧生效。
+- 已踩过一次：原文行 `left` 被算成 566px，退出该显示态后原文行整体右推、超出显示边界 388px（v5.6.0 引入，v5.9.0 修复）。修法是入口跳过隐藏态，且量到 0 也不写回。
+- 新增同类函数时照此办理；排查判据是"切到隐藏态 → 切回 → 看 `element.style` 有无残留"。
+- 另一条同源经验：给 body 加 class 改字号/布局后，同一任务内 `scrollHeight` 仍是旧值，需**下一帧再测一次**（`autoResize` 会量到旧字号的高度）。
+
+### 保存安全（`src-tauri/src/lib.rs` + `src/fileguard.js` + `src/encoding.js`）
+
+三条保护互相补充，缺一条都会留下"成果静默丢失"的口子：**原子写出**、**外部修改检测**、**编码承袭**。
+
+- **原子写出**（`lib.rs` `write_atomic`）：先写同目录临时文件（`.名字.galweave-tmp<pid>`）→ `sync_all` → `fs::rename` 替换。
+  同目录是硬要求：`rename` 只在同卷内原子，跨盘会退化成复制+删除。Windows 上走 `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`，可直接替换已存在文件。
+  rename 失败时**返回失败并保留原文件，禁止退回直接覆盖**。临时文件使用进程号和时间戳并以 create_new 创建。目录创建或任何写盘步骤失败均返回 Err，包括 settings.json 写入。
+- **备份失败必须上报**：`.bak` 只是保险（真正的保护是原子替换 + 历史快照），但失败不能装作成功。
+  `WriteResult.backup` 取 `created / exists / skipped / failed`，`failed` 时带 `backupError`，前端用 `fileguard.describeWriteResult` 翻成"原文件已替换但没留下备份，可用历史找回"。
+- **外部修改检测**：打开时 `file_stat` 记指纹（size + mtime + FNV-1a 内容散列），写盘前再取一次比对。
+  **散列才是判据**，size/mtime 只是快筛 —— 外部编辑器可能保留 mtime，只比时间会漏报覆盖。
+  取不到指纹时归为 `UNKNOWN` 且**不阻断保存**（浏览器版没有 file_stat，不能因此天天弹窗）。
+  判定为变化时给三个选项，`conflictChoices()` 里 **`SAVE_AS` 永远排第一并获得默认焦点**（"默认不覆盖"是安全属性，改顺序前先看 `tests/fileguard.test.mjs`）。
+  第一版**不做自动合并**：脚本有编号、控制符、镜像格式的原文/译文配对，做不彻底的三方合并比不做更危险。
+- **编码承袭**：读入编码记在 `model.sourceEncoding`，保存默认沿用它（`encoding.suggestWriteEncoding`）。
+  曾经写出固定 UTF-8 —— Shift-JIS 的脚本存回去变 UTF-8，引擎读出来全是乱码而用户以为保存成功。
+  `encoding.js` 只管名字/可写性/提示文案，真正的编解码在 Rust（浏览器 `TextEncoder` 只有 UTF-8）。
+- ⚠️ **UTF-16 不能走 `encoding_rs` 的 `encode()`**：WHATWG 把 UTF-16LE/BE 的编码器定义为「UTF-8 编码器 + 对应 BOM」，于是 `UTF_16LE.encode("あ")` 得到 `FF FE E3 81 82`（UTF-8 字节顶着 UTF-16 的 BOM，别的程序读是乱码）。必须自己按码元拼，这是本文件唯一手写编码的地方。
+- ⚠️ **无法表示的字符默认拒绝写出**：`encoding_rs` 会把它们写成 `&#12345;` 实体，属静默损坏。`encode_text` 用 `had_errors` 报错中止，`allowLossy` 才放行；UI 在报错时给"改用 UTF-8 / 强制写入 / 取消"三个出路。
+- `.galweave/` 下的内部数据文件一律 `noBackup`（否则套出 `.galweave/.galweave/*.bak`）；进度/proof 文件仍按后缀豁免。
+
+### 批量机翻任务（`src/mt-task.js` + `src/mt.js` + `src/main.js`）
+
+状态机在 `mt-task.js`（纯逻辑、有单测），`main.js` 只驱动与渲染。三条验收点：
+
+- **停止保留已完成**：`requestStop` 只把 `PENDING` 改标 `STOPPED`，`DONE` 原样保留。停止**不算失败**（不进重试清单）。
+  `MtAbortError` 是独立类型（`isMtAbort` 判定）：UI 对"用户停止"要静默保留，"失败"要进清单等重试，混成一种会让按停止报出一片红错。
+- **重试只请求失败行**：`retryIndexes` 只取 `FAILED`（不含 `DONE / STOPPED / EDITED`）。重试用同一套状态机，所以"重试里又失败的行"还能再重试。
+  `EDITED`（等待期间被人工改过）**不重试** —— 用户已经自己写了，重试等于再覆盖一次。
+- **迟到结果不覆盖人工修改**：`createEditTracker` 给每行一个递增版本号，`main.js` 的人工写入路径（`onRowInput`）调用 `mtTaskEdit.bump(i)`；发请求前 `beginRow` 记版本，回来时 `settleStale` 比对，不一致就 `markEdited` 丢弃结果。
+  用版本号而不是"译文是否为空"，是为了识别"改了又改回原样"和"用户故意清空"——那都仍属人工介入。
+- ⚠️ **超时必须覆盖正文读取**（`mt.js` `openGuardedRequest` / `makeAbortGate`）：计时器以前在 fetch 返回后就清除，`res.json()` 与流式读取再无保护，服务返回响应头后挂住就永远不返回、"停止"也停不掉。
+  现在用 `Promise.race` 强制兑现截止时间；**gate 必须排在数组第一位** —— 两边都已 settle 时 race 由数组顺序决定胜负，请求放前面会让"已中止"的请求以正常结果胜出，停止失效。
+  `gate.throwIfAborted()` 在发请求前先拦一次（已停止就不必白发请求、白算一轮）。
+- 超时默认 `MT_TIMEOUT_DEFAULT = 90 秒`（`normalizeTimeoutMs` 钳到 5–600 秒，存 `mt.providers.*.timeoutMs`）。定 90 秒是因为本地 7B 模型冷启动常需 30–60 秒，太短会把正常冷启动判成失败。
+
+### 翻译记忆的分级与角色变体（`src/tm.js`）
+
+- **审核分级**：条目带 `status`，`draft`（机翻写入，未复核）/ `confirmed`（人工确认）。
+  **自动套用只认 `confirmed`**（`findConfirmed`）—— 机翻结果原本无门槛入库并自动扩散到全篇，错就错成一片。
+  草稿仍能精确命中供人工挑选（`findExact`），侧栏建议与行菜单都标注来源（`entrySourceLabel`）。
+- **确认的两种来源**：`p.src === 'human'`（人工输入/改写机翻）或该行 `pr.status === 'approved'`（通过校对即确认，不必再点一次）。
+  `collectFromParas` 按此归因；**已确认条目不会被同句的机翻草稿降级**（人工的确认是定论）。
+- 套用记忆（`applyTmToRow`）即视为认可该译法 → 顺手 `confirmEntry` 标为已确认；行菜单另有「确认这条记忆」只标状态不改译文。
+- **角色多变体**：条目主键从 `key` 升级为 `key + name`（`entryId` 用 `\u0001` 拼接，避免 ("あ","い") 与 ("あい","") 撞号），同一句不同说话人的译法**共存**而不是互相覆盖。
+  查找规则：指定说话人 → 优先该角色；该角色没有 → 退回未标注说话人的**通用**条目；只有别的角色的条目 → 返回 null（可能是别人的语气，交给相似命中当建议）。未指定说话人时只看通用条目，**不拿某个角色的译法顶上**。
+- **v1 → v2 迁移**：v1 条目没有 status/name。**v1 一律迁为 `confirmed`** —— 那时入库路径是"人工翻译完成后收割"，与现在的机翻自动入库不同，降级成草稿会让老用户已有的记忆突然不再自动套用。
+- `TM_MAX_VARIANTS = 6`：一句口头禅被反复用在不同角色身上时不再无限堆积。
+- ⚠️ `normalizeStatus` **只认 `confirmed`，其余一律当草稿**（宁可多让人看一眼，不可当标准答案扩散）。
+- ⚠️ `findSimilar` 同分时**已确认优先**排序 —— 用户已在别处确认过的说法更值得先看。
+
+### 跨设备记录包（src/record-pack.js）
+
+给「桌面版 ↔ 浏览器版」一个可搬运的载体：浏览器版的记录全在 IndexedDB，
+不随 HTML 文件走，所以需要**显式导出成一个文件**。反过来说，桌面版用同步盘/git
+同步 `.galweave/` 已有路径，记录包是补上跨形态那条。
+
+- **白名单序列化，不做排除法**：`createRecordPack` 逐字段显式挑选。排除法会随上游
+  加字段而**默认泄漏**新字段；白名单默认不漏。测试直接断言序列化结果里不出现
+  API Key 与本机路径。
+- **不打包设备配置**：`settings.json`（含机翻 API Key）与词典源（`galweave.db`，存绝对路径）都不进包；
+  导入后这些仍在本机各自配置。
+- **不打包进度文件**（`*.progress.json`）：包内已有 `rows[].translation`（最终译文），
+  两者同携带会出现"该信哪个"的歧义。
+- ⚠️ **导入靠逐行比对原文校验，不信任包内行号**：重新解析 `rawText` 后逐行比
+  `p.orig === saved.orig`，任一行不符或行数不一致就**整体拒绝**。译文按行号套用，
+  套错行等于把一个角色的台词写到别人嘴里 —— 比导入失败严重得多。
+- ⚠️ **解析规则只在同步调用内临时生效并 `finally` 还原**（`setParseConf(包内)` → 解析 → 还原）。
+  留在全局会让**当前打开的其他文档**也用错规则解析。测试断言失败后 `getParseConf()` 与导入前一致。
+- **记录包文档走独立存储命名空间**（`model.setRecordKey('record:<uuid>')`，
+  `getStateKey()` 优先返回它）。各模块 IO 层据此分流到 IndexedDB：
+  `glossary` 用 `portableKey`、`history`/`stats`/`tm`/`mtbaseline` 用 `isAbsPath`（`record:` 不是绝对路径）、
+  `proof` 用 `proofKey`。**这样导入绝不会写用户的真实项目文件或覆写全局术语表。**
+- **导入不覆盖当前工作**：先把活动文档 `flushDocToTab` 冻结，再开新标签；重复导入同名包 = 多个独立标签。
+- **导入后 `docDirty = true`** 且保存按钮重定向到「导出记录包」（`saveDirect` 开头的 `if (recordContext)`）——
+  这种文档没有磁盘路径，"保存原文件"无从谈起。导出成功只在**确认没再改动**时才 `clearDirty`。
+- 上限 `RECORD_PACK_MAX_BYTES = 64 MiB`；`JSON.parse` reviver 拒绝 `__proto__` / `constructor` / `prototype`。
+- **不做** WebDAV/自动同步、整项目打包、导入时自动合并（两份离线改动的合并需要脚本结构级理解，
+  同「保存安全」不做事三方合并的理由）。
+
+### 浮层模块（src/modals.js）
+
+- `showConfirm` 是"做/不做"；`showChoice` 是"怎么做"（保存冲突、编码拒绝这类三选一且没有明显是非的场景）。
+- ⚠️ **`showChoice` 按 `c.id` 认选项，没有 `id` 的项被静默过滤**。`fileguard.conflictChoices()` 的返回值直接喂给它，字段名曾写成 `action` —— 结果是**最需要选择的时刻弹出三个按钮一个都没有的空对话框**。`tests/fileguard.test.mjs` 有一条测试专门锁这个字段名。
+- `showChoice` 的**默认焦点固定在第一个选项**上；调用方必须把最安全的那个放第一位（`conflictChoices` 把"另存为"排第一）。
+- `showMtTaskPanel` 是**常驻浮层而非 toast**：批量机翻可能跑几分钟，用户要随时看到进度、失败行数并能立刻停止；toast 两秒就消失。它每次刷新都从任务对象全量重画，避免两处各记一份进度而说法不一。
+- `showMtTaskPanel` 的 Esc **只关面板不停任务** —— 后台继续跑是合理预期，想停就点停止按钮（有明确语义的动作不该藏在 Esc 里）。
 
 ### 界面模块拆分（src/ui/）
 
@@ -249,3 +370,32 @@ UI 状态机的纯逻辑部分（布局/样例/标注的增删改、v2 回填、
 2. 传入的 URI 由 `note_uri` 逐字节白名单编码（`:83-87`：仅保留 `[A-Za-z0-9-_.~]`，其余 `%XX`），且路径先经 `note_path` 校验必须是指定 vault 下的既有文件（`:68`）；
 3. 被启动的是固定程序名（`rundll32.exe` 等）而非用户提供的命令串，属于"用系统默认程序打开一个文件"的标准做法；
 4. 该文件自 v5.3.1（提交 `0d80c3b`）起未被修改，**不在本次改动范围内**。
+
+### 编辑导航与连续校对
+
+- `src/editor-navigation.js` 是无 DOM 的按键决策、选区裁剪、队列筛选和双向导航逻辑。IME (`isComposing` / 229) 不触发切行；修饰键 Enter 留给全局动作。
+- `renderer.captureEditorPosition` / `restoreEditorPosition` 使用会话内选区及虚拟列表的顶部行锚点；由标签快照持有，不存入脚本和进度文件。全文重建时清空旧文档选区，恢复时再注入。
+- 校对队列复用 `missingIssues()` 的 proof/qa 结果，不定义新检查阈值。人工通过不隐式关闭批注或忽略自动检查；暂留不改变状态。
+- 手动输入在内容确实变化时撤销旧通过状态；通过并继续前先 `settleInput`，防止延迟结算把刚通过的状态再次降级。
+- 底栏 Tab 提示（`#statusTabHint`）由 `renderer` 的 `onSuggestChange` 回调驱动：建议浮层可见时显示「采纳」，隐藏后回到「下一行」。新增建议显示/隐藏路径时必须走 `renderSuggest` / `hideSuggest`，不要直接改 `sgPop.style.display`，否则提示会残留。
+
+### 全部替换（预览 → 勾选 → 应用）
+
+- **预览、字段边界与提交清单都在 `src/replace-apply.js`**（纯逻辑、有单测），`main.js` 只做编排。测试必须调用这些生产函数，**不要在测试里复制一份提交逻辑** —— 曾经因为测试自写 `applySelected`，漏掉了 R1（只勾名字却把译文写回预览时的旧值）。
+- **预览与应用共用同一份规则来源**：`search-remote.replaceAllInParasDeltas` 的返回值。预览展示它，应用直接消费它 —— 不要为预览另写一份扫描逻辑（两套规则必然分叉）。
+- ⚠️ **只提交本次替换的目标字段**（`replaceTargetField`：`name` → `nameTr`，其余 → `translation`）。deltas 两个字段都带预览时的值，未替换的那个可能在预览期间被机翻/人工更新过，回写它会丢数据。原值核对也只核对目标字段。
+- ⚠️ **归因（`p.src`）同样按字段边界处理**（`commitReplaceEntries`）：只有**译文**被替换时才记 `human`；只改译名**不动**译文来源 —— 否则未复核的机翻草稿会在保存收割时变成 confirmed 并自动扩散（R3）。相应地 `mtTaskEdit.bump` 也只在改译文时推进（逐行译名输入本就不推进）。
+- 撤销快照由 `pushUndo` 在写入前捕获**两个字段与 `src`**（`model.rowSnapshot`），因此一次 Ctrl+Z 能回到提交前一刻的真实状态（文本与归因一致）。`applyDeltas` 对缺 `src` 的老快照保持兼容：不写归因。
+- ⚠️ **不得用 `workers-client.searchReplaceAll()` 做预览**：`search.worker.js` 处理该消息时会**同步改写自己的 shadow**，取消预览会留下与主线程不一致的 Worker 状态（幽灵匹配）。预览一律走非破坏计算。
+- deltas 的 `count` 是该行命中次数（逐行「替换 N 处」）；同值替换（before === after）不算真正改变，既不进预览也不产生撤销项。
+- 预览行携带只读上下文：行号、脚本编号（`p.id`）与原句（`p.content`）。只读展示，不写回、不改解析规则。
+- 应用前核对：文档身份（`getStateKey`）、段落数组引用、查找/替换参数、所选行的目标字段原值。核对与写入之间**不放异步等待**。任一项不符整体拒绝，不覆盖新输入。
+- 只把选中行压入**一次** `model.pushUndo`；写入走人工修改同一套 bookkeeping（`p.src='human'`、`demoteApproved`、`mtTaskEdit.bump`、`noteRowChanged`、`markDirty`、`refreshProofUI`、强制全量同步搜索影子）。
+- `search-remote.js` 的空查找串必须防护（`q === ''` 与 `replaceAllText` 的 `find === ''`）：`i = j + find.length` 在空匹配下原地不动，会死循环。`search.js` 早有防护，remote 版曾缺。
+
+### 模态浮层的键盘隔离（R2）
+
+- 全局 keydown（`main.js`）在开头判定 `.modal-mask.show`；显示期间，非"模态内可编辑控件"的全局命令键（`shortcut-guard.isGlobalCommandKey`：Ctrl+S/F/G/Z/Y、F2/F3、Ctrl+Enter）只 `preventDefault`，不派发。
+- 模态内输入框保留浏览器原生行为（含控件自己的 Ctrl+Z 文本撤销），Tab/Shift+Tab 焦点循环、Esc、确认键不受影响；校对快捷键录制仍在隔离分支之前。
+- ⚠️ **新增"能触达文档级动作"的浮层时，必须具备同样的隔离或与模态互斥**。命令面板 `palette.openPalette()` 已按此在模态期间拒绝打开 —— 它盖在模态之上会绕过隔离并把焦点带出对话框。
+- 关闭模态后无需显式恢复：隔离分支只在有 `.modal-mask.show` 时成立。

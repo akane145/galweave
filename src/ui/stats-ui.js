@@ -27,6 +27,14 @@ let statsStore = null;          // 当前项目的统计库（懒加载）
 let statsProjectPath = null;    // 落盘位置（源文件绝对路径；浏览器为 null）
 let statsWriteTimer = null;
 
+export function captureState(){ return { statsStore, statsProjectPath }; }
+export function restoreState(value){
+  if (statsWriteTimer) clearTimeout(statsWriteTimer);
+  statsWriteTimer = null;
+  statsStore = value?.statsStore || stats.emptyStore();
+  statsProjectPath = value?.statsProjectPath || null;
+}
+
 /** 切换项目：加载该文件对应的统计库（随项目 .galweave/stats.json） */
 export async function loadStatsForProject(sourcePath){
   statsProjectPath = sourcePath || null;

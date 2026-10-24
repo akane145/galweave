@@ -10,7 +10,9 @@ import { currentToken } from './suggest.js';
 import { byteCount, usageLevel, formatByteTitle, encodingLabel, normalizeEncoding } from './bytes.js';
 import { visualWidth, widthLevel, formatWidthTitle, suggestBreak, formatWidth } from './width.js';
 import { rowStatusInfo } from './rowstatus.js';
+import { iconMarkup, rowStatusIcon } from './icons.js';
 import { analyzeRowQA } from './qa.js';
+import { editorKeyAction, selectionFor } from './editor-navigation.js';
 
 const ROW_MAX = 400;    // textarea 最大高度(px)
 const BUFFER = 10;      // 视口两侧预挂载的可见行数
@@ -24,7 +26,15 @@ let rows = {};         // ⚠️ 对象映射不是数组：遍历用 Object.val
 const list = document.getElementById('list');
 const emptyEl = document.getElementById('empty');
 
-let heights = createRowHeightModel(0); // 行高模型(实测 + 估算 + 隐藏)
+const ROW_GAP_BY_DENSITY = { compact: 6, cozy: 12, loose: 20 };  // 须与 style.css 的 --row-gap 三档一致
+let heights = createRowHeightModel(0, { gap: ROW_GAP_BY_DENSITY.cozy }); // 行高模型(实测 + 估算 + 隐藏 + 行距)
+
+/** 阅读密度档变化:行距 gap 换档 + 已挂载行按新内距重测(main.applyDensity 调用) */
+export function setDensity(){
+  const d = document.documentElement.dataset.density;
+  heights.setGap(ROW_GAP_BY_DENSITY[d] || 12);
+  refreshAllRows();
+}
 let vtop = null, vbot = null;          // 滚动高度占位(挂载窗口上方/下方)
 let winStart = 0, winEnd = 0;          // 当前挂载窗口 [winStart, winEnd)
 let listPadTop = 0;                    // #list 上内边距(行定位数学需扣除)
@@ -71,12 +81,10 @@ let state = {
   issueDetail: null,       // (issue) => string
   // 是否核对控制符丢失（默认关，见 qa.analyzeRowQA 的说明：断行标签本就要重排，默认报是噪音）
   checkControls: () => false,
-  // 剧场视图（只读阅读态）：为真时译文框强制只读、行上按说话人着色
-  theater: () => false,
-  speakerSlot: null,       // (name) => 0..3，说话人 → 配色槽位
   // 输入建议与划词查词(main.js 注入)
   getSuggestions: null,    // (token) => [{kind:'term'|'snippet', src, dst}]
   onSuggestionApply: null, // (i, item) 采纳建议(替换光标前词元)
+  onSuggestChange: null,   // (open) 建议浮层显示/隐藏 → 底栏提示跟随(仅状态真变化时触发)
   onDictLookup: null,      // (word) 划词查词 → 打开词典面板
 };
 export function setRendererState(partial){ Object.assign(state, partial); }
@@ -259,6 +267,12 @@ function buildRow(i){
   row.id = 'para-' + i;
   row.setAttribute('role', 'listitem');
 
+  // v4 双股脊线（设计书 §5.4）：上股=原文区间，下股=译文校对状态色；状态值在 updateRow 写入
+  const spine = document.createElement('div');
+  spine.className = 'spine';
+  spine.innerHTML = '<i></i><i></i>';
+  row.appendChild(spine);
+
   // 列1: 序号 + 编号
   const num = document.createElement('div');
   num.className = 'num';
@@ -272,13 +286,12 @@ function buildRow(i){
   origCell.className = 'orig-cell';
   const origCaption = document.createElement('span');
   origCaption.className = 'dialogue-caption orig-caption';
-  origCaption.textContent = 'ORIGINAL';
+  origCaption.textContent = '原文';
   const origName = document.createElement('div');
   origName.className = 'orig-name';
   origName.title = '原始人名(只读)';
   const orig = document.createElement('div');
   orig.className = 'orig';
-  origCell.append(origCaption, origName, orig);
 
   const body = document.createElement('div');
   body.className = 'body';
@@ -290,10 +303,7 @@ function buildRow(i){
   translationBlock.className = 'translation-block';
   const transCaption = document.createElement('span');
   transCaption.className = 'dialogue-caption trans-caption';
-  transCaption.textContent = 'TRANSLATION';
-  const speakerPlate = document.createElement('div');
-  speakerPlate.className = 'speaker-plate';
-
+  transCaption.textContent = '译文';
   const nameInput = document.createElement('input');
   nameInput.className = 'pname-input';
   nameInput.type = 'text';
@@ -309,6 +319,8 @@ function buildRow(i){
   const bClose = document.createElement('span');
   bClose.className = 'bkt';
   bClose.textContent = '」';
+  const translationText = document.createElement('div');
+  translationText.className = 'translation-text';
 
   const input = document.createElement('textarea');
   input.className = 'trans';
@@ -371,10 +383,9 @@ function buildRow(i){
   // 位置在 .row-status 之后、.byte-meter 之前 —— 与行状态、字数计同属"这一行怎么样"的即时信号。
   // 判定与阈值全部复用 qa.js,不另设标准;点按只做"把术语插到光标处",不擅自改写整句译文。
   //
-  // ⚠️ 常态用 visibility（保留占位）而不是 hidden（display:none）：本行是 flex 行里除 textarea
-  //    之外唯一会随时增减的项，一旦让它收起，textarea 就会吃掉/吐出这几十像素，
-  //    再经 syncOriginalWrapWidth 传导给 .orig —— 打字时原文会跟着重新折行。
-  //    与 .copy-btn / .byte-meter 的既有约定一致（都是常态占位、按需显隐）。
+  // ⚠️ 常态用 visibility（保留占位）而不是 hidden（display:none）：一旦让它收起，
+  //    textarea 就会吃掉/吐出这几十像素，行高随之抖动、原文跟着重新折行。
+  //    与 .copy-btn 的既有约定一致（常态占位、按需显隐）。
   const qaCapsule = document.createElement('button');
   qaCapsule.className = 'qa-capsule';
   qaCapsule.type = 'button';
@@ -397,13 +408,10 @@ function buildRow(i){
   // 译名框与译文框一致的切行/焦点处理(否则 Tab/Enter 到 NAME 行会"卡住"无响应,
   // 且 activeIdx 不会更新)
   nameInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Tab'){
-      e.preventDefault();
-      focusIdx(i + (e.shiftKey ? -1 : 1));
-    } else if (e.key === 'Enter'){
-      e.preventDefault();
-      focusIdx(i + 1);
-    }
+    const action = editorKeyAction(e);
+    if (!action) return;
+    e.preventDefault();
+    moveEditorFocus(i, action === 'previous' ? -1 : 1);
   });
   nameInput.addEventListener('focus', () => {
     row.classList.add('active');
@@ -415,6 +423,7 @@ function buildRow(i){
     }
   });
   nameInput.addEventListener('blur', () => {
+    rememberSelection(i, nameInput);
     row.classList.remove('active');
     if (state.onProofSessionEnd) state.onProofSessionEnd(i);
   });
@@ -431,21 +440,19 @@ function buildRow(i){
   input.addEventListener('compositionend', () => { sgComposing = false; updateSuggest(i, input); });
 
   input.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229 || sgComposing) return;
     // 输入建议浮层打开时: Tab 采纳 / ↑↓ 选择 / Esc 关闭;Enter 保持"下一行"原语义
-    if (suggestOpenFor(i)){
-      if (e.key === 'Tab'){ e.preventDefault(); applySuggestAt(i, sgSel); return; }
+    if (suggestOpenFor(i) && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey){
+      if (editorKeyAction(e, true) === 'suggest'){ e.preventDefault(); applySuggestAt(i, sgSel); return; }
       if (e.key === 'ArrowDown' && sgItems.length){ e.preventDefault(); sgSel = (sgSel + 1) % sgItems.length; paintSgSel(); return; }
       if (e.key === 'ArrowUp' && sgItems.length){ e.preventDefault(); sgSel = (sgSel - 1 + sgItems.length) % sgItems.length; paintSgSel(); return; }
       if (e.key === 'Escape'){ e.preventDefault(); hideSuggest(); return; }
       if (e.key === 'Enter'){ hideSuggest(); /* 继续走原切行逻辑 */ }
     }
-    if (e.key === 'Tab'){
-      e.preventDefault();
-      focusIdx(i + (e.shiftKey ? -1 : 1));
-    } else if (e.key === 'Enter'){
-      e.preventDefault();
-      focusIdx(i + 1);
-    }
+    const action = editorKeyAction(e);
+    if (!action) return;
+    e.preventDefault();
+    moveEditorFocus(i, action === 'previous' ? -1 : 1);
   });
 
   input.addEventListener('focus', () => {
@@ -458,6 +465,7 @@ function buildRow(i){
     }
   });
   input.addEventListener('blur', () => {
+    rememberSelection(i, input);
     row.classList.remove('active');
     if (sgRow === i) hideSuggest();
     // 不重置 activeIdx: 点击按钮后 textarea 失焦,但"当前行"仍应是刚才编辑的那行
@@ -476,21 +484,21 @@ function buildRow(i){
 
   const btnApprove = document.createElement('button');
   btnApprove.className = 'pr-btn pr-approve';
-  btnApprove.textContent = '✓ 通过';
+  btnApprove.innerHTML = iconMarkup('check') + '通过';
   btnApprove.title = '标记为已通过(再点取消)';
   btnApprove.type = 'button';
   btnApprove.setAttribute('aria-label', '标记第 ' + (i + 1) + ' 行已通过');
 
   const btnIssue = document.createElement('button');
   btnIssue.className = 'pr-btn pr-issue-btn';
-  btnIssue.textContent = '⚠ 有问题';
+  btnIssue.innerHTML = iconMarkup('warning') + '有问题';
   btnIssue.title = '标记为有问题(再点取消)';
   btnIssue.type = 'button';
   btnIssue.setAttribute('aria-label', '标记第 ' + (i + 1) + ' 行有问题');
 
   const btnNotes = document.createElement('button');
   btnNotes.className = 'pr-btn pr-notes-btn';
-  btnNotes.textContent = '📝';
+  btnNotes.innerHTML = iconMarkup('pen');
   btnNotes.title = '打开批注框';
   btnNotes.type = 'button';
   btnNotes.setAttribute('aria-label', '打开第 ' + (i + 1) + ' 行批注');
@@ -546,6 +554,7 @@ function buildRow(i){
   };
   notesAdd.addEventListener('click', addNote);
   notesInput.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); addNote(); }
   });
 
@@ -558,13 +567,20 @@ function buildRow(i){
     if (hit && state.onTermClick) state.onTermClick(i, hit.getAttribute('data-dst') || '');
   });
 
-  rows[i] = { el: row, num, pid, origCaption, origName, orig, nameInput, trans: input, bOpen, bClose, copy: copyBtn, inputRow, translationBlock, transCaption, speakerPlate, prBadge, btnApprove, btnIssue, btnNotes, notes, notesType, notesInput, notesList, proofRow, byteMeter, byteNum, byteTotal, byteEnc, widthMeter, widthNum, widthTotal, widthUnit, statusPill, rsGlyph, rsLabel, qaCapsule, qaGlyph, qaText, qaTerm: null };
-  // 原文阅读层 → 译者角色名牌 + 译文创作层 → 校对上下文。
-  speakerPlate.append(nameInput);
-  inputRow.append(input, copyBtn, statusPill, qaCapsule);
-  translationBlock.append(transCaption, speakerPlate, inputRow, byteMeter, widthMeter);
-  body.append(origCell, translationBlock, proofRow);
-  row.append(num, body);
+  // 行卡片结构：元信息行（序号/状态/字节计）+ 原文（原名内联）+ 译文（译名内联）。
+  // 题注保留 DOM 由 CSS 隐藏；qa 胶囊与复制钮必须留在 inputRow
+  //（visibility 占位约定，防 textarea 宽度抖动，见上方 qaCapsule 注释）。
+  const metaRow = document.createElement('div');
+  metaRow.className = 'meta-row';
+  rows[i] = { el: row, num, pid, origCaption, origName, orig, nameInput, trans: input, translationText, bOpen, bClose, copy: copyBtn, inputRow, translationBlock, transCaption, metaRow, prBadge, btnApprove, btnIssue, btnNotes, notes, notesType, notesInput, notesList, proofRow, byteMeter, byteNum, byteTotal, byteEnc, widthMeter, widthNum, widthTotal, widthUnit, statusPill, rsGlyph, rsLabel, qaCapsule, qaGlyph, qaText, qaTerm: null };
+  // 原文与译文共用说话人列；括号与译文正文一起从原文起点开始。
+  translationText.append(input);
+  inputRow.append(nameInput, translationText, copyBtn, qaCapsule);
+  translationBlock.append(transCaption, inputRow);
+  origCell.append(origCaption, origName, orig);
+  metaRow.append(num, statusPill, byteMeter, widthMeter);
+  body.append(metaRow, origCell, translationBlock, proofRow);
+  row.append(spine, body);
   insertRowDom(i, row); // 窗口化渲染: 按下标序插入挂载区
   syncRow(i);
   return rows[i];
@@ -655,22 +671,22 @@ export function syncRow(i){
   const r = rows[i];
   const p = state.paras()[i];
   if (!r || !p) return;
-  const theater = !!(state.theater && state.theater());
   r.el.className = 'para' + (p.done ? ' done' : '');
   r.el.classList.toggle('has-speaker', !!p.name);
-  // 剧场视图：给说话人分配配色槽位（同一角色同一色，不同角色不同色）。
-  // 槽位由 main 侧的 speakerSlot 统一分配 —— 逐行临时算会随滚动顺序变化而不稳定。
-  if (theater && p.name && state.speakerSlot){
-    const slot = state.speakerSlot(p.name);
-    if (slot >= 1) r.el.classList.add('sp-' + slot);
-  }
+  r.el.classList.toggle('is-name-row', !!p.isName);
+  // 人名列宽全文件统一（refreshSpeakerColumn），行内不再逐行设置；有名字的行变动时重算
+  if (p.name || p.isName) scheduleSpeakerColumnRefresh();
   r.el.setAttribute('aria-label', '第 ' + (i + 1) + ' 行' + (p.name ? '，' + p.name : ''));
   r.pid.textContent = p.id || '';
   r.origName.textContent = p.name || '—';
-  r.origName.className = 'orig-name' + (p.name ? '' : ' empty');
+  r.origName.className = 'orig-name' + (p.name && !p.isName ? '' : ' empty');
   r.orig.innerHTML = renderOrigHTML(i, p, state.matches(), state.terms());
   r.nameInput.placeholder = p.name || '—';
   r.nameInput.value = p.nameTr;
+  r.nameInput.size = Math.max(2, Math.min(16, Array.from(p.nameTr || p.name || '').length || 2));
+  // NAME 行的可编辑字段就是中文译名，放开它的 tab 序；其余行的译名框保持 tabIndex=-1，
+  // 让 Tab/Enter 只走译文框，不改变既有的行间导航节奏。
+  r.nameInput.tabIndex = p.isName ? 0 : -1;
   if (p.isName){
     // NAME 条目: 右侧译文框保留显示,作为左侧译名框的"跟随显示"(只读,防误输不生效);
     // 左侧译名框修改后经 nameInputHandler → refreshRow → syncRow 自动同步到这里。
@@ -678,16 +694,14 @@ export function syncRow(i){
     r.trans.value = p.nameTr;
     r.trans.placeholder = p.name || '—';
   } else {
-    // 剧场视图是只读阅读态 → 强制 readOnly（见 main.setTheaterMode）。
-    // 用 readOnly 而非 disabled：保留聚焦与 Tab 导航，光标仍可选中复制。
-    r.trans.readOnly = theater;
+    r.trans.readOnly = false;
     r.trans.value = transValue(p);
     r.trans.placeholder = '在此输入译文…';
   }
   if (p.brackets){
-    // 「」锁定在译名与译文输入框之间: nameInput, 「, trans, 」, copy
-    r.inputRow.insertBefore(r.bOpen, r.trans);
-    r.inputRow.insertBefore(r.bClose, r.copy);
+    // 「」包住译文；开括号与原文首字共享起点。
+    r.translationText.insertBefore(r.bOpen, r.trans);
+    r.translationText.append(r.bClose);
   } else {
     if (r.bOpen.parentNode) r.bOpen.parentNode.removeChild(r.bOpen);
     if (r.bClose.parentNode) r.bClose.parentNode.removeChild(r.bClose);
@@ -713,13 +727,15 @@ export function syncRow(i){
   updateWidthMeter(r);
   updateRowQA(i, r);
   r.prBadge.classList.toggle('show', uc > 0);
-  r.btnNotes.textContent = '📝' + (uc ? ' ' + uc : '');
+  r.btnNotes.innerHTML = iconMarkup('pen');
+  if (uc) r.btnNotes.appendChild(document.createTextNode(' ' + uc));
   r.btnApprove.classList.toggle('on', st === 'approved');
   r.btnIssue.classList.toggle('on', st === 'issue');
   // 行状态 pill(§0.3 / §7.5 形状 + 文字双编码)
   const si = rowStatusInfo(p);
+  r.el.dataset.state = si.key;   // v4 双股脊线下股取色源（.para[data-state]）
   r.statusPill.className = 'row-status rs-' + si.cls;
-  r.rsGlyph.textContent = si.glyph;
+  r.rsGlyph.innerHTML = iconMarkup(rowStatusIcon(si.key));
   r.rsLabel.textContent = si.label;
   renderNotesList(i, r);
   // 校对模式开启且有批注 → 默认展开批注框(用户手动收起过的行除外)
@@ -730,33 +746,7 @@ export function syncRow(i){
   r.btnNotes.setAttribute('aria-expanded', String(shouldOpen));
   r.el.style.display = state.filterShowRow(i) ? '' : 'none';
   autoResize(r.trans);
-  syncOriginalWrapWidth(r);
   measureRow(i); // 行高可能已变(译文增高/批注增减),同步高度模型与占位
-}
-
-// 原文文本与译文 textarea 使用同一个可用宽度，保证两列在相同位置换行。
-/**
- * 让原文文本与译文 textarea 使用同一个可用宽度，保证两列在相同位置换行。
- *
- * ⚠️ 剧场视图下**必须整体跳过**：剧场里 `.orig-cell` 是 `display:none`，
- *    量到的 rect 全是 0，`transRect.left - origRect.left` 会算出垃圾位移
- *    （实测 566px）并**作为 inline 样式留在元素上**；退出剧场后 `.orig` 重新可见，
- *    那个残留的 left 会把它整体推出显示边界（实测右侧溢出 388px）。
- *    原文此时本就不可见，宽度同步毫无意义，跳过是正确行为。
- *
- * ⚠️ 另一个已知坑：本函数写的是 inline 样式，所以**任何时候量到 0 都不能写回** ——
- *    否则会把坏值永久留在元素上（下面 transRect.width <= 0 的守卫就是这个作用）。
- */
-function syncOriginalWrapWidth(r){
-  if (!r?.orig || !r?.trans) return;
-  if (state.theater && state.theater()) return;
-  if (r.el.style.display === 'none') return;
-  const origRect = r.orig.getBoundingClientRect();
-  const transRect = r.trans.getBoundingClientRect();
-  if (transRect.width <= 0 || origRect.width <= 0) return;
-  r.orig.style.width = transRect.width + 'px';
-  r.orig.style.position = 'relative';
-  r.orig.style.left = (transRect.left - origRect.left) + 'px';
 }
 
 /** 校对模式开关联动: 开启时让有批注的行默认展开批注框(关闭时不再自动展开) */
@@ -767,46 +757,6 @@ export function setNotesAutoOpen(on){
 
 /* ---------------- 全量重渲染 / 数据重置 ---------------- */
 
-// 人名栏统一宽度: 取全文件最长名字(原文名 + 译名)的估算显示宽度,所有行一致;
-// 范围 96~320px(名字都很短时保持 96,超长名字封顶 320 避免挤爆布局)。
-function measureTextWidth(s){
-  let w = 0;
-  for (const ch of s){
-    // CJK/全角按 1 字宽,其余按 0.6;15px 字号 + 内边距
-    w += /[\u3000-\u9fff\uff00-\uffef\u3040-\u30ff]/.test(ch) ? 1 : 0.6;
-  }
-  return w * 15 + 18;
-}
-function computeNameColWidth(){
-  let maxW = 0;
-  for (const p of state.paras()){
-    if (p.name) maxW = Math.max(maxW, measureTextWidth(p.name));
-    if (p.nameTr) maxW = Math.max(maxW, measureTextWidth(p.nameTr));
-  }
-  return Math.max(96, Math.min(320, Math.ceil(maxW)));
-}
-// 缓存:仅在 paras 列表变化或名字字段结构变更时重算;搜索命中刷新不应触发 O(n) 重测
-let _nameColWidthCached = null;
-function applyNameColWidth(){
-  if (_nameColWidthCached === null) _nameColWidthCached = computeNameColWidth() + 'px';
-  list.style.setProperty('--name-col-w', _nameColWidthCached);
-}
-
-// 编辑译名时只在新名字超过当前栏宽时扩展。这样正文始终对齐，
-// 又避免每次按键都扫描全文、重建虚拟列表，影响输入状态。
-function expandNameColWidthFor(p){
-  const needed = Math.max(96, Math.min(320, Math.ceil(Math.max(
-    measureTextWidth(p.name || ''),
-    measureTextWidth(p.nameTr || '')
-  ))));
-  const current = _nameColWidthCached === null ? 0 : parseFloat(_nameColWidthCached);
-  if (needed <= current) return;
-  _nameColWidthCached = Math.max(needed, computeNameColWidth()) + 'px';
-  list.style.setProperty('--name-col-w', _nameColWidthCached);
-}
-// 显式失效(打开新文件、批量改动导致名字列宽可能变化时调用)
-function invalidateNameColWidth(){ _nameColWidthCached = null; }
-
 export function fullRender(){
   const n = state.paras().length;
   // 清空旧节点,重建: 占位 vtop/vbot + 空提示
@@ -814,8 +764,10 @@ export function fullRender(){
   rows = {};
   winStart = winEnd = 0;
   activeIdx = -1;
+  editorSelections.clear();
+  sgComposing = false;
+  hideSuggest();   // 全文重建会丢弃全部行,浮层状态与底栏提示必须一起复位
   heights.reset(n);
-  invalidateNameColWidth(); // 新文件:名字列宽重测
   syncHiddenFlags();
   listPadTop = parseFloat(getComputedStyle(list).paddingTop) || 0;
   vtop = document.createElement('div');
@@ -825,7 +777,8 @@ export function fullRender(){
   list.append(vtop, vbot, emptyEl);
   if (emptyEl) emptyEl.style.display = n ? 'none' : '';
   list.scrollTop = 0;
-  applyNameColWidth(); // 按当前文件最长人名统一人名栏宽度
+  // 先定全局人名列宽再挂首屏：行高按最终布局实测，避免载入后二次回流
+  refreshSpeakerColumn();
   // 初始窗口挂载,并用实测均值校准未挂载行的估算高度
   renderWindow();
   if (heights.measuredCount() > 0){
@@ -872,18 +825,128 @@ function autoResizeNotes(ta){
 
 let selectAllOnFocus = false;
 let activeIdx = -1; // 最后聚焦的行(点击按钮等会触发 textarea blur,.active 类会消失,故用状态追踪)
+const editorSelections = new Map();
 
-export function focusIdx(idx){
+function rememberSelection(i, input){
+  editorSelections.set(i, { start: input.selectionStart, end: input.selectionEnd, direction: input.selectionDirection });
+}
+
+/* ---- 全局人名列宽（master 2026-09-26 反馈：无人名行要与对话行的「对齐）----
+   列宽从"逐行实测"改为"全文件取最宽人名"：结果写到 #list 的 --speaker-name-col，
+   所有行（含旁白/无人名对话）的文本都从同一列起点开始，旁白的「因此与对话行的「同列。
+   宽度只取决于字体与人名内容（与容器宽度无关），载入/改名/撤销时经 rAF 重算；
+   同名人串走缓存，逐键编辑不抖。探针常驻 body（脱离版式），仅为读取人名元素的真实字体与内边距。 */
+const nameWidthCache = new Map();
+let speakerColRaf = 0;
+const nameProbe = (() => {
+  const cell = document.createElement('div');
+  cell.className = 'orig-cell';
+  cell.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;contain:layout size;';
+  const name = document.createElement('div');
+  name.className = 'orig-name';
+  const input = document.createElement('input');
+  input.className = 'pname-input';
+  input.type = 'text';
+  const rowInput = document.createElement('div');
+  rowInput.className = 'row-input';
+  rowInput.appendChild(input);
+  const block = document.createElement('div');
+  block.className = 'translation-block';
+  block.appendChild(rowInput);
+  cell.append(name, block);
+  document.body.appendChild(cell);
+  return { name, input };
+})();
+
+function measureNameWidth(text, el, ctx){
+  if (!text) return 0;
+  const style = getComputedStyle(el);
+  const font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const key = font + '|' + text;
+  let w = nameWidthCache.get(key);
+  if (w === undefined){
+    ctx.font = font;
+    w = ctx.measureText(text).width
+      + Math.max(0, Array.from(text).length - 1) * (Number.parseFloat(style.letterSpacing) || 0)
+      + (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0)
+      + (Number.parseFloat(style.borderLeftWidth) || 0) + (Number.parseFloat(style.borderRightWidth) || 0);
+    nameWidthCache.set(key, w);
+  }
+  return w;
+}
+
+function refreshSpeakerColumn(){
+  speakerColRaf = 0;
+  const paras = state.paras();
+  let max = 0;
+  if (paras.length){
+    const ctx = refreshSpeakerColumn.ctx || (refreshSpeakerColumn.ctx = document.createElement('canvas').getContext('2d'));
+    for (const p of paras){
+      if (!p.name && !p.isName) continue;
+      const sourceName = p.isName ? (p.content || '') : (p.name || '');
+      const translatedName = p.nameTr || (p.isName ? p.name || '' : '');
+      const w = Math.max(
+        measureNameWidth(sourceName, nameProbe.name, ctx),
+        measureNameWidth(translatedName, nameProbe.input, ctx)
+      );
+      if (w > max) max = w;
+    }
+  }
+  list.style.setProperty('--speaker-name-col', (max ? Math.ceil(max) + 3 : 0) + 'px');
+}
+
+function scheduleSpeakerColumnRefresh(){
+  if (speakerColRaf) return;
+  speakerColRaf = requestAnimationFrame(refreshSpeakerColumn);
+}
+
+function moveEditorFocus(i, direction){
+  for (let next = i + direction; next >= 0 && next < state.paras().length; next += direction){
+    if (state.filterShowRow(next)){ focusIdx(next, { preserve: true }); return; }
+  }
+}
+
+export function captureEditorPosition(){
+  const r = rows[activeIdx];
+  const input = r && (state.paras()[activeIdx]?.isName ? r.nameInput : r.trans);
+  if (input) rememberSelection(activeIdx, input);
+  const top = heights.indexAt(Math.max(0, list.scrollTop - listPadTop));
+  return { index: activeIdx, selections: [...editorSelections], top, offset: list.scrollTop - listPadTop - heights.offsetOf(top) };
+}
+
+export function restoreEditorPosition(saved){
+  if (!saved){ focusIdx(0); return; }
+  for (const [i, selection] of saved.selections || []) editorSelections.set(i, selection);
+  focusIdx(saved.index, { preserve: true });
+  if (saved.top >= 0 && saved.top < state.paras().length){
+    list.scrollTop = Math.max(0, heights.offsetOf(saved.top) + listPadTop + saved.offset);
+    renderWindow();
+  }
+}
+
+export function returnToEditor(){
+  if (activeIdx >= 0) focusIdx(activeIdx, { preserve: true });
+}
+
+export function focusIdx(idx, { preserve = false } = {}){
   const n = state.paras().length;
   if (idx < 0 || idx >= n) return;
   if (!rows[idx]) scrollToRow(idx, true); // 未挂载(视口外): 先滚动挂载
   const r = rows[idx];
   if (!r) return;
-  // 切行统一聚焦译文框: NAME 行的译文框是只读的,无法误编辑,整行高亮+可继续 Tab/Enter 切行;
-  // 名字通过「仅名字」批量替换统一改,替换后右侧只读译文框自动跟随显示。
-  selectAllOnFocus = true;
-  r.trans.focus();
-  if (selectAllOnFocus){ selectAllOnFocus = false; r.trans.select(); }
+  const p = state.paras()[idx];
+  // NAME 行的可编辑字段是中文译名，聚焦译名框（此前固定聚焦只读译文框，键盘到不了译名）；
+  // 其余行沿用聚焦译文框，保持既有的整行高亮 + Tab/Enter 切行语义。
+  const target = p.isName ? r.nameInput : r.trans;
+  selectAllOnFocus = !preserve;
+  if (preserve){
+    const selection = selectionFor(editorSelections.get(idx), target.value.length);
+    target.focus({ preventScroll: true });
+    target.setSelectionRange(selection.start, selection.end, selection.direction);
+  } else {
+    target.focus();
+    if (selectAllOnFocus){ selectAllOnFocus = false; target.select(); }
+  }
   scrollToRow(idx, true); // 与旧版一致: 当前行始终滚动到视口中部
 }
 
@@ -955,8 +1018,6 @@ export function updateMatchInfo(matches, matchIndex, q){
 
 /** 刷新单行 DOM(数据已变时调用;行未挂载则忽略,滚回视口时按最新数据构建) */
 export function refreshRow(i){
-  const p = state.paras()[i];
-  if (p) expandNameColWidthFor(p);
   syncRow(i);
 }
 
@@ -976,8 +1037,6 @@ export function getActiveIdx(){
 
 /** 数据/词典/术语表/过滤变化后,更新全部已挂载行并重算窗口 */
 export function refreshAllRows(){
-  invalidateNameColWidth(); // 批量改动可能改变名字列宽,重测一次(O(n) 仅在结构性变更时承担)
-  applyNameColWidth();
   syncHiddenFlags();   // 校对过滤可能变化: 隐藏行卸载、新可见行挂载
   renderWindow();
   for (const k of Object.keys(rows)) syncRow(Number(k));
@@ -1014,9 +1073,17 @@ let sgItems = [];          // 当前建议列表 [{kind, src, dst}]
 let sgSel = 0;             // 键盘选中下标
 let sgRow = -1;            // 建议所属行
 let sgComposing = false;   // IME 组合输入中
+let sgOpen = false;        // 建议浮层当前是否可见(供底栏提示跟随)
 
 function suggestOpenFor(i){
   return !!(sgPop && sgPop.style.display !== 'none' && sgRow === i && sgItems.length);
+}
+
+/** 建议浮层可见性变化 → 通知主编排(底栏 Tab 提示)。只在真变化时通知，避免重复回调。 */
+function notifySuggest(open){
+  if (sgOpen === open) return;
+  sgOpen = open;
+  if (state.onSuggestChange) state.onSuggestChange(open);
 }
 
 function ensureSgPop(){
@@ -1032,6 +1099,7 @@ function hideSuggest(){
   sgItems = [];
   sgSel = 0;
   sgRow = -1;
+  notifySuggest(false);
 }
 
 function paintSgSel(){
@@ -1071,6 +1139,7 @@ function renderSuggest(i, ta){
   sgPop.style.left = x + 'px';
   sgPop.style.top = y + 'px';
   sgRow = i;
+  notifySuggest(true);
 }
 
 /* ═══ 字节数指示器（规范 §8.3）═══
@@ -1326,7 +1395,7 @@ function ensureFab(){
   dictFab = document.createElement('button');
   dictFab.id = 'dictFab';
   dictFab.type = 'button';
-  dictFab.textContent = '📖 查词';
+  dictFab.innerHTML = iconMarkup('book') + '查词';
   dictFab.addEventListener('mousedown', (e) => e.preventDefault()); // 不抢选区所在元素焦点
   dictFab.addEventListener('click', () => {
     const w = dictFab.__word;

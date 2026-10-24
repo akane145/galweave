@@ -3,12 +3,15 @@
 // 隐藏行(如校对过滤)高度记 0,不参与可见范围,也不占滚动高度。
 // 运行: node --test tests/virtual.test.mjs
 
-/** 创建行高模型。count 为总行数,estimate 为未实测行的估算高度(px)。 */
+/** 创建行高模型。count 为总行数,estimate 为未实测行的估算高度(px),
+ *  gap 为行间距(margin-bottom,px):虚拟滚动量不到 margin,由 heightOf 统一叠加,
+ *  保证求和/定位/窗口与 DOM 实际布局一致。 */
 export function createRowHeightModel(count = 0, opts = {}){
   let n = Math.max(0, count >>> 0);
   let estimate = opts.estimate && opts.estimate > 0 ? opts.estimate : 80;
+  let gap = opts.gap && opts.gap > 0 ? opts.gap : 0;
 
-  const measured = new Map(); // i -> 实测高度(四舍五入整数)
+  const measured = new Map(); // i -> 实测高度(四舍五入整数,不含 gap)
   const hiddenSet = new Set(); // 隐藏行下标集合
   let prefix = null;           // 惰性前缀和: prefix[i] = 前 i 行累计高度
   let totalCache = 0;
@@ -27,7 +30,7 @@ export function createRowHeightModel(count = 0, opts = {}){
   function heightOf(i){
     if (hiddenSet.has(i)) return 0;
     const m = measured.get(i);
-    return m !== undefined ? m : estimate;
+    return (m !== undefined ? m : estimate) + gap;
   }
 
   function isHidden(i){ return hiddenSet.has(i); }
@@ -61,6 +64,9 @@ export function createRowHeightModel(count = 0, opts = {}){
 
     /** 调整未实测行的估算高度 */
     setEstimate(h){ if (h > 0){ estimate = h; invalidate(); } },
+
+    /** 调整行间距(阅读密度三档联动),高度模型整体重算 */
+    setGap(g){ if (g >= 0 && g !== gap){ gap = g; invalidate(); } },
 
     /** 记录实测高度(隐藏行也可记录,计算时按 0 处理) */
     setMeasured(i, h){

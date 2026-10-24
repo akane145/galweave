@@ -269,7 +269,7 @@ export async function listSnapshots(docPath, docName){
   if (!docPath) return [];
   try {
     const fsx = await import('./fs.js');
-    if (fsx.isTauri()){
+    if (fsx.isTauri() && fsx.isAbsPath(docPath)){
       const { listDirTree } = fsx;
       const dir = fsx.galweavePath(docPath, 'history/' + snapshotDirName(docName));
       if (!dir) return [];
@@ -288,7 +288,7 @@ export async function readSnapshot(docPath, docName, id){
   if (!docPath || !id) return null;
   try {
     const fsx = await import('./fs.js');
-    if (fsx.isTauri()){
+    if (fsx.isTauri() && fsx.isAbsPath(docPath)){
       const raw = await fsx.readGalweaveFile(docPath, snapshotRelPath(docName, id));
       return raw ? parseSnapshot(raw) : null;
     }
@@ -307,13 +307,14 @@ export async function writeSnapshot(docPath, docName, snapshot){
   });
   try {
     const fsx = await import('./fs.js');
-    if (fsx.isTauri()){
-      await fsx.writeGalweaveFile(docPath, snapshotRelPath(docName, id), payload);
+    if (fsx.isTauri() && fsx.isAbsPath(docPath)){
+      if (!await fsx.writeGalweaveFile(docPath, snapshotRelPath(docName, id), payload)) return { saved: false, pruned: 0 };
     } else {
       await fsx.kvPut(LS_PREFIX + 'snap:' + docPath + ':' + id, JSON.parse(payload));
       const ids = await fsx.kvGet(LS_PREFIX + 'ids:' + docPath);
       const next = [...new Set([id, ...(Array.isArray(ids) ? ids : [])])];
       await fsx.kvPut(LS_PREFIX + 'ids:' + docPath, next);
+      if (!await fsx.kvGet(LS_PREFIX + 'snap:' + docPath + ':' + id)) return { saved: false, pruned: 0 };
     }
   } catch (e) { return { saved: false, pruned: 0 }; }
 
@@ -326,7 +327,7 @@ export async function writeSnapshot(docPath, docName, snapshot){
     if (remove.length){
       const fsx = await import('./fs.js');
       for (const r of remove){
-        if (fsx.isTauri()){
+        if (fsx.isTauri() && fsx.isAbsPath(docPath)){
           const rel = snapshotRelPath(docName, r.id);
           await fsx.removeFile(fsx.galweavePath(docPath, rel));
         } else {

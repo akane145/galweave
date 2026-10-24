@@ -7,7 +7,39 @@ import assert from 'node:assert/strict';
 import {
   NORM_IDS, normalizeRuleIds, normalizeText, collectNormalizable,
   checkKinjiru, kinjiruLabel, NO_LINE_START, NO_LINE_END,
+  validateCustomRules, MAX_CUSTOM_NORM_RULES, MAX_CUSTOM_NORM_LENGTH,
+  MAX_NORMALIZED_TEXT_LENGTH,
 } from '../src/textnorm.js';
+
+test('自定义标点：三个例子按顺序替换，破折号可以由用户选择保留', () => {
+  const rules = [{from:'。」',to:'」'}, {from:'……。',to:'……'}, {from:'……——',to:'……'}];
+  assert.equal(normalizeText('「结束。」然后……。最后……——', [], rules), '「结束」然后……最后……');
+  assert.equal(normalizeText('……——', [], [{from:'……——',to:'——'}]),'——');
+  assert.equal(normalizeText('……——', [], [{from:'……——',to:'——',enabled:false}]),'……——');
+});
+
+test('自定义匹配是字面量，允许删除；不会把替换中的 $& 当作特殊语法', () => {
+  assert.equal(normalizeText('。',[],[{from:'。',to:'$&'}]),'$&');
+  assert.equal(normalizeText('。',[],[{from:'。',to:''}]),'');
+  assert.equal(normalizeText('……。',[],[{from:'……。',to:'……'},{from:'……',to:'——'}]),'——');
+});
+
+test('规范化保护控制符，拒绝生成新的控制符', () => {
+  assert.equal(normalizeText('%f...;文字...'), '%f...;文字……');
+  assert.equal(normalizeText('%f。;……[n]。',[],[{from:'。',to:''}]), '%f。;……[n]');
+  assert.throws(() => validateCustomRules([{from:'。',to:'[n]'}]),/控制/);
+});
+
+test('规则上限和空匹配校验；带括号译文预览不额外包引号', () => {
+  assert.equal(MAX_NORMALIZED_TEXT_LENGTH,1000000);
+  assert.throws(() => normalizeText('.'.repeat(26),[],[{from:'.',to:'!'.repeat(200)},{from:'!',to:'?'.repeat(200)}]), /100 万/);
+  assert.equal(MAX_CUSTOM_NORM_RULES,100);
+  assert.equal(MAX_CUSTOM_NORM_LENGTH,200);
+  assert.throws(() => validateCustomRules([{from:'',to:'。'}]), /匹配/);
+  assert.throws(() => validateCustomRules(Array.from({length:101},()=>({from:'。',to:''}))),/100/);
+  const p={translation:'「结束。」',brackets:true};
+  assert.deepEqual(collectNormalizable([p],[],[{from:'。」',to:'」'}]),[{i:0,from:'「结束。」',to:'「结束」'}]);
+});
 
 /* ---------------- 规则选择 ---------------- */
 

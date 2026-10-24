@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "galweave"
-version = "5.9.0"
+version = "5.11.1"
 dependencies = [
  "base64 0.22.1",
  "encoding_rs",

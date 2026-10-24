@@ -28,6 +28,7 @@ import { openMenu, closeMenu, isMenuOpen } from './contextmenu.js';
  *   canUndo       是否可撤销
  *   mtReady       机翻是否就绪（有 provider）
  *   tmHit         翻译记忆命中时的建议译文摘要（有值才启用「套用翻译记忆」）
+ *   canConfirmTm  该行在记忆库里有**未确认**条目（才有必要提供「确认这条记忆」）
  * @returns {Array} 菜单项数组，形如 { label, hint?, action?, disabled?, sep? }
  */
 export function rowMenuItems(ctx) {
@@ -52,6 +53,14 @@ export function rowMenuItems(ctx) {
     label: c.tmHit ? ('套用记忆：' + c.tmHit) : '套用翻译记忆',
     action: 'applyTm',
     disabled: !c.tmHit,
+  });
+  // 把这条记忆标为已确认：只有已确认条目才会被批量机翻**自动**套用。
+  // 机翻写入的记忆默认是草稿，需要用户在改过/看过之后显式认可。
+  items.push({
+    label: '确认这条记忆（以后自动套用）',
+    hint: '只标状态，不改译文',
+    action: 'confirmTm',
+    disabled: !c.canConfirmTm,
   });
   items.push({
     label: '机翻本行',

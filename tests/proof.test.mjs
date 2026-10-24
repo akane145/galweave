@@ -84,6 +84,17 @@ test('demoteApproved: 文本变化 → 已通过失效', () => {
 
 /* ---------------- 修改记录 ---------------- */
 
+test('编辑已通过行后结算，重新进入待校对', () => {
+  model.setParas(paras3());
+  resetState();
+  setEnabled(true);
+  toggleApprove(0);
+  noteInput(0);
+  model.getPara(0).translation = '修改后的译文';
+  settleInput(0);
+  assert.equal(statusOf(0), STATUS.PENDING);
+});
+
 test('编辑批注保留身份、类型、创建时间和解决状态，并保存新内容', () => {
   model.setParas(paras3());
   resetState();
@@ -262,12 +273,12 @@ test('超过 500 行的修改全部保留，恢复后仍保留首次文本', () 
 
 test('快捷键: 默认值与自定义', () => {
   resetState();
-  assert.deepEqual(defaultKeys(), { approve: 'q', issue: 'w', annotate: 'a', nextIssue: '', toggleMode: '' });
+  assert.deepEqual(defaultKeys(), { approve: 'Alt+Enter', issue: 'Alt+W', annotate: 'Alt+A', nextIssue: '', toggleMode: '' });
   setKeys({ approve: 'Ctrl+K' });
   assert.equal(proofKeys.approve, 'Ctrl+K');
-  assert.equal(proofKeys.issue, 'w', '未指定的沿用默认');
+  assert.equal(proofKeys.issue, 'Alt+W', '未指定的沿用默认');
   setKeys(defaultKeys());
-  assert.equal(proofKeys.approve, 'q');
+  assert.equal(proofKeys.approve, 'Alt+Enter');
 });
 
 /* ---------------- 漏翻 / 异常分析 ---------------- */

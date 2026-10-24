@@ -1,13 +1,14 @@
 {
   "name": "galweave",
   "private": true,
-  "version": "5.9.0",
+  "version": "5.11.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "build:no-mt": "vite build --mode no-mt",
-    "build:html": "vite build --mode single",
+    "clean:dist": "node scripts/clean-dist.mjs dist dist-single",
+    "build": "node scripts/clean-dist.mjs dist && vite build",
+    "build:no-mt": "node scripts/clean-dist.mjs dist && vite build --mode no-mt",
+    "build:html": "node scripts/clean-dist.mjs dist-single && vite build --mode single",
     "preview": "vite preview",
     "test": "node --test \"tests/*.test.mjs\"",
     "lint": "eslint .",

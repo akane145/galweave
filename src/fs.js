@@ -37,14 +37,18 @@ export function setBrowserFileHandle(h){ browserFileHandle = h || null; }
 export function getBrowserFileHandle(){ return browserFileHandle; }
 
 /**
- * 读取文件 → { content: string, path: string|null, encoding: string }
- * Tauri: invoke read_file(自动检测编码转 UTF-8); 浏览器: ArrayBuffer + 编码检测。
+ * 读取文件 → { content: string, path: string|null, encoding: string, lossy?: boolean, bom?: boolean }
+ * Tauri: invoke read_file(自动检测编码转 UTF-8)；浏览器: ArrayBuffer + 编码检测。
+ *
+ * @param {{path:string, encoding?:string}} file encoding 非空时**强制按该编码解码**
+ *        （自动检测猜错时由用户手动纠正 —— 检测只能猜，用户知道真相）。
  */
 export async function readFileSource(file){
   if (isTauri()){
     const { invoke } = await tauriCore();
     try {
-      return await invoke('read_file', { path: file.path });
+      const res = await invoke('read_file', { path: file.path, encoding: file.encoding || null });
+      return { ...res, path: file.path };
     } catch (e){
       throw new Error('读取文件失败: ' + e);
     }
@@ -150,18 +154,40 @@ export async function listBrowserDir(dirHandle, depth, out){
   return out;
 }
 
-/** 写出文件。Tauri: invoke write_file(保存前自动生成 .bak 备份); 浏览器: 下载。 */
-export async function writeFileSource(path, content, displayName){
+/**
+ * 写出文件。Tauri: 原子写(同目录临时文件+替换)+可选编码; 浏览器: 下载。
+ * @param {string} path
+ * @param {string} content
+ * @param {string} [displayName]
+ * @param {{encoding?:string, allowLossy?:boolean, noBackup?:boolean}} [opts]
+ * @returns {Promise<object>} Tauri 端返回 Rust WriteResult
+ *          { atomic, atomicReason, encoding, backup, backupError }
+ */
+export async function writeFileSource(path, content, displayName, opts){
   if (isTauri()){
     const { invoke } = await tauriCore();
     try {
-      return await invoke('write_file', { path, content });
+      return await invoke('write_file', { path, content, opts: opts || {} });
     } catch (e){
+      // 目标编码表示不了的字符会被 Rust 侧拒绝，那条错误信息本身就是给用户看的
       throw new Error('保存失败: ' + e);
     }
   }
   downloadText(content, displayName || '译文.txt');
   return { saved: false, downloaded: true, path: null };
+}
+
+/**
+ * 取文件指纹（桌面版；浏览器返回 null）。
+ * 用于「保存前检测外部修改」—— 打开时记一份，写盘前再取一份比对。
+ * 失败返回 null（拿不到就不阻断保存，只是无从比较）。
+ */
+export async function fileStat(path){
+  if (!isTauri() || !path) return null;
+  try {
+    const { invoke } = await tauriCore();
+    return await invoke('file_stat', { path });
+  } catch (e) { return null; }
 }
 
 /** 列出目录 → 扁平文件树数组 [{ name, path, kind, depth }] */
@@ -177,12 +203,12 @@ export async function readTextFileSource(path){
   return res.content;
 }
 
-/** 写任意路径文本(项目术语表等用;走 write_file 命令)。浏览器模式抛错。 */
-export async function writeTextFileSource(path, content){
+/** 写任意路径文本(项目术语表等用;走 write_file 命令)。浏览器模式抛错。
+ *  opts 可选：{ encoding, allowLossy, noBackup }（内部数据文件一律 UTF-8，无需指定）。 */
+export async function writeTextFileSource(path, content, opts){
   if (isTauri()){
     const { invoke } = await tauriCore();
-    await invoke('write_file', { path, content });
-    return;
+    return await invoke('write_file', { path, content, opts: opts || {} });
   }
   throw new Error('浏览器模式不支持直接写文件');
 }
@@ -540,9 +566,11 @@ export async function readGalweaveFile(sourcePath, fileName){
   try { return await readTextFileSource(p); } catch (e) { return null; }
 }
 
-/** 写 `.galweave/<fileName>`（桌面版）；失败返回 false */
+/** 写 `.galweave/<fileName>`（桌面版）；失败返回 false。
+ *  一律 noBackup：这些文件本身就在 `.galweave/` 下，再备份会套出
+ *  `.galweave/.galweave/*.bak`；历史快照与进度文件本身已是它们的备份。 */
 export async function writeGalweaveFile(sourcePath, fileName, content){
   const p = galweavePath(sourcePath, fileName);
   if (!p) return false;
-  try { await writeTextFileSource(p, content); return true; } catch (e) { return false; }
+  try { await writeTextFileSource(p, content, { noBackup: true }); return true; } catch (e) { return false; }
 }

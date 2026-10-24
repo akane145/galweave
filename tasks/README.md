@@ -19,4 +19,9 @@
 
 | 功能 | 状态 | 交付版本 |
 |---|---|---|
+| [UI 统一与减法整改](ui-polish/plan.md) —— [复核](ui-polish/review.md) / [实施清单](ui-polish/todo.md) | ✅ 代码与浏览器验收完成；2026-10-14 已重打包 NSIS/MSI/直接运行版并核验 SHA-256 | 本地 5.11.0，未上传发布 |
 | [多样例模块化格式设计器](plan.md) —— [实施清单](todo.md) | ✅ 已完成（10/10 任务，4/4 Checkpoint） | v5.8.0（提交 `6f7ed36`） |
+| [手动翻译与连续校对](editor-experience/plan.md) —— [实施清单](editor-experience/todo.md) | ✅ 已完成 | v5.10.0 |
+| [可靠性五项：保存安全 / 外部修改检测 / 机翻任务控制 / 编码 / 记忆分级](reliability-round/plan.md) —— [实施清单](reliability-round/todo.md) | ✅ 代码与测试完成，桌面安装程序未重新打包 | 未发布 |
+| [跨设备记录包（导入 / 导出）](record-pack/plan.md) —— [实施清单](record-pack/todo.md) | ✅ 代码与测试完成，桌面安装程序未重新打包 | 未发布 |
+| [检查队列按类别筛选 / 桌面确认框修复 / 剧场旧文档清理](review-category/plan.md) —— [实施清单](review-category/todo.md) | 🟡 代码与单测完成，浏览器与桌面交互验收未做 | 未发布 |

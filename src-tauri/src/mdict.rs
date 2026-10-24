@@ -477,15 +477,19 @@ impl MdictReader {
         Ok(None)
     }
 
-    /// 前缀补全(复刻 js-mdict prefix 语义: 目标 key block 内以 prefix 开头的词)
+    /// 前缀补全(复刻 js-mdict prefix 语义: 目标 key block 内以 prefix 开头的词)。
+    /// ⚠️ 同一 key_text 在 MDX 里可能登记多次(同义词组/@@@LINK 变体),必须按词头去重 ——
+    ///     否则前端逐词头 lookup 会对同一个词重复查询、把同一条目重复并入结果。
     pub fn prefix(&self, prefix: &str, limit: usize) -> Vec<String> {
         let lo = self.keywords.partition_point(|k| k.key_text.as_str() < prefix);
         // 取最接近项所在 block
         let target_block = self.keywords.get(lo.min(self.keywords.len().saturating_sub(1)))
             .map(|k| k.key_block_idx).unwrap_or(0);
         let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for k in &self.keywords {
-            if k.key_block_idx == target_block && k.key_text.starts_with(prefix) {
+            if k.key_block_idx == target_block && k.key_text.starts_with(prefix)
+                && seen.insert(k.key_text.as_str()) {
                 out.push(k.key_text.clone());
                 if out.len() >= limit { break; }
             }
@@ -493,14 +497,15 @@ impl MdictReader {
         out
     }
 
-    /// 模糊搜索(包含匹配): 遍历词表,返回含 keyword 的词头(≤limit)。用于查词无精确/前缀命中时。
+    /// 模糊搜索(包含匹配): 遍历词表,返回含 keyword 的词头(≤limit,按词头去重)。用于查词无精确/前缀命中时。
     pub fn search(&self, keyword: &str, limit: usize) -> Vec<String> {
         if keyword.is_empty() {
             return Vec::new();
         }
         let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for k in &self.keywords {
-            if k.key_text.contains(keyword) {
+            if k.key_text.contains(keyword) && seen.insert(k.key_text.as_str()) {
                 out.push(k.key_text.clone());
                 if out.len() >= limit { break; }
             }
@@ -763,6 +768,25 @@ mod tests {
         assert!(!out.is_empty(), "前缀补全为空");
         assert!(out.iter().all(|k| k.starts_with("食べ")));
         assert!(out.len() <= 6);
+        // 去重:同一 key_text 在 MDX 里登记多次时,前缀补全不得返回重复词头
+        let mut uniq = out.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), out.len(), "prefix 返回了重复词头: {:?}", out);
+    }
+
+    #[test]
+    fn search_returns_unique_headwords() {
+        let p = root().join("JPdict/新世纪日汉双解大辞典/XSJRH.mdx");
+        if !p.exists() { return; }
+        let r = MdictReader::open(p.to_str().unwrap(), false).unwrap();
+        let out = r.search("食べる", 50);
+        assert!(!out.is_empty(), "包含匹配为空");
+        assert!(out.iter().all(|k| k.contains("食べる")));
+        let mut uniq = out.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), out.len(), "search 返回了重复词头: {:?}", out);
     }
 
     #[test]

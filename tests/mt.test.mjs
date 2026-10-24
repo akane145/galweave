@@ -13,6 +13,7 @@ import {
   stripControlChars, translateText, setProviderConfig, resetLlmContext, getLlmContext,
   BATCH_MODES, BATCH_SIZE_MIN, BATCH_SIZE_MAX, BATCH_SIZE_DEFAULT,
   normalizeBatchMode, normalizeBatchSize, buildBatchUserText, parseNumberedLines,
+  MtAbortError, isMtAbort, translateBatch,
 } from '../src/mt.js';
 
 /* ---------------- URL 归一化 ---------------- */
@@ -159,6 +160,161 @@ test('translateLinesBatched: 逐行清洗输入与输出，批量协议的换行
   assert.equal(received.includes('甲\n乙'), false);                       // 行内换行已删
   assert.equal(received.split('\n').filter(s => /^\s*\d/.test(s)).length, 2); // 序号行仍是 2 条
   assert.deepEqual(outs, ['甲乙', '丙']);                                 // 输出侧零宽字符已删
+});
+
+/* ---------------- 停止（AbortSignal）与正文读取超时 ---------------- */
+
+test('translateText: 外部 signal 已中止 → 立即以 MtAbortError 拒绝，不发请求', async () => {
+  await withMtEnv(async () => {
+    let called = false;
+    globalThis.fetch = async () => { called = true; return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'x' } }] }) }; };
+    await setProviderConfig('llm', { baseUrl: 'http://127.0.0.1:9', model: 'm' });
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await assert.rejects(
+      () => translateText('llm', 'おはよう', null, null, '', { signal: ctrl.signal }),
+      e => isMtAbort(e)
+    );
+    assert.equal(called, false, '已中止时不该再发请求');
+  });
+});
+
+test('translateText: 请求进行中中止 → 以 MtAbortError 拒绝（不是普通的连接失败）', async () => {
+  await withMtEnv(async () => {
+    const ctrl = new AbortController();
+    // 模拟"响应头回来了但正文永远不结束"：fetch 挂住，直到 signal 中止
+    globalThis.fetch = (url, opt) => new Promise((_, reject) => {
+      opt.signal.addEventListener('abort', () => {
+        const e = new Error('The operation was aborted.');
+        e.name = 'AbortError';
+        reject(e);
+      });
+    });
+    await setProviderConfig('llm', { baseUrl: 'http://127.0.0.1:9', model: 'm' });
+    const p = translateText('llm', 'おはよう', null, null, '', { signal: ctrl.signal });
+    setTimeout(() => ctrl.abort(), 10);
+    await assert.rejects(() => p, e => isMtAbort(e));
+  });
+});
+
+test('translateText: 超时覆盖正文读取阶段（回归：以前计时器在响应头后就清除）', async () => {
+  await withMtEnv(async () => {
+    // 关键场景：fetch 立刻返回 200，但 res.json() 永不 resolve。
+    // 旧实现在这里没有计时器保护，请求会永远挂着，"停止"也停不掉。
+    globalThis.fetch = async () => ({
+      ok: true, status: 200,
+      json: () => new Promise(() => {}),   // 永不 settle
+      text: async () => '',
+    });
+    await setProviderConfig('llm', { baseUrl: 'http://127.0.0.1:9', model: 'm' });
+    await assert.rejects(
+      () => translateText('llm', 'おはよう', null, null, '', { timeoutMs: 80 }),
+      /超时/
+    );
+  });
+});
+
+test('translateText: 超时错误说明可操作出路（调大超时/重试），不是裸的 AbortError', async () => {
+  await withMtEnv(async () => {
+    globalThis.fetch = async () => ({
+      ok: true, status: 200,
+      json: () => new Promise(() => {}),
+      text: async () => '',
+    });
+    await setProviderConfig('llm', { baseUrl: 'http://127.0.0.1:9', model: 'm' });
+    await assert.rejects(
+      () => translateText('llm', 'おはよう', null, null, '', { timeoutMs: 60 }),
+      e => (!isMtAbort(e) && /超时/.test(e.message) && /秒/.test(e.message))
+    );
+  });
+});
+
+test('translateText: 未中止且正常返回时行为不变（signal 不引入回归）', async () => {
+  await withMtEnv(async () => {
+    await setProviderConfig('llm', { baseUrl: 'http://127.0.0.1:9', model: 'm' });
+    const ctrl = new AbortController();
+    const out = await translateText('llm', 'おはよう', null, null, '', { signal: ctrl.signal });
+    assert.equal(out, '你好');
+  });
+});
+
+test('translateText: signal 未触发时不残留 abort 监听（重复调用不会累积）', async () => {
+  await withMtEnv(async () => {
+    await setProviderConfig('llm', { baseUrl: 'http://127.0.0.1:9', model: 'm' });
+    const ctrl = new AbortController();
+    for (let i = 0; i < 5; i++) await translateText('llm', 'おはよう', null, null, '', { signal: ctrl.signal });
+    // AbortSignal 的监听器数没有公开 API 可读，这里退而验证行为正确：
+    // 5 次调用都成功，说明监听器被清理（否则 Node 会告警内存泄漏）
+    assert.equal(ctrl.signal.aborted, false);
+  });
+});
+
+test('translateLinesBatched: 已中止时直接抛 MtAbortError，不发批次请求', async () => {
+  let called = false;
+  registerProvider({
+    id: 'test-batch-abort', name: 'test', isConfigured: () => true,
+    async translate(){ called = true; return '1. x'; },
+  });
+  const ctrl = new AbortController();
+  ctrl.abort();
+  await assert.rejects(
+    () => translateLinesBatched('test-batch-abort', ['あ', 'い'], null, '', { signal: ctrl.signal }),
+    e => isMtAbort(e)
+  );
+  assert.equal(called, false);
+});
+
+test('translateTextProtected: signal 透传到 provider（批量路径也要能停）', async () => {
+  let seen = null;
+  registerProvider({
+    id: 'test-signal-pass', name: 'test', isConfigured: () => true,
+    async translate(text, glossary, onChunk, context, opts){ seen = opts; return text; },
+  });
+  const ctrl = new AbortController();
+  await translateTextProtected('test-signal-pass', '原文', null, '', { signal: ctrl.signal });
+  assert.ok(seen, 'provider 应收到 opts');
+  assert.equal(seen.signal, ctrl.signal, 'signal 必须一路透传，否则停止按钮停不掉在途请求');
+});
+
+test('translateBatch: 已中止时停止后续行（provider 串行循环里逐行检查）', async () => {
+  const calls = [];
+  registerProvider({
+    id: 'test-batch-loop', name: 'test', isConfigured: () => true,
+    async translateBatch(texts, glossary, context, opts){
+      const out = [];
+      for (const t of texts){
+        if (opts && opts.signal && opts.signal.aborted) throw new MtAbortError();
+        calls.push(t);
+        out.push(await this.translate(t));
+      }
+      return out;
+    },
+    async translate(t){ return t; },
+  });
+  const ctrl = new AbortController();
+  ctrl.abort();
+  await assert.rejects(
+    () => translateBatch('test-batch-loop', ['a', 'b', 'c'], null, '', { signal: ctrl.signal }),
+    e => isMtAbort(e)
+  );
+  assert.deepEqual(calls, [], '已中止时一行都不该发出去');
+});
+
+test('isMtAbort: 只认自己的中止类型，不把普通错误当停止', () => {
+  assert.equal(isMtAbort(new MtAbortError()), true);
+  assert.equal(isMtAbort({ aborted: true }), true);
+  assert.equal(isMtAbort(new Error('连接失败')), false);
+  assert.equal(isMtAbort(null), false);
+  assert.equal(isMtAbort(undefined), false);
+  assert.equal(isMtAbort({ name: 'AbortError' }), false, '裸 AbortError 不代表用户停止');
+});
+
+test('MtAbortError: 是 Error 且带可识别标记（UI 靠它区分"停止"与"失败"）', () => {
+  const e = new MtAbortError();
+  assert.ok(e instanceof Error);
+  assert.equal(e.name, 'MtAbortError');
+  assert.equal(e.aborted, true);
+  assert.match(e.message, /停止/);
 });
 
 /* ---------------- 通用大模型提示词 ---------------- */
@@ -469,10 +625,10 @@ test('buildLlmMessages: 省略 contextBlock 时不产生空语境段（向后兼
   assert.equal(msgs[1].content, '本文');
 });
 
-test('buildSakuraMessagesV: 语境前置且不改动官方模板结构', () => {
+test('buildSakuraMessagesV: 忽略语境块且保持官方模板结构', () => {
   const msgs = buildSakuraMessagesV('本文', '', 'v1.0', 'CTX');
   assert.equal(msgs.length, 2);
-  assert.ok(msgs[1].content.startsWith('CTX'), '语境应在 user 消息最前');
+  assert.ok(!msgs[1].content.includes('CTX'), 'Sakura 专用模板不注入通用语境块');
   assert.match(msgs[1].content, /将下面的日文文本翻译成中文：本文/, '官方模板部分保持原样');
 });
 

@@ -161,3 +161,24 @@ test('性质: offsetOf(i)+heightOf(i) == offsetOf(i+1); indexAt(offsetOf(i)) 回
     }
   }
 });
+
+test('gap: 每行高度叠加行间距,隐藏行不加,估实测一致', () => {
+  const m = createRowHeightModel(3, { estimate: 100, gap: 12 });
+  assert.equal(m.heightOf(0), 112, '估算行也要加 gap');
+  m.setMeasured(0, 50);
+  assert.equal(m.heightOf(0), 62, '实测行 = 实测值 + gap');
+  m.setHidden(1, true);
+  assert.equal(m.heightOf(1), 0, '隐藏行高度 0,不加 gap');
+  assert.equal(m.total(), 62 + 0 + 112);
+  assert.equal(m.offsetOf(2), 62 + 0, 'offsetOf 含前面各行的 gap');
+});
+
+test('setGap: 行间距换档即时生效,触发重算', () => {
+  const m = createRowHeightModel(2, { estimate: 100, gap: 12 });
+  assert.equal(m.total(), 224);
+  m.setGap(6);
+  assert.equal(m.heightOf(0), 106);
+  assert.equal(m.total(), 212);
+  m.setMeasured(0, 40);
+  assert.equal(m.heightOf(0), 46, '换档后实测行仍叠加新 gap');
+});

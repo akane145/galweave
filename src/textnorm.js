@@ -15,6 +15,23 @@
 //      转换会篡改译文。这类留给人工判断，工具不替他决定。
 
 /* ---------------- 规范化 ---------------- */
+import { tokenizeInline } from './universal-parser.js';
+
+export const MAX_CUSTOM_NORM_RULES = 100;
+export const MAX_CUSTOM_NORM_LENGTH = 200;
+export const MAX_NORMALIZED_TEXT_LENGTH = 1000000; // 防止链式扩写耗尽内存，不是引擎字数限制。
+
+export function validateCustomRules(value){
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > MAX_CUSTOM_NORM_RULES) throw new Error('自定义规则最多 100 条');
+  return value.map((rule,i) => {
+    if (!rule || typeof rule.from !== 'string' || !rule.from.length) throw new Error('第 ' + (i+1) + ' 条规则的匹配文字不能为空');
+    if (typeof rule.to !== 'string') throw new Error('第 ' + (i+1) + ' 条规则的替换结果必须是文字');
+    if (rule.from.length > MAX_CUSTOM_NORM_LENGTH || rule.to.length > MAX_CUSTOM_NORM_LENGTH) throw new Error('每条规则的匹配及替换最多 200 个字符');
+    if (/[\r\n]/.test(rule.from + rule.to) || tokenizeInline(rule.from).some(t => t.protected) || tokenizeInline(rule.to).some(t => t.protected)) throw new Error('标点规则不能匹配或插入脚本控制符、换行');
+    return {from:rule.from,to:rule.to,enabled:rule.enabled !== false};
+  });
+}
 
 /**
  * 一条规范化规则。`re` 必须是 /g（replace 与 matchAll 都要求）。
@@ -50,15 +67,33 @@ export function normalizeRuleIds(ids){
  * @param {string[]} [ids] 启用的规则 id，缺省全部
  * @returns {string} 规范化结果；无改动时返回原串
  */
-export function normalizeText(text, ids){
+export function normalizeText(text, ids, customRules = []){
+  return applyRules(text, new Set(normalizeRuleIds(ids)), validateCustomRules(customRules));
+}
+
+function applyRules(text, enabled, customRules){
   const s = typeof text === 'string' ? text : String(text == null ? '' : text);
   if (!s) return s;
-  const enabled = new Set(normalizeRuleIds(ids));
-  let out = s;
-  for (const rule of NORM_RULES){
-    if (!enabled.has(rule.id)) continue;
-    out = out.replace(rule.re, rule.to);
-  }
+  const tokens = tokenizeInline(s);
+  const out = tokens.map(token => {
+    if (token.protected) return token.value;
+    let value = token.value;
+    for (const rule of NORM_RULES){
+      if (enabled.has(rule.id)) value = value.replace(rule.re, rule.to);
+    }
+    for (const rule of customRules){
+      if (rule.enabled){
+        const parts = value.split(rule.from);
+        const length = value.length + (parts.length - 1) * (rule.to.length - rule.from.length);
+        if (length > MAX_NORMALIZED_TEXT_LENGTH) throw new Error('规则使单行结果超过 100 万字符，请检查是否存在重复扩写');
+        value = parts.join(rule.to);
+      }
+    }
+    return value;
+  }).join('');
+  // 普通字符在替换后也可能拼成控制符，最终再检查一次完整序列。
+  const protectedValues = ts => ts.filter(t => t.protected).map(t => t.value);
+  if (JSON.stringify(protectedValues(tokens)) !== JSON.stringify(protectedValues(tokenizeInline(out)))) throw new Error('替换会改变脚本控制符，已停止规范化');
   return out;
 }
 
@@ -68,14 +103,16 @@ export function normalizeText(text, ids){
  * 批量应用前用这个做预览：未改动的行不进列表，用户看到的就是真正要动的地方。
  * @returns {Array<{i:number, from:string, to:string}>} 仅含变化项
  */
-export function collectNormalizable(paras, ids){
+export function collectNormalizable(paras, ids, customRules = []){
   const list = Array.isArray(paras) ? paras : [];
+  const enabled = new Set(normalizeRuleIds(ids));
+  const custom = validateCustomRules(customRules);
   const out = [];
   list.forEach((p, i) => {
     if (!p || p.isName) return;                 // NAME 行是名字，不套标点规范化
     const from = typeof p.translation === 'string' ? p.translation : '';
     if (!from) return;                           // 未翻译的行不参与
-    const to = normalizeText(from, ids);
+    const to = applyRules(from, enabled, custom);
     if (to !== from) out.push({ i, from, to });
   });
   return out;

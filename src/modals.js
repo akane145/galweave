@@ -1,3 +1,5 @@
+import { NORM_RULES, normalizeRuleIds, validateCustomRules, normalizeText } from './textnorm.js';
+
 // modals.js — 可复用浮层：模态二次确认 + 机翻结果比对（v3 视觉层 .modal-* 实现）
 //
 // 复用 index.html / style.css 已有的 .modal-mask > .modal 结构（P3-1 已对齐 v3）：
@@ -190,12 +192,6 @@ export function showAnnotationEditor(text){
       e.stopPropagation();
       if (e.key === 'Escape'){ e.preventDefault(); finish(null); }
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.isComposing){ e.preventDefault(); save.click(); }
-      if (e.key === 'Tab'){
-        const focusable = [input, cancel, save].filter(el => !el.disabled);
-        const index = focusable.indexOf(document.activeElement);
-        e.preventDefault();
-        focusable[(index + (e.shiftKey ? -1 : 1) + focusable.length) % focusable.length].focus();
-      }
     });
     requestAnimationFrame(() => input.focus());
   });
@@ -208,6 +204,12 @@ function esc(s){
 }
 
 // 挂一个浮层到 body，返回 { mask, modal }。调用方负责在里面塞内容与接线。
+function modalFocusables(modal){
+  return Array.from(modal.querySelectorAll(
+    'button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+  )).filter(el => el.offsetParent !== null);
+}
+
 function mountModal(build){
   const mask = document.createElement('div');
   mask.className = 'modal-mask';
@@ -215,15 +217,385 @@ function mountModal(build){
   mask.appendChild(modal);
   document.body.appendChild(mask);
   document.body.classList.add('modal-open');
-  // 下一帧加 .show 触发入场动画（与 initModalA11y 的 MutationObserver 时序一致）
-  requestAnimationFrame(() => mask.classList.add('show'));
+  mask.setAttribute('aria-hidden', 'true');
+  mask.addEventListener('keydown', (e) => {
+    if (!mask.classList.contains('show') || e.key !== 'Tab') return;
+    const items = modalFocusables(modal);
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first){
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last){
+      e.preventDefault();
+      first.focus();
+    }
+  });
+  // 下一帧加 .show 触发入场动画，并将焦点放入动态模态。
+  requestAnimationFrame(() => {
+    mask.classList.add('show');
+    mask.setAttribute('aria-hidden', 'false');
+    const first = modalFocusables(modal)[0];
+    if (first && !modal.contains(document.activeElement)) first.focus();
+  });
   return { mask, modal };
 }
 
 function unmount(mask){
   mask.classList.remove('show');
+  mask.setAttribute('aria-hidden', 'true');
   document.body.classList.remove('modal-open');
   setTimeout(() => mask.remove(), 180);
+}
+
+/**
+ * 多选项模态（保存冲突、重试策略等"三选一且没有明显是非"的场景）。
+ *
+ * 与 showConfirm 的分工：showConfirm 是"做/不做"，本函数是"怎么做"。
+ * 默认焦点固定在**第一个选项**上——调用方把最安全的那个放第一位
+ * （见 fileguard.conflictChoices：另存为永远第一）。
+ *
+ * @param {Object} o
+ * @param {string} o.title
+ * @param {string} [o.message]  \n 渲染为换行
+ * @param {Array<{id:string, label:string, hint?:string, danger?:boolean}>} o.choices
+ * @returns {Promise<string>} 选中的 id；Esc / 点遮罩 / 取消 返回 ''（当作取消）
+ */
+export function showChoice({ title, message = '', choices = [], cancelText = '取消' } = {}){
+  return new Promise((resolve) => {
+    const list = Array.isArray(choices) ? choices.filter(c => c && c.id) : [];
+    const { mask, modal } = mountModal(() => {
+      const el = document.createElement('div');
+      el.className = 'modal choice';
+      el.setAttribute('role', 'alertdialog');
+      el.setAttribute('aria-modal', 'true');
+      el.setAttribute('aria-labelledby', 'choice-title');
+      const body = list.map(c =>
+        '<button type="button" class="choice-item' + (c.danger ? ' danger' : '') + '" data-choice="' + esc(c.id) + '">' +
+          '<span class="choice-label">' + esc(c.label) + '</span>' +
+          (c.hint ? '<span class="choice-hint">' + esc(c.hint) + '</span>' : '') +
+        '</button>'
+      ).join('');
+      el.innerHTML =
+        '<h3 class="modal-title" id="choice-title">' + esc(title) + '</h3>' +
+        (message ? '<p class="modal-body">' + esc(message).replace(/\n/g, '<br>') + '</p>' : '') +
+        '<div class="choice-list">' + body + '</div>' +
+        '<div class="actions"><button type="button" class="btn-cancel">' + esc(cancelText) + '</button></div>';
+      return el;
+    });
+    let settled = false;
+    const finish = (v) => { if (settled) return; settled = true; unmount(mask); resolve(v); };
+
+    modal.querySelectorAll('[data-choice]').forEach(btn => {
+      btn.addEventListener('click', () => finish(btn.dataset.choice));
+    });
+    modal.querySelector('.btn-cancel').addEventListener('click', () => finish(''));
+    mask.addEventListener('mousedown', (e) => { if (e.target === mask) finish(''); });
+    mask.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape'){ e.preventDefault(); finish(''); }
+    });
+    // 默认焦点在第一项（调用方保证那是安全项）
+    requestAnimationFrame(() => {
+      const first = modal.querySelector('[data-choice]');
+      if (first) first.focus();
+    });
+  });
+}
+
+/**
+ * 批量机翻任务面板：进度 + 停止 + 失败清单 + 仅重试失败行。
+ *
+ * 做成**常驻浮层而非 toast**：批量机翻可能跑几分钟，用户需要随时看到
+ * "跑到哪了、错了几条、还剩多少"，并能立刻停下来。toast 两秒就消失了。
+ *
+ * 本函数只负责显示与回调，状态归 main.js 的 mt-task 任务对象 —— 因此
+ * 每次刷新都从 `state` 重画，不存在两处各记一份进度而说法不一的问题。
+ *
+ * @param {Object} o
+ * @param {string} o.title
+ * @param {() => object} o.getState 取当前任务快照的渲染数据
+ * @param {() => void} o.onStop    用户点「停止」
+ * @param {() => void} o.onRetry   用户点「重试失败的行」
+ * @param {() => void} [o.onClose] 用户关闭面板
+ * @returns {{refresh:()=>void, close:()=>void}}
+ */
+export function showMtTaskPanel({ title = '批量机翻', getState, onStop, onRetry, onClose } = {}){
+  const { mask, modal } = mountModal(() => {
+    const el = document.createElement('div');
+    el.className = 'modal mt-task';
+    el.setAttribute('role', 'dialog');
+    el.setAttribute('aria-modal', 'true');
+    el.setAttribute('aria-labelledby', 'mtt-title');
+    el.innerHTML =
+      '<h3 class="modal-title" id="mtt-title">' + esc(title) + '</h3>' +
+      '<div class="mtt-progress" id="mtt-progress" role="status" aria-live="polite"></div>' +
+      '<div class="mtt-bar" aria-hidden="true"><div class="mtt-bar-fill" id="mtt-bar-fill"></div></div>' +
+      '<div class="mtt-fail-head" id="mtt-fail-head" hidden>失败的行（只重试这些）</div>' +
+      '<div class="mtt-fail-list" id="mtt-fail-list"></div>' +
+      '<div class="actions">' +
+        '<button type="button" class="btn-close">关闭</button>' +
+        '<button type="button" class="btn-retry" id="mtt-retry" hidden>重试失败的行</button>' +
+        '<button type="button" class="btn-stop danger" id="mtt-stop">停止</button>' +
+      '</div>';
+    return el;
+  });
+
+  const progressEl = modal.querySelector('#mtt-progress');
+  const barEl = modal.querySelector('#mtt-bar-fill');
+  const failHead = modal.querySelector('#mtt-fail-head');
+  const failList = modal.querySelector('#mtt-fail-list');
+  const stopBtn = modal.querySelector('#mtt-stop');
+  const retryBtn = modal.querySelector('#mtt-retry');
+  const closeBtn = modal.querySelector('.btn-close');
+  let closed = false;
+
+  /** 从任务快照重画（每次全量重画，避免增量更新出两套说法） */
+  function refresh(){
+    if (closed) return;
+    const st = (typeof getState === 'function' ? getState() : null) || {};
+    const s = st.summary || { total: 0, done: 0, failed: 0, stopped: 0, edited: 0, pending: 0 };
+    progressEl.textContent = st.progressLabel || '';
+    const processed = (s.done || 0) + (s.edited || 0) + (s.failed || 0) + (s.stopped || 0);
+    barEl.style.width = s.total ? Math.round((processed / s.total) * 100) + '%' : '0%';
+
+    const failures = Array.isArray(st.failures) ? st.failures : [];
+    failList.textContent = '';
+    failHead.hidden = failures.length === 0;
+    for (const f of failures){
+      const row = document.createElement('div');
+      row.className = 'mtt-fail';
+      const no = document.createElement('span');
+      no.className = 'mtt-fail-line';
+      no.textContent = '第 ' + (f.i + 1) + ' 行';
+      const why = document.createElement('span');
+      why.className = 'mtt-fail-why';
+      why.textContent = f.err || '未知原因';
+      row.append(no, why);
+      row.addEventListener('click', () => { if (typeof st.onJump === 'function') st.onJump(f.i); });
+      failList.appendChild(row);
+    }
+
+    // 已经停止 → 隐藏停止按钮（再点没有意义）；有失败行 → 给重试入口
+    stopBtn.hidden = !!st.finished || !!st.stopped;
+    retryBtn.hidden = failures.length === 0;
+    retryBtn.textContent = '重试失败的行（' + failures.length + '）';
+  }
+
+  stopBtn.addEventListener('click', () => { if (onStop) onStop(); });
+  retryBtn.addEventListener('click', () => { if (onRetry) onRetry(); });
+  const doClose = () => {
+    if (closed) return;
+    closed = true;
+    unmount(mask);
+    if (onClose) onClose();
+  };
+  closeBtn.addEventListener('click', doClose);
+  // Esc 关闭面板但**不停任务** —— 批量机翻在后台继续跑是合理预期，
+  // 想停就点停止按钮（有明确语义的动作不该藏在 Esc 里）。
+  mask.addEventListener('keydown', (e) => { if (e.key === 'Escape'){ e.preventDefault(); doClose(); } });
+
+  refresh();
+  return { refresh, close: doClose };
+}
+
+/**
+ * 「全部替换」逐行预览：列出真正会改变的行，逐行勾选，只应用所选。
+ *
+ * 为什么不能沿用原生 confirm：批量替换一旦执行就没有中间地带 —— 用户看到
+ * 数量却看不到内容，只能全信或全弃。预览把"哪几行、改成什么"摊开，
+ * 并允许把个别例外行排除在外。
+ *
+ * 每行给出**只读原句与脚本编号**：同一个词在不同句子里可能该有不同的译法，
+ * 只看"改前/改后"无法判断这一行该不该跟着改。原句只读展示，不参与写入。
+ *
+ * 与 showConfirm 的分工：本函数**不做任何写入**，只把用户选中的行号交回调用方；
+ * 身份核对、撤销、脏标记与同步全部由 main.js 负责（那里才有文档上下文）。
+ *
+ * @param {Object} o
+ * @param {string} o.title
+ * @param {string} [o.message]  摘要说明，\n 渲染为换行
+ * @param {Array<{i:number, label:string, ref?:string, orig?:string, before:string, after:string, count:number}>} o.rows
+ *        仅包含**真正改变**的行；ref 是脚本编号，orig 是只读原句，before/after 是该字段的完整文本
+ * @param {string} [o.fieldLabel='译文'] 字段名（译文 / 名字）
+ * @returns {Promise<number[]|null>} 选中的行号数组；取消 / Esc / 点击遮罩返回 null
+ */
+export function showReplacePreview({ title, message = '', rows = [], fieldLabel = '译文' } = {}){
+  const previousFocus = document.activeElement;
+  return new Promise((resolve) => {
+    const list = Array.isArray(rows) ? rows : [];
+    const picked = new Set(list.map(r => r.i)); // 默认全选"真正改变"的行
+    const { mask, modal } = mountModal(() => {
+      const el = document.createElement('div');
+      el.className = 'modal replace-preview';
+      el.setAttribute('role', 'dialog');
+      el.setAttribute('aria-modal', 'true');
+      el.setAttribute('aria-labelledby', 'rp-title');
+
+      const titleEl = document.createElement('h3');
+      titleEl.className = 'modal-title';
+      titleEl.id = 'rp-title';
+      titleEl.textContent = title;
+      el.appendChild(titleEl);
+
+      if (message){
+        const msg = document.createElement('p');
+        msg.className = 'modal-body';
+        msg.textContent = message;
+        el.appendChild(msg);
+      }
+
+      const tools = document.createElement('div');
+      tools.className = 'rp-tools';
+      const selAll = document.createElement('button');
+      selAll.type = 'button';
+      selAll.className = 'rp-select-all';
+      selAll.textContent = '全选';
+      const selNone = document.createElement('button');
+      selNone.type = 'button';
+      selNone.className = 'rp-select-none';
+      selNone.textContent = '全不选';
+      const count = document.createElement('span');
+      count.className = 'rp-count';
+      count.setAttribute('role', 'status');
+      count.setAttribute('aria-live', 'polite');
+      tools.append(selAll, selNone, count);
+      el.appendChild(tools);
+
+      const box = document.createElement('div');
+      box.className = 'rp-list';
+      // 行内容全部用 DOM 文本节点生成：译文里可能含 < > & 或控制符
+      list.forEach((r) => {
+        const item = document.createElement('label');
+        item.className = 'rp-item';
+        const check = document.createElement('input');
+        check.type = 'checkbox';
+        check.checked = true;
+        check.dataset.i = String(r.i);
+        check.addEventListener('change', () => {
+          if (check.checked) picked.add(r.i);
+          else picked.delete(r.i);
+          paint();
+        });
+        const body = document.createElement('div');
+        body.className = 'rp-body';
+        const head = document.createElement('div');
+        head.className = 'rp-head';
+        const no = document.createElement('b');
+        no.textContent = r.label || ('第 ' + (r.i + 1) + ' 行');
+        head.appendChild(no);
+        if (r.ref){
+          const ref = document.createElement('span');
+          ref.className = 'rp-ref';
+          ref.textContent = r.ref; // 脚本编号（如 0000 / NAME|11），只读
+          ref.title = '脚本编号';
+          head.appendChild(ref);
+        }
+        const times = document.createElement('span');
+        times.className = 'rp-times';
+        times.textContent = r.count > 1 ? ('替换 ' + r.count + ' 处') : '替换 1 处';
+        head.appendChild(times);
+        body.appendChild(head);
+        // 只读原句：判断这一行该不该跟着改的依据；不参与写入
+        if (r.orig !== undefined && r.orig !== null && String(r.orig) !== ''){
+          const orig = document.createElement('div');
+          orig.className = 'rp-line rp-orig';
+          const oTag = document.createElement('span');
+          oTag.className = 'rp-tag';
+          oTag.textContent = '原句';
+          const oTxt = document.createElement('span');
+          oTxt.className = 'rp-text';
+          oTxt.textContent = String(r.orig);
+          orig.append(oTag, oTxt);
+          body.appendChild(orig);
+        }
+        const before = document.createElement('div');
+        before.className = 'rp-line rp-before';
+        const bTag = document.createElement('span');
+        bTag.className = 'rp-tag';
+        bTag.textContent = '改前';
+        const bTxt = document.createElement('span');
+        bTxt.className = 'rp-text';
+        bTxt.textContent = r.before;
+        before.append(bTag, bTxt);
+        const after = document.createElement('div');
+        after.className = 'rp-line rp-after';
+        const aTag = document.createElement('span');
+        aTag.className = 'rp-tag';
+        aTag.textContent = '改后';
+        const aTxt = document.createElement('span');
+        aTxt.className = 'rp-text';
+        aTxt.textContent = r.after;
+        after.append(aTag, aTxt);
+        body.append(before, after);
+        item.append(check, body);
+        box.appendChild(item);
+      });
+      el.appendChild(box);
+
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'btn-cancel';
+      cancel.textContent = '取消';
+      const ok = document.createElement('button');
+      ok.type = 'button';
+      ok.className = 'btn-confirm';
+      ok.textContent = '应用所选';
+      actions.append(cancel, ok);
+      el.appendChild(actions);
+
+      const paint = () => {
+        let rowCount = 0, hitCount = 0;
+        for (const r of list){
+          if (!picked.has(r.i)) continue;
+          rowCount++;
+          hitCount += r.count || 1;
+        }
+        count.textContent = '选中 ' + rowCount + ' 行 · 替换 ' + hitCount + ' 处';
+        ok.disabled = rowCount === 0;
+        ok.title = rowCount === 0 ? '至少勾选一行才能应用' : ('只替换勾选的 ' + rowCount + ' 行' + fieldLabel);
+      };
+      selAll.addEventListener('click', () => {
+        for (const r of list) picked.add(r.i);
+        box.querySelectorAll('input[type="checkbox"]').forEach(c => { c.checked = true; });
+        paint();
+      });
+      selNone.addEventListener('click', () => {
+        picked.clear();
+        box.querySelectorAll('input[type="checkbox"]').forEach(c => { c.checked = false; });
+        paint();
+      });
+
+      el.__paint = paint; // 交由下方 wiring 首帧调用
+      return el;
+    });
+
+    const ok = modal.querySelector('.btn-confirm');
+    const cancel = modal.querySelector('.btn-cancel');
+    if (modal.__paint) modal.__paint();
+    let settled = false;
+    const finish = (v) => {
+      if (settled) return;
+      settled = true;
+      unmount(mask);
+      // 关闭后把焦点还回编辑位置：取消/全不选不写入，键盘流不该被弹窗打断
+      if (previousFocus && previousFocus.isConnected) previousFocus.focus();
+      resolve(v);
+    };
+    cancel.addEventListener('click', () => finish(null));
+    ok.addEventListener('click', () => {
+      if (ok.disabled) return;
+      finish(list.filter(r => picked.has(r.i)).map(r => r.i));
+    });
+    mask.addEventListener('mousedown', (e) => { if (e.target === mask) finish(null); });
+    mask.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape'){ e.preventDefault(); finish(null); }
+    });
+    // 默认焦点落在取消：批量写入不可逆到这一步为止，误触回车不应直接应用
+    requestAnimationFrame(() => cancel.focus());
+  });
 }
 
 /**
@@ -236,6 +608,75 @@ function unmount(mask){
  * @param {boolean} [o.danger=true]  确认按钮是否用 danger 样式
  * @returns {Promise<boolean>} 确认 true / 取消或 Esc 或点遮罩 false
  */
+export function showPunctuationRules(config = {}){
+  return new Promise(resolve => {
+    const {mask,modal} = mountModal(() => {
+      const el = document.createElement('div');
+      el.className = 'modal punctuation-rules';
+      el.setAttribute('role','dialog');
+      el.setAttribute('aria-modal','true');
+      el.setAttribute('aria-labelledby','punct-rules-title');
+      el.innerHTML = '<h3 id="punct-rules-title">标点规则</h3>'
+        + '<p>只处理译文。先执行勾选的内置规则，再从上到下执行自定义规则；每条执行一次，按普通文字匹配，替换为空表示删除。</p>'
+        + '<div class="punct-builtins"></div><div class="punct-custom"></div>'
+        + '<div class="actions"><button type="button" class="punct-add">添加规则</button><button type="button" class="punct-examples">加入示例规则</button></div>'
+        + '<label for="punct-test">试用文字</label><textarea id="punct-test" rows="2">「结束。」……。……——</textarea>'
+        + '<div class="punct-result" aria-live="polite"></div><p class="punct-error" role="alert"></p>'
+        + '<div class="actions"><button type="button" class="btn-cancel">取消</button><button type="button" class="btn-confirm">保存规则</button></div>';
+      return el;
+    });
+    const enabled = new Set(normalizeRuleIds(config.ids));
+    const builtins = modal.querySelector('.punct-builtins');
+    for (const rule of NORM_RULES){
+      const label = document.createElement('label');
+      const check = document.createElement('input'); check.type = 'checkbox'; check.value = rule.id; check.checked = enabled.has(rule.id);
+      label.append(check,document.createTextNode(rule.label)); builtins.append(label);
+    }
+    const list = modal.querySelector('.punct-custom');
+    const error = modal.querySelector('.punct-error');
+    const read = () => ({ids:[...builtins.querySelectorAll('input:checked')].map(el=>el.value),customRules:validateCustomRules(
+      [...list.children].map(el=>({enabled:el.querySelector('[data-enabled]').checked,from:el.querySelector('[data-from]').value,to:el.querySelector('[data-to]').value})))});
+    const preview = () => {
+      try { const cfg = read(); modal.querySelector('.punct-result').textContent = '结果：' + normalizeText(modal.querySelector('#punct-test').value,cfg.ids,cfg.customRules); error.textContent = ''; }
+      catch(e){ error.textContent = e.message; modal.querySelector('.punct-result').textContent = ''; }
+    };
+    const renumber = () => [...list.children].forEach((el,i) => {
+      el.querySelector('[data-enabled]').setAttribute('aria-label','启用规则 ' + (i+1));
+      el.querySelector('[data-from]').setAttribute('aria-label','规则 ' + (i+1) + ' 匹配文字');
+      el.querySelector('[data-to]').setAttribute('aria-label','规则 ' + (i+1) + ' 替换结果');
+    });
+    const add = rule => {
+      const el = document.createElement('div'); el.className = 'punct-rule';
+      el.innerHTML = '<input type="checkbox" data-enabled><input type="text" data-from placeholder="匹配文字" maxlength="200"><span aria-hidden="true">→</span>'
+        + '<input type="text" data-to placeholder="替换结果（可留空）" maxlength="200"><button type="button" data-up aria-label="上移规则">↑</button><button type="button" data-down aria-label="下移规则">↓</button><button type="button" data-remove>删除</button>';
+      el.querySelector('[data-enabled]').checked = rule.enabled !== false;
+      el.querySelector('[data-from]').value = rule.from;
+      el.querySelector('[data-to]').value = rule.to;
+      el.querySelector('[data-up]').onclick = () => { if(el.previousElementSibling) list.insertBefore(el,el.previousElementSibling); renumber(); preview(); };
+      el.querySelector('[data-down]').onclick = () => { if(el.nextElementSibling) list.insertBefore(el.nextElementSibling,el); renumber(); preview(); };
+      el.querySelector('[data-remove]').onclick = () => { el.remove(); renumber(); preview(); modal.querySelector('.punct-add').focus(); };
+      list.append(el); renumber(); return el;
+    };
+    for(const rule of config.customRules || []) add(rule);
+    modal.querySelector('.punct-add').onclick = () => { add({from:'',to:''}).querySelector('[data-from]').focus(); preview(); };
+    modal.querySelector('.punct-examples').onclick = () => {
+      for(const rule of [{from:'。」',to:'」'},{from:'……。',to:'……'},{from:'……——',to:'……'}]){
+        if (![...list.querySelectorAll('[data-from]')].some(el=>el.value === rule.from)) add(rule);
+      }
+      preview();
+    };
+    modal.addEventListener('input',preview);
+    modal.addEventListener('change',preview);
+    let settled = false;
+    const finish = value => { if(settled) return; settled=true; unmount(mask); resolve(value); };
+    modal.querySelector('.btn-cancel').onclick = () => finish(null);
+    modal.querySelector('.btn-confirm').onclick = () => { try { finish(read()); } catch(e){ error.textContent=e.message; } };
+    mask.addEventListener('keydown',e=>{ if(e.key === 'Escape'){ e.preventDefault(); finish(null); } });
+    mask.addEventListener('mousedown',e=>{ if(e.target === mask) finish(null); });
+    preview();
+  });
+}
+
 export function showConfirm({ title, message = '', confirmText = '确认', cancelText = '取消', danger = true } = {}){
   return new Promise((resolve) => {
     const { mask, modal } = mountModal(() => {

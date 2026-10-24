@@ -45,7 +45,10 @@ import * as exporter from './exporter.js';
 import * as recovery from './recovery.js';
 import * as dhist from './dict-history.js';
 import * as tm from './tm.js';
-import { showConfirm, showMtCompare, showExitConfirm, showHistoryList, showStatsPanel, showAnnotationEditor, showAnkiSettings, showGlossQuickAdd } from './modals.js';
+import * as mtTask from './mt-task.js';
+import * as fileguard from './fileguard.js';
+import * as enc from './encoding.js';
+import { showConfirm, showMtCompare, showExitConfirm, showHistoryList, showStatsPanel, showAnnotationEditor, showAnkiSettings, showGlossQuickAdd, showChoice, showMtTaskPanel, showReplacePreview } from './modals.js';
 import * as history from './history.js';
 import * as mtbase from './mtbaseline.js';
 import { showObsidianExport } from './obsidian-ui.js';
@@ -54,6 +57,12 @@ import * as anki from './anki.js';
 import { snapshotChange } from './obsidian.js';
 import { buildProofReport } from './proof-report.js';
 import { saveProofReport } from './obsidian-files.js';
+import { createRecordPack, readRecordPack, RECORD_PACK_MAX_BYTES } from './record-pack.js';
+import { showPunctuationRules } from './modals.js';
+import { reviewQueue, nextInQueue, issueCategoryCounts, ISSUE_CATEGORIES } from './editor-navigation.js';
+import * as srcdiff from './srcdiff.js';
+import { buildReplacePlan, planReplaceCommit, commitReplaceEntries } from './replace-apply.js';
+import { isGlobalCommandKey, isEditableElement } from './shortcut-guard.js';
 
 /* ---------------- 状态 ---------------- */
 
@@ -63,6 +72,7 @@ let glossData = null;   // { names, terms }
 // 当前活动文档的「未保存」标记: 译文内容被改动且尚未写回原文件(保存原文件/Ctrl+S 后清除)。
 // 各标签的脏状态随快照存放在 tabdock snap.dirty;anyUnsaved() 汇总所有已打开文档。
 let docDirty = false;
+let recordContext = null; // 当前记录包的隔离命名空间；不包含源设备路径。
 let snippetData = { global: {}, project: {}, merged: {} }; // 快捷片段(merged 供输入建议)
 let dictSettings = null;                                   // settings.dict(词典源配置)
 const sessionDictEntries = new Map(); // 浏览器版会话内 JSON 词典词条: 源 id -> entries
@@ -76,6 +86,29 @@ const $r = document.getElementById('r');
 const $scope = document.getElementById('scope');
 const $mcase = document.getElementById('mcase');
 const $mtProvider = document.getElementById('mtProvider');
+
+/**
+ * 为网络/模型操作提供统一的防重复提交与辅助技术状态。
+ * 不改按钮文案，避免命令条在等待期间跳动；spinner 由 CSS 负责呈现。
+ */
+async function withBusyState(button, task){
+  if (button && button.dataset.busy === 'true') return;
+  const wasDisabled = button ? button.disabled : false;
+  if (button){
+    button.dataset.busy = 'true';
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+  }
+  try {
+    return await task();
+  } finally {
+    if (button){
+      button.disabled = wasDisabled;
+      button.removeAttribute('aria-busy');
+      delete button.dataset.busy;
+    }
+  }
+}
 
 /* ---------------- 撤销快照辅助 ---------------- */
 
@@ -123,13 +156,11 @@ rdr.setRendererState({
   qaEntries: qaEntriesCached,
   issueDetail,
   checkControls: () => _checkControls,
-  // 剧场视图（只读）：渲染器据此置 textarea.readOnly 与说话人配色
-  theater: isTheater,
-  speakerSlot,
   onTermClick: insertTerm,
   // 输入建议(术语/片段)与划词查词
   getSuggestions: (token) => suggest.matchSuggestions(token, glossData ? glossData.terms : {}, snippetData.merged),
   onSuggestionApply: applySuggestion,
+  onSuggestChange: updateStatusTabHint,
   onDictLookup: dictLookupFromSelection,
   onNameInput: nameInputHandler,
   onTransInput: transInputHandler,
@@ -153,7 +184,10 @@ rdr.setRendererState({
   onProofAnnoEdit: editProofAnnotation,
   onProofSessionEnd: (i) => proof.settleInput(i),
 });
-proof.setProofUI({ refreshRow: rdr.refreshRow, refreshAll: rdr.refreshAllRows, refreshUI: refreshProofUI });
+proof.setProofUI({ refreshRow: rdr.refreshRow, refreshAll: rdr.refreshAllRows, refreshUI: () => {
+  if (recordContext) markDirty();
+  refreshProofUI();
+} });
 
 // 统计编排已拆到 src/ui/stats-ui.js：注入依赖而非让它反向 import main.js（会成环）
 uiStats.initStatsUI({ model, showStatsPanel, toastError });
@@ -194,7 +228,7 @@ function applyFonts(font){
     // 颜色取当前主题模式对应的槽位(空=跟随主题变量)
     el.style.setProperty('--' + prefix + '-font-color', theme.colorForMode(g, currentMode));
   };
-  set('orig', 'var(--font-serif-jp)');
+  set('orig', 'var(--font-sans-jp)');
   set('trans', 'var(--font-sans-jp)');
 }
 
@@ -203,6 +237,7 @@ function applyDensity(mode){
   const attr = theme.densityAttr(mode);
   if (attr) document.documentElement.setAttribute('data-density', attr);
   else document.documentElement.removeAttribute('data-density');
+  rdr.setDensity();   // v4 行卡片的行距/内距由密度档驱动，已挂载行需重测
 }
 
 /**
@@ -670,11 +705,11 @@ async function onFontFamilyInput(e){
 
 function updateProgress(){ rdr.updateProgress(); updateStats(); syncEditorialMeta(); updateActiveTabProgress(); }
 
-// 字数统计: 总字符 / 已翻译字符 / 完成百分比(基于译文字符数)
+// 字数统计只显示译文/原文字符数；行完成度另由进度条表达。
 function updateStats(){
   const paras = model.getParas();
   const el = document.getElementById('stats');
-  if (!paras.length){ el.textContent = ''; return; }
+  if (!paras.length){ el.textContent = ''; el.title = '译文字数 0，原文字数 0'; el.setAttribute('aria-label', el.title); return; }
   let total = 0, translated = 0;
   for (const p of paras){
     if (p.isName) continue; // NAME 条目不计数
@@ -682,13 +717,37 @@ function updateStats(){
     total += len;
     if (p.done) translated += (p.translation || '').length;
   }
-  const pct = total ? Math.round(translated / total * 100) : 0;
-  el.textContent = '　' + translated.toLocaleString() + ' / ' + total.toLocaleString() + ' 字符（' + pct + '%）';
+  el.textContent = translated.toLocaleString() + ' / ' + total.toLocaleString();
+  el.title = '译文字数 ' + translated.toLocaleString() + '，原文字数 ' + total.toLocaleString();
+  el.setAttribute('aria-label', el.title);
 }
 
 function updateUndoButtons(){
   document.getElementById('btnUndo').disabled = !model.canUndo();
   document.getElementById('btnRedo').disabled = !model.canRedo();
+}
+
+/** 共享编辑组的「保存」文案随文档类型切换：
+    记录包文档没有磁盘文件可写，saveDirect 会改道导出记录包 —— 文案必须跟着说清楚，
+    否则用户以为在覆盖某个原文件。普通文档保持「保存原文件」。 */
+function updateSaveCommandLabel(){
+  const btn = document.getElementById('btnSaveFile');
+  if (!btn) return;
+  const isRecord = !!recordContext;
+  const label = isRecord ? '导出记录包' : '保存原文件';
+  if (btn.textContent !== label) btn.textContent = label;
+  btn.title = isRecord
+    ? '记录包文档没有磁盘文件，导出为记录包以便跨设备继续'
+    : '直接写回导入的原文件';
+}
+
+/** 底栏 Tab 提示跟随输入建议浮层的真实状态（renderer 在显示/隐藏时回调）。
+    建议打开时 Tab 是"采纳"，其余时候才是切行 —— 同一任务里的提示不应互相矛盾。
+    底栏是「<kbd>Tab</kbd> <span>…</span>」，所以这里只写动词。 */
+function updateStatusTabHint(open){
+  const el = document.getElementById('statusTabHint');
+  if (!el) return;
+  el.textContent = open ? '采纳' : '下一行';
 }
 
 function updateMTButtons(){
@@ -706,7 +765,9 @@ function nameInputHandler(i, value){
   if (!p) return;
   pushUndoFor(i);
   proof.noteInput(i); // 必须在赋值前捕获旧译名，包含单次粘贴/替换。
+  const changed = p.nameTr !== value;
   p.nameTr = value;
+  if (changed) proof.demoteApproved(i);
   if (p.isName) model.recalcDone(p);
   model.scheduleAutosave();
   // 新翻译的人名自动沉淀进人名表(并保存,否则只在内存里,重开软件就丢)
@@ -725,6 +786,7 @@ function nameInputHandler(i, value){
 function transInputHandler(i, value){
   const p = model.getPara(i);
   if (!p) return;
+  const before = p.isName ? p.nameTr : p.translation;
   pushUndoFor(i);
   proof.noteInput(i); // 必须在赋值前捕获旧译文，供修改记录及 Obsidian 收藏使用。
   if (p.isName){
@@ -744,6 +806,8 @@ function transInputHandler(i, value){
     model.recalcDone(p);
   }
   p.src = 'human';   // 归因标记：人工输入（含改写机翻结果）→ 统计面板据此算 MT/人工占比
+  mtTaskEdit.bump(i); // 行编辑版本号 +1：批量机翻回来时会据此丢弃迟到的结果，不覆盖这里的输入
+  if (before !== (p.isName ? p.nameTr : p.translation)) proof.demoteApproved(i);
   model.scheduleAutosave();
   rdr.refreshRow(i);
   updateProgress();
@@ -870,6 +934,18 @@ function replaceCurrent(){
   gotoMatch(0);
 }
 
+/**
+ * 「全部替换」：逐行预览 → 勾选 → 只应用所选。
+ *
+ * 预览用 **非破坏的 search-remote deltas** 计算，绝不调用 wkr.searchReplaceAll ——
+ * 搜索 Worker 处理该消息时会**直接改写自己的 shadow**，取消预览会留下
+ * 与主线程不一致的影子状态（幽灵匹配）。规模上限（5000 行以内）由既有
+ * 非破坏路径承担，不为此新增 Worker 通道。
+ *
+ * 预览、字段边界与提交清单都走 `replace-apply.js` 的纯函数（与单测同一份实现）：
+ * **只写本次替换的目标字段**，另一字段在预览期间被机翻或人工更新过也保持不变。
+ * 应用前核对文档身份、查找/替换参数与所选行的目标字段原值，任一项不符整体拒绝。
+ */
 async function replaceAll(){
   const q = $q.value;
   if (q === '' || $scope.value === 'orig'){
@@ -879,59 +955,84 @@ async function replaceAll(){
   const rep = $r.value;
   const sc = $scope.value;
   const cs = $mcase.checked;
-  // 让 count 走 worker,避免主线程全扫
-  if (!_synced){ _synced = true; wkr.syncSearchShadow({ full: model.getParas() }); }
-  let grand = 0, nameTotal = 0;
-  try {
-    const c = await wkr.searchCountMatches(q, sc, cs);
-    grand = (c && c.total) || 0; nameTotal = (c && c.nameTotal) || 0;
-    grand += nameTotal;
-  } catch (e){
-    const c = s.countMatches(model.getParas(), q, sc, cs);
-    grand = c.total + c.nameTotal;
-  }
-  if (grand === 0){ toastError('没有找到可替换的匹配。'); return; }
-  const label = (sc === 'name') ? '名字' : '译文';
-  if (!confirm('将替换 ' + label + ' ' + grand + ' 处\n“' + q + '” → “' + rep + '”\n确定继续?')) return;
+  const docKeyAtPreview = model.getStateKey();
 
-  // 双轨:worker 算 deltas 前先用本地扫描生成 affected(供撤销),再用 deltas 写回 model
+  // 非破坏计算 + 预览行（同值替换不算改动）
   const paras = model.getParas();
-  const snap = proof.isEnabled() ? proof.snapshot() : null;
-  const affected = [];
-  const replaceTrans = (sc === 'all' || sc === 'trans');
-  const replaceName = (sc === 'name');
-  paras.forEach((p, i) => {
-    if (replaceTrans && s.findIdx(p.translation, q, 0, cs) !== -1) affected.push(i);
-    if (replaceName && s.findIdx(p.nameTr, q, 0, cs) !== -1 && !affected.includes(i)) affected.push(i);
-  });
-  model.pushUndo(affected);
-  clearPushTimers();
-
-  let r;
-  try { r = await wkr.searchReplaceAll(q, rep, sc, cs); }
-  catch (e){
-    // 降级:worker 不可用时回退到原地
-    s.replaceAllInParas(paras, q, rep, sc, cs);
-    if (snap) proof.recordDiff(snap, 'batch');
-    model.scheduleAutosave();
-    rdr.refreshAllRows(); // 数据已写回 model,刷新已挂载行 DOM
-    recomputeMatchesUI(true);
-    updateProgress();
-    toast('已替换 ' + grand + ' 处。');
+  const plan = buildReplacePlan(paras, q, rep, sc, cs);
+  const fieldLabel = plan.field === 'nameTr' ? '名字' : '译文';
+  if (plan.grand === 0){ toastError('没有找到可替换的匹配。'); return; }
+  if (!plan.rows.length){
+    toast('没有真正会发生改变的行（命中处的答案与替换文本相同）。');
     return;
   }
-  for (const d of (r.deltas || [])){
-    const p = paras[d.i]; if (!p) continue;
-    p.translation = d.translation; p.nameTr = d.nameTr;
-    if (typeof model.recalcDone === 'function') model.recalcDone(p);
+
+  const rows = plan.rows.map(r => ({
+    i: r.i,
+    label: '第 ' + (r.i + 1) + ' 行',
+    ref: r.ref,
+    orig: r.orig,
+    before: r.before,
+    after: r.after,
+    count: r.count,
+  }));
+  const picked = await showReplacePreview({
+    title: '全部替换预览',
+    message: '将替换 ' + fieldLabel + ' ' + plan.grand + ' 处\n“' + q + '” → “' + rep + '”\n'
+      + '共 ' + plan.rows.length + ' 行会改变。取消或关闭不会写入任何内容。',
+    rows,
+    fieldLabel,
+  });
+  if (!picked || !picked.length) return; // 取消 / 全不选 → 不改文本、不改撤销栈、不改搜索状态
+
+  // 应用前核对：文档身份、段落数组、查找替换参数
+  if (docKeyAtPreview !== model.getStateKey() || paras !== model.getParas()){
+    toastError('预览期间已切换文档，请重新预览后再应用。');
+    return;
+  }
+  if (q !== $q.value || rep !== $r.value || sc !== $scope.value || cs !== $mcase.checked){
+    toastError('预览期间查找/替换参数已改变，请重新预览后再应用。');
+    return;
+  }
+  // 提交清单：只核对所选行的**目标字段**原值（另一字段与本次替换无关）
+  const commit = planReplaceCommit({ paras, rows: plan.rows, picked, field: plan.field });
+  if (!commit.ok){
+    toastError(commit.reason === 'row-missing'
+      ? '预览期间文档内容已变化，请重新预览后再应用。'
+      : '预览期间第 ' + (commit.i + 1) + ' 行已被编辑，请重新预览后再应用。');
+    return;
+  }
+  if (!commit.entries.length) return;
+
+  // 只写选中行；核对与写入之间不插异步等待（上面全部是同步检查）。
+  // 撤销快照由 pushUndo 在写入前捕获两个字段与来源 → 一次 Ctrl+Z 完整回退。
+  // 归因不在这里写：只改译名时 commitReplaceEntries 不动译文来源（见 R3 说明）。
+  const snap = proof.isEnabled() ? proof.snapshot() : null;
+  model.pushUndo(commit.entries.map(e => e.i));
+  clearPushTimers();
+  const editor = rdr.captureEditorPosition();
+  const applied = commitReplaceEntries(paras, commit.entries, commit.field);
+  for (const i of applied){
+    const p = paras[i];
+    model.recalcDone(p);
+    proof.demoteApproved(i);   // 已通过的行改过就回待校对
+    // 只有译文真被替换才推进编辑版本号：只改译名时译文没动，
+    // 在途的机翻结果落地并不覆盖任何人工内容（与逐行译名输入的行为一致）。
+    if (commit.field === 'translation') mtTaskEdit.bump(i);
+    noteRowChanged(i);
   }
   if (snap) proof.recordDiff(snap, 'batch');
   model.scheduleAutosave();
-  rdr.refreshAllRows(); // 数据已写回 model,刷新已挂载行 DOM(否则前端不实时显示)
-  recomputeMatchesUI(true);
+  rdr.fullRender();
+  rdr.restoreEditorPosition(editor);
+  recomputeMatchesUI(true); // 文本变了 → 强制全量同步搜索影子，避免幽灵匹配
   updateProgress();
+  refreshProofUI();
+  updateUndoButtons();
   markDirty(); // 批量替换未写回原文件
-  toast('已替换 ' + grand + ' 处。');
+  void maybeSnapshotByChanges();
+  const hitTotal = commit.entries.reduce((n, e) => n + (e.count || 1), 0);
+  toast('已替换 ' + hitTotal + ' 处，共 ' + applied.length + ' 行（一次 Ctrl+Z 可整体撤销）。');
 }
 
 function jumpToLine(){
@@ -1005,8 +1106,13 @@ function migrateNameTranslations(paras){
 }
 
 async function loadSource(file, name){
-  const { content } = await fsx.readFileSource(file);
+  recordContext = null;
+  model.setRecordKey('');
+  const read = await fsx.readFileSource(file);
+  const { content } = read;
   const fname = name || (file.path ? file.path.split(/[\\/]/).pop() : '');
+  // 记下读入编码：保存时默认沿用，避免把 Shift-JIS 的脚本悄悄存成 UTF-8
+  const srcEncoding = read.encoding || '';
   // 版本无关的自动匹配：v1 与 v2 档案混在一批里也能匹配，仍要求唯一且无未识别
   const matched = chooseFormatAny(content, await availableFormats());
   if (matched.length > 1) throw new Error('多个离线格式档案匹配此文件，请在解析规则中选择档案并预览载入。');
@@ -1015,7 +1121,7 @@ async function loadSource(file, name){
     model.setRawText(content);
     model.setCanonicalDoc(false);
     model.setParas(parsed.paras);
-    model.setFileInfo({ name: fname, path: file.path || null, nl: parsed.nl, trailingBlank: false });
+    model.setFileInfo({ name: fname, path: file.path || null, nl: parsed.nl, trailingBlank: false, encoding: srcEncoding });
     await finishLoadSource(fname, parsed, file, '已使用离线格式档案：' + matched[0].rule.name);
     return;
   }
@@ -1026,9 +1132,10 @@ async function loadSource(file, name){
   model.setRawText(content); // 原始文本,供「格式识别」/ 规范化还原
   model.setCanonicalDoc(false); // 普通导入不是规范化文档
   model.setParas(parsed.paras);
-  model.setFileInfo({ name: fname, path: file.path || null, nl: parsed.nl, trailingBlank: parsed.trailingBlank });
+  model.setFileInfo({ name: fname, path: file.path || null, nl: parsed.nl, trailingBlank: parsed.trailingBlank, encoding: srcEncoding });
   await finishLoadSource(fname, parsed, file,
-    isMirror ? 'ℹ 已按镜像格式解析（// 行=原文行，普通行=译文行），保存时保持原格式。' : '');
+    isMirror ? 'ℹ 已按镜像格式解析（// 行=原文行，普通行=译文行），保存时保持原格式。' : ''
+      + (read.lossy ? '\n⚠ 这个文件的编码可能猜错了（有字节无法正常解码）。若显示为乱码，请在顶栏点编码换一种试试。' : ''));
 }
 
 // loadSource 的公共收尾: 进度恢复/术语表/校对/渲染(file 仅普通导入用于进度键)
@@ -1048,7 +1155,12 @@ async function finishLoadSource(fname, parsed, file, note){
   if (saved && saved.paras && saved.paras.length){
     const n = saved.paras.filter(q => (q.translation || '').trim()).length;
     const where = fsx.isTauri() && file && file.path ? ('\n（进度文件：' + fsx.progressPathDisplay(file.path) + '）') : '';
-    if (confirm('检测到「' + fname + '」的上次翻译进度（' + n + ' 行已翻译），是否恢复？' + where + '\n（文件里已带的译文会优先保留，只补充未翻译的行）')){
+    const restoreSaved = await showConfirm({
+      title: '恢复上次翻译进度？',
+      message: '检测到「' + fname + '」的上次翻译进度（' + n + ' 行已翻译）。' + where + '\n（文件里已带的译文会优先保留，只补充未翻译的行）',
+      confirmText: '恢复', cancelText: '不恢复', danger: false,
+    });
+    if (restoreSaved){
       model.setParas(mergeSavedState(parsed.paras, saved.paras));
       model.getParas().forEach(p => model.recalcDone(p));
       if (legacy) await fsx.removeSavedState(fname); // 迁移旧键,此后按新键存取
@@ -1073,19 +1185,26 @@ async function finishLoadSource(fname, parsed, file, note){
   const applied = gloss.applyNames(model.getParas(), glossData.names);
   if (applied) model.scheduleAutosave();
 
-  document.getElementById('fname').textContent = '当前文件：' + fname + '　编码：' + (file && file.encoding ? file.encoding : 'utf-8')
-    + (applied ? '　📖术语已自动应用 ' + applied + ' 个人名' : '');
+  const fnameEl = document.getElementById('fname');
+  fnameEl.textContent = fname;
+  // 术语自动应用等一次性信息并进基准文本，此后 updateEncodingIndicator 在它后面追加编码
+  if (applied) fnameEl.textContent += ' · 术语已自动应用 ' + applied + ' 个人名';
+  delete fnameEl.dataset.base;   // 换文档 → 以这里为新基准
   if (note) showToast(note);
   docDirty = false; // 全新导入,尚未有未写回的改动
   lastSnapshotAt = 0; // 换文档 → 留档节流重新计时
   mt.resetLlmContext(); // 换文档 → 清空机翻多轮上下文,避免上一篇对白串味
-  invalidateSpeakerSlots(); // 换文档 → 说话人配色重新按新文档的首现顺序分配
+  mtTaskEdit.clear();   // 换文档 → 行编辑版本号作废（行号已不对应）
+  await rememberFingerprint(); // 记下"打开时"的文件状态，供保存前比对
+  updateEncodingIndicator();
   setHeaderSaveState('已载入', 'saved');
   await proof.loadForFile(); // 加载该文件的校对数据(批注/状态/修改记录)
+  setReviewCategory('all');  // 换文档 → 问题类别回到默认，不串入上一篇
   rdr.fullRender();
   recomputeMatchesUI(true); // 新文件载入 → 强制全量同步影子
   rdr.focusIdx(0);
   updateUndoButtons();
+  updateSaveCommandLabel();
   updateProgress(); // 加载后刷新进度 + 字数统计
   touchStats();     // 记一笔当天进度（分量：打开即记录，便于算日速度）
 }
@@ -1137,6 +1256,96 @@ function anyUnsaved(){
   return tb.list().some(t => tabDirty(t.key));
 }
 
+/* ---------------- 跨设备记录包 ---------------- */
+
+function captureRecordPack(exportedAt){
+  return createRecordPack({
+    exportedAt,
+    document:{name:model.getFilename(),rawText:model.getRawText(),paras:model.getParas(),parseConf:getParseConf(),encoding:model.getSourceEncoding(),canonical:model.isCanonicalDoc()},
+    glossary:glossData,tm:tmData,baseline:mtBaseline,snippets:snippetData.merged,changes:proof.collect().changes,
+    normRules:recordContext?.normRules || normRulesCache,
+    statistics:uiStats.captureState().statsStore?.docs?.[model.getStateKey()],editor:{index:rdr.getActiveIdx()},
+  });
+}
+
+async function exportRecordPack(){
+  if (!model.getParas().length){ toastError('请先打开脚本'); return; }
+  if (mtRun){ toastError('请先停止机翻任务，等待结束后再导出记录包'); return; }
+  try {
+    await loadNormConfig();
+    const key = model.getFilePath() || model.getStateKey();
+    const name = model.getFilename();
+    const context = recordContext;
+    const pack = captureRecordPack();
+    const signature = JSON.stringify(pack);
+    const historyStamp = lastSnapshotAt;
+    const found = await history.listSnapshots(key,name);
+    pack.history = await Promise.all(found.slice(0,history.HISTORY_MAX).map(s => history.readSnapshot(key,name,s.id)));
+    if (pack.history.some(s => !s)) throw new Error('有历史快照无法读取，未导出不完整的记录包');
+    const raw = JSON.stringify(pack,null,2);
+    readRecordPack(raw); // 导出也做完整校验，确保另一设备能够重建。
+    const result = await fsx.downloadTextWithDialog(raw,name.replace(/\.[^.]+$/, '') + '.galweave.json');
+    if (!result.cancelled){
+      if (context && context === recordContext && historyStamp === lastSnapshotAt && JSON.stringify(captureRecordPack(pack.exportedAt)) === signature){
+        clearDirty();
+        setHeaderSaveState('记录包已导出', 'saved');
+      }
+      showToast('已导出当前脚本及记录。另一设备使用「导入记录包」继续；未上传到任何服务。');
+    }
+  } catch (e){ toastError('记录包导出失败：' + e.message); }
+}
+
+async function importRecordPack(file){
+  if (!file) return;
+  if (mtRun){ toastError('请先停止机翻任务，等待结束后再导入记录包'); return; }
+  try {
+    if (file.size > RECORD_PACK_MAX_BYTES) throw new Error('记录包不能超过 64 MiB');
+    const {pack,parsed} = readRecordPack(await file.text());
+    const notes = parsed.paras.reduce((n,p) => n + p.pr.annotations.length,0);
+    const yes = await showConfirm({title:'导入记录包：' + pack.document.name,
+      message:parsed.paras.length + ' 行 · ' + notes + ' 条批注 · ' + pack.tm.entries.length + ' 条记忆 · ' + pack.history.length + ' 份历史\n'
+        + '将打开为独立标签，保留当前工作。不会覆盖原脚本、全局术语或设备设置；两份记录不会自动合并。',confirmText:'作为独立项目打开',cancelText:'取消'});
+    if (!yes) return;
+    if (mtRun) throw new Error('机翻任务正在运行，请停止后重试');
+    let old = tb.activeKey();
+    if (model.getParas().length){
+      if (!old){ old = tb.open('session:' + crypto.randomUUID(),model.getFilename()); tb.setActive(old); }
+      await flushDocToTab(old);
+    }
+    const key = 'record:' + crypto.randomUUID();
+    recordContext = {key,normRules:pack.normRules};
+    setParseConf(pack.document.parseConf);
+    model.setParas(parsed.paras);
+    model.setRawText(pack.document.rawText);
+    model.setCanonicalDoc(pack.document.canonical);
+    model.setFileInfo({name:pack.document.name,path:null,nl:parsed.nl,trailingBlank:parsed.trailingBlank,encoding:pack.document.encoding});
+    model.setRecordKey(key);
+    fsx.setBrowserFileHandle(null);
+    glossData = pack.glossary;
+    gloss.activateGlossary(glossData,null,key);
+    snippetData = {global:{},project:pack.snippets,merged:pack.snippets};
+    tmData = pack.tm; tmProjectPath = key;
+    mtBaseline = pack.baseline; mtProjectPath = key;
+    uiStats.restoreState({statsProjectPath:key,statsStore:{version:1,docs:{[key]:pack.statistics}}});
+    proof.restoreState({changes:pack.changes,proofPath:null,proofKey:'proof:' + key,activeForFile:true});
+    proof.setFilter('all');
+    document.querySelectorAll('.proof-filter').forEach(b => b.classList.toggle('active', b.dataset.pf === 'all'));
+    tb.setActive(tb.open(key,pack.document.name + ' · 记录包'));
+    docDirty = true;
+    lastSnapshotAt = 0;
+    resetChangeCounter();
+    afterDocActivated({index:Math.max(0,Math.min(parsed.paras.length-1,pack.editor.index)),selections:[]});
+    await model.flushAutosave();
+    await proof.flushSave();
+    let savedHistory = 0;
+    for (const snapshot of pack.history){
+      if ((await history.writeSnapshot(key,pack.document.name,snapshot)).saved) savedHistory++;
+    }
+    if (savedHistory !== pack.history.length) toastError('文档已载入，但部分历史快照未能存入本机，请保留原记录包。');
+    else showToast('记录包已作为独立项目载入。跨设备前请再次导出记录包；导出译文可单独保存脚本。');
+  } catch (e){ toastError('记录包导入失败：' + e.message); }
+}
+
 /* ---------------- 多文档标签页 ---------------- */
 
 // 统一"打开文件"入口: 桌面(带路径)→ 进入标签体系;浏览器(无路径/session)→ 直接加载。
@@ -1162,13 +1371,24 @@ async function openDoc(file, name){
 
 // 把当前活动文档冻结进标签快照(切换/关闭前调用)
 async function flushDocToTab(key){
+  const editor = rdr.captureEditorPosition();
+  if (glossSaveTimer){ clearTimeout(glossSaveTimer); glossSaveTimer = null; await gloss.saveGlossaryForProject(glossData); }
+  if (snipPersistTimer){ clearTimeout(snipPersistTimer); snipPersistTimer = null; await snips.saveSnippetsForProject(snippetData.merged); }
   try { await model.flushAutosave(); } catch (e) { /* 忽略 */ }
-  try { proof.flushSave(); } catch (e) { /* 忽略 */ }
+  try { await proof.flushSave(); } catch (e) { /* 忽略 */ }
+  await uiStats.flushStats();
   tb.capture(key, {
     model: model.snapshotState(),
     proof: proof.snapshotState(),
     glossData,
     dirty: docDirty, // 该文档是否有未写回原文件的改动
+    editor,
+    reviewKind: document.getElementById('reviewQueueKind').value,
+    reviewCategory: document.getElementById('reviewQueueCategory').value || 'all',
+    proofFilter: proof.getFilter(),
+    recordContext, parseConf:getParseConf(), glossProjectDir:gloss.getProjectDir(),
+    browserHandle:fsx.getBrowserFileHandle(),
+    tmData, tmProjectPath, mtBaseline, mtProjectPath, snippetData, statistics:uiStats.captureState(),
   });
 }
 
@@ -1184,26 +1404,46 @@ async function switchDoc(key){
   }
   model.restoreState(snap.model);
   glossData = snap.glossData;
+  recordContext = snap.recordContext || null;
+  fsx.setBrowserFileHandle(snap.browserHandle || null);
+  if (snap.parseConf) setParseConf(snap.parseConf);
+  gloss.activateGlossary(glossData, snap.glossProjectDir, recordContext?.key || '');
+  tmData = snap.tmData || tm.emptyTm();
+  tmProjectPath = snap.tmProjectPath || null;
+  mtBaseline = snap.mtBaseline || mtbase.emptyBaseline();
+  mtProjectPath = snap.mtProjectPath || null;
+  snippetData = snap.snippetData || {global:{},project:{},merged:{}};
+  uiStats.restoreState(snap.statistics);
   proof.restoreState(snap.proof);
+  proof.setFilter(snap.proofFilter || 'all');
+  document.querySelectorAll('.proof-filter').forEach(b => b.classList.toggle('active', b.dataset.pf === proof.getFilter()));
   docDirty = !!snap.dirty; // 恢复该标签的未保存标记
   tb.setActive(key);
-  afterDocActivated();
+  afterDocActivated(snap.editor, snap.reviewKind, snap.reviewCategory);
 }
 
 // 标签切换/恢复后的公共重渲染尾(与 loadSource 尾部一致)
-function afterDocActivated(){
+function afterDocActivated(editor, reviewKind = 'pending', reviewCategory = 'all'){
   mt.resetLlmContext(); // 切标签 → 同上,机翻上下文不跨文档
-  invalidateSpeakerSlots(); // 切标签 → 说话人配色同理由新文档决定
+  mtTaskEdit.clear();   // 切标签 → 行编辑版本号作废（行号已不对应）
   renderGlossTables();
   updateGlossProjectLabel();
   initSnippets();
-  document.getElementById('fname').textContent = '当前文件：' + (model.getFilename() || '');
+  const fnameEl = document.getElementById('fname');
+  fnameEl.textContent = model.getFilename() || '未打开项目';
+  delete fnameEl.dataset.base;   // 换文档 → 丢掉上一份的基准文本
+  // 恢复该文档的编码显示（含"读入 → 写出"与风险提示）
+  updateEncodingIndicator();
   if (docDirty) setHeaderSaveState('未保存', 'dirty');
   else setHeaderSaveState(model.getFilename() ? '已载入' : '准备就绪', 'saved');
   rdr.fullRender();
   recomputeMatchesUI(true);
-  rdr.focusIdx(0);
+  document.getElementById('reviewQueueKind').value = reviewKind;
+  setReviewCategory(reviewCategory);
+  rdr.restoreEditorPosition(editor);
+  refreshProofUI();
   updateUndoButtons();
+  updateSaveCommandLabel();
   updateProgress();
   renderTabs();
 }
@@ -1250,16 +1490,25 @@ async function saveAllDocs(){
 
 // 没有标签时清空编辑区
 function clearEditorForEmpty(){
+  recordContext = null;
+  model.setRecordKey('');
   model.setParas([]);
-  model.setFileInfo({ name: '', path: null, nl: '\n', trailingBlank: false });
+  model.setFileInfo({ name: '', path: null, nl: '\n', trailingBlank: false, encoding: '' });
   model.setRawText('');
   glossData = { names: {}, terms: {} };
   docDirty = false;
-  document.getElementById('fname').textContent = '当前文件：';
+  const emptyEl = document.getElementById('fname');
+  emptyEl.textContent = '未打开项目';
+  emptyEl.title = '';
+  emptyEl.removeAttribute('aria-label');
+  delete emptyEl.dataset.base;
+  const note = document.getElementById('encodingWarn');
+  if (note){ note.hidden = true; note.textContent = ''; }
   setHeaderSaveState('准备就绪', 'ready');
   rdr.fullRender();
   recomputeMatchesUI(true);
   updateUndoButtons();
+  updateSaveCommandLabel();
   updateProgress();
   renderTabs();
 }
@@ -1375,7 +1624,286 @@ function saveSuggestedName(format = 'original'){
   return exporter.suggestExportName(base, format);
 }
 
+/* ---------------- 保存安全：文件指纹 / 冲突处理 / 写出编码 ----------------
+ *
+ * 三条保护互相补充，缺一条都会留下"成果静默丢失"的口子：
+ *   1. **原子写出**（Rust 侧临时文件 + 替换）：写一半失败不会留下截断的脚本；
+ *   2. **外部修改检测**：别处改过这个文件时先问，不默认覆盖别人的改动；
+ *   3. **编码承袭**：读进来是 Shift-JIS 就按 Shift-JIS 存回去，
+ *      不再一律写成 UTF-8（那会让引擎读出来全是乱码）。
+ */
+
+// 当前文档的记忆指纹 → 打开/上次保存时的文件状态。换文档要重置。
+const docFingerprints = new Map();
+
+function fingerprintKey(){ return model.getStateKey(); }
+
+/** 记下当前文件的指纹（打开成功后、每次保存成功后调用） */
+async function rememberFingerprint(){
+  const p = model.getFilePath();
+  const key = fingerprintKey();
+  if (!key) return;
+  if (!fsx.isTauri() || !p){
+    // 浏览器版没有 file_stat；记一个"无指纹"标记，让冲突检测如实报"无法判断"
+    docFingerprints.set(key, null);
+    return;
+  }
+  docFingerprints.set(key, await fsx.fileStat(p));
+}
+
+/** 取该文档打开时记下的指纹（没记过 → undefined） */
+function baselineFingerprint(){ return docFingerprints.get(fingerprintKey()); }
+
+/** 当前文档的写出编码：优先用户为本文件显式选的，否则沿用读入时的编码 */
+const encodingOverrides = new Map();
+
+function currentWriteEncoding(){
+  const key = fingerprintKey();
+  const override = encodingOverrides.get(key);
+  if (override) return override;
+  const fromFile = model.getSourceEncoding();
+  return enc.suggestWriteEncoding(fromFile);
+}
+
+/** 用户手动指定本文件的写出编码（设置面板/保存失败提示里调） */
+function setWriteEncoding(id){
+  const norm = enc.normalizeEncoding(id);
+  if (!norm) return false;
+  encodingOverrides.set(fingerprintKey(), norm);
+  updateEncodingIndicator();
+  return true;
+}
+
+/**
+ * 顶栏的编码显示：读入编码 → 写出编码，两者不同时明确标出来。
+ *
+ * `dataset.base` 存"不含编码部分"的基准文本：本函数会被反复调用（改设置、
+ * 切标签、编码变更），每次都从基准重算，否则编码片段会层层叠加。
+ */
+function updateEncodingIndicator(){
+  const el = document.getElementById('fname');
+  if (!el) return;
+  if (!el.dataset.base) el.dataset.base = el.textContent;
+  const base = el.dataset.base;
+  if (!model.getParas().length){
+    el.textContent = base;
+    el.title = base;
+    el.setAttribute('aria-label', base);
+    return;
+  }
+  const read = model.getSourceEncoding();
+  const write = currentWriteEncoding();
+  const readLabel = read ? enc.encodingLabel(read) : '未知';
+  const writeLabel = enc.encodingLabel(write);
+  const parts = [readLabel];
+  // 只在**两边都明确**且真的不同才标出"→ 写出：…"。
+  // 读入编码未知（如记录包没有原始文件可检测）时不算变化 ——
+  // 否则会显示成「未知 → 写出：UTF-8」，看着像编码被换掉了，其实只是无从得知。
+  if (read && write && enc.normalizeEncoding(write) !== enc.normalizeEncoding(read)){
+    parts.push('→ ' + writeLabel);
+  }
+  el.textContent = base + ' · ' + parts.join(' ');
+  const warn = enc.encodingWarning(write, enc.looksChinese(model.getParas().map(p => p.translation || '').join('')));
+  // 完整编码与风险说明保留在可访问名称和悬浮提示里，省略文字不会丢失 BOM 或写出差异。
+  const detail = base + '；读入编码：' + readLabel + '；写出编码：' + writeLabel + (warn ? '；' + warn : '');
+  el.title = detail;
+  el.setAttribute('aria-label', detail);
+  const note = document.getElementById('encodingWarn');
+  if (note){
+    note.textContent = warn;
+    note.hidden = !warn;
+  }
+}
+
+/**
+ * 手动选择本文件的**读入/写出**编码。
+ * 自动检测是猜的，猜错时（乱码）用户必须能当场纠正 —— 否则这个文件就没法用了。
+ */
+async function pickEncoding(){
+  if (!model.getParas().length){ toastError('请先导入文本文件'); return; }
+  const read = model.getSourceEncoding();
+  const write = currentWriteEncoding();
+  const mk = (list, cur) => list
+    .map(o => ({ id: o.id, label: o.label + (o.id === enc.normalizeEncoding(cur) ? '（当前）' : ''),
+                 hint: o.disabled ? o.disabledReason : (o.chineseSafe ? '' : '无法表示简体中文') }))
+    .filter(o => !o.hint || !/禁用/.test(o.hint));
+  const isDesktop = fsx.isTauri();
+  const choice = await showChoice({
+    title: '文本编码',
+    message: '读入编码：' + (read ? enc.encodingLabel(read) : '未知（未检测到）')
+      + '\n写出编码：' + enc.encodingLabel(write)
+      + '\n\n若脚本显示为乱码，说明读入编码猜错了 —— 选正确的那个重新解码。'
+      + (isDesktop ? '' : '\n\n浏览器版只能写出 UTF-8。'),
+    choices: [
+      ...mk(enc.writeEncodingOptions(isDesktop), write).map(o => ({
+        id: 'write:' + o.id,
+        label: '写出用 ' + o.label.replace('（当前）', ''),
+        hint: o.hint || '保存时按这个编码写回',
+      })),
+      { id: 'reload-utf8', label: '按 UTF-8 重新解码这个文件', hint: '当前显示乱码时试这个' },
+      { id: 'reload-sjis', label: '按 Shift-JIS 重新解码这个文件', hint: '日文脚本显示成乱码时常见解法' },
+    ],
+    cancelText: '取消',
+  });
+  if (!choice) return;
+  if (choice.startsWith('write:')){
+    const id = choice.slice('write:'.length);
+    if (setWriteEncoding(id)) toast('✅ 写出编码已改为：' + enc.encodingLabel(id));
+    return;
+  }
+  if (choice.startsWith('reload-')){
+    const target = choice.slice('reload-'.length);
+    // 重新按指定编码读一次；若解出来还有坏字节就如实告诉用户，别假装成功
+    await reloadWithEncoding(target);
+  }
+}
+
+/** 用指定编码重新读取当前文件（不改动译文，只重新解码原文结构） */
+async function reloadWithEncoding(encodingId){
+  const path = model.getFilePath();
+  if (!fsx.isTauri() || !path){ toastError('浏览器版无法重新解码，请重新导入文件。'); return; }
+  const name = model.getFilename();
+  if (docDirty && !(await showConfirm({
+    title: '重新解码会丢弃当前未保存的改动',
+    message: '当前文档有未写回原文件的改动（' + name + '）。\n'
+      + '重新解码会重新解析原文结构，未保存的译文会丢失。\n\n建议先「保存原文件」，或先取消并把译文导出。',
+    confirmText: '放弃改动并重新解码',
+    cancelText: '取消',
+    danger: true,
+  }))) return;
+  try {
+    const read = await fsx.readFileSource({ path, encoding: encodingId });
+    if (read.lossy){
+      const go = await showConfirm({
+        title: '这个编码解出来仍有无法识别的字节',
+        message: enc.encodingLabel(encodingId) + ' 解码时遇到无效字节，正文里会出现替换符（�）。\n'
+          + '这通常说明文件不是这个编码。仍要载入吗？',
+        confirmText: '仍然载入', cancelText: '换一种试试', danger: true,
+      });
+      if (!go){ await pickEncoding(); return; }
+    }
+    await loadSource({ path, encoding: encodingId }, name);
+    toast('✅ 已按 ' + enc.encodingLabel(encodingId) + ' 重新解码');
+  } catch (e){
+    toastError('重新解码失败：' + (e && e.message ? e.message : e));
+  }
+}
+
+/**
+ * 保存前的冲突检查。
+ * @returns {Promise<boolean>} true = 可以继续写；false = 用户选择取消
+ */
+async function resolveSaveConflict(){
+  const p = model.getFilePath();
+  if (!fsx.isTauri() || !p) return true;   // 浏览器版无路径/无指纹 → 无从比较
+  const base = baselineFingerprint();
+  const current = await fsx.fileStat(p);
+  const verdict = fileguard.compareStat(base, current);
+  if (!verdict.changed) return true;
+  const choice = await showChoice({
+    title: '原文件在这次编辑期间被改过',
+    message: fileguard.conflictMessage(model.getFilename(), verdict.verdict, verdict.reason),
+    choices: fileguard.conflictChoices(),
+  });
+  if (choice === fileguard.CONFLICT_ACTIONS.OVERWRITE) return true;
+  if (choice === fileguard.CONFLICT_ACTIONS.CANCEL) return false;
+  // 另存为：把这次保存改道到新文件，原文件保持对方改动不动
+  await saveAsCopy();
+  return false;
+}
+
+/** 另存为一份副本（冲突时用；用户取消返回 false） */
+async function saveAsCopy(){
+  let content;
+  try { content = buildExport(model.getParas(), model.getNl(), model.getTrailingBlank()); }
+  catch (e){ toastError('无法安全保存：' + e.message); return false; }
+  if (!fsx.isTauri()){
+    const r = await fsx.writeBrowserFile(content, saveSuggestedName());
+    if (r && r.saved !== false) showToast('✅ 已另存为副本');
+    return true;
+  }
+  const res = await fsx.saveFileDialog(saveSuggestedName());
+  if (!res) return false;
+  try {
+    await fsx.writeFileSource(res.path, content, res.name, { encoding: currentWriteEncoding() });
+    showToast('✅ 已另存为：' + res.path + '\n原文件未被改动。');
+    return true;
+  } catch (e){
+    showToast('❌ 另存为失败：' + (e && e.message ? e.message : e), true);
+    return false;
+  }
+}
+
+/**
+ * 写回一个已确定路径（桌面版）。统一处理编码拒绝、备份失败、非原子回退的上报。
+ * @returns {Promise<boolean>} 是否写入成功
+ */
+async function writeBackTo(path, displayName){
+  let content;
+  try { content = buildExport(model.getParas(), model.getNl(), model.getTrailingBlank()); }
+  catch (e){ toastError('无法安全保存：' + e.message); return false; }
+  const encoding = currentWriteEncoding();
+  try {
+    const res = await fsx.writeFileSource(path, content, displayName || model.getFilename(), { encoding });
+    await rememberFingerprint();
+    const d = fileguard.describeWriteResult(res, path);
+    if (d.warning) showToast(d.text, true);
+    else showToast(d.text);
+    return true;
+  } catch (e){
+    const msg = e && e.message ? e.message : String(e);
+    return await handleWriteFailure(msg, path, content, encoding);
+  }
+}
+
+/**
+ * 写入失败时的补救：最常见的原因是**目标编码表示不了中文**（SJIS/EUC-JP）。
+ * 这里给用户一个当场可用的出路（改用 UTF-8 再存），而不是只丢一句报错。
+ * @returns {Promise<boolean>} 补救后是否成功
+ */
+async function handleWriteFailure(msg, path, content, encoding){
+  const isEncoding = /无法表示|静默替换/.test(msg);
+  if (!isEncoding){
+    setHeaderSaveState('保存失败', 'error');
+    showToast('❌ 保存失败：' + msg, true);
+    return false;
+  }
+  const choice = await showChoice({
+    title: '目标编码存不了这些字符',
+    message: msg + '\n\n当前写出编码：' + enc.encodingLabel(encoding)
+      + '\n最常见的解法是改用 UTF-8 保存（原文件的编码可能本来就是错的）。',
+    choices: [
+      { id: 'utf8', label: '改用 UTF-8 保存', hint: '中文字符一定能存下；引擎能否识别取决于它支持哪种编码' },
+      { id: 'force', label: '仍然按原编码强制写入', hint: '无法表示的字符会被替换成实体字符，可能在引擎里显示异常' },
+      { id: 'cancel', label: '取消，我自己处理', hint: '不改动原文件' },
+    ],
+    cancelText: '取消',
+  });
+  if (choice === 'utf8'){
+    setWriteEncoding('utf-8');
+    return await writeBackTo(path);
+  }
+  if (choice === 'force'){
+    try {
+      const res = await fsx.writeFileSource(path, content, model.getFilename(), { encoding, allowLossy: true });
+      await rememberFingerprint();
+      const d = fileguard.describeWriteResult(res, path);
+      showToast('⚠️ 已按 ' + enc.encodingLabel(encoding) + ' 强制写入，无法表示的字符已被替换。\n'
+        + '建议在引擎里确认这些行显示正常。' + (d.warning ? '\n' + d.text : ''), true);
+      return true;
+    } catch (e2){
+      setHeaderSaveState('保存失败', 'error');
+      showToast('❌ 保存失败：' + (e2 && e2.message ? e2.message : e2), true);
+      return false;
+    }
+  }
+  setHeaderSaveState('准备就绪', 'ready');
+  showToast('已取消保存，原文件未改动。');
+  return false;
+}
+
 async function saveDirect(){
+  if (recordContext) return exportRecordPack();
   if (!model.getParas().length){ toastError('请先导入文本文件'); return; }
   await proof.flushSave(); // 先落盘校对数据(与源文件保持一致)
   await model.flushAutosave();
@@ -1383,29 +1911,45 @@ async function saveDirect(){
   await snapshotHistory('save'); // 写回原文件前留档
   touchStats();            // 记一笔当天进度
   await flushStats();
-  let content;
-  try { content = buildExport(model.getParas(), model.getNl(), model.getTrailingBlank()); }
-  catch (e){ toastError('无法安全保存：' + e.message); return; }
   setHeaderSaveState('保存中…', 'saving');
   try {
     if (fsx.isTauri() && model.getFilePath()){
-      await fsx.writeFileSource(model.getFilePath(), content, model.getFilename());
-      clearDirty();
-      setHeaderSaveState('已保存', 'saved');
-      showToast('✅ 已保存到原文件');
+      // 外部修改检测：别处改过就先问，绝不默认覆盖对方的改动
+      if (!(await resolveSaveConflict())){ setHeaderSaveState('准备就绪', 'ready'); return; }
+      if (await writeBackTo(model.getFilePath(), model.getFilename())){
+        clearDirty();
+        setHeaderSaveState('已保存', 'saved');
+      }
       return;
     }
     if (fsx.isTauri()){
+      let content;
+      try { content = buildExport(model.getParas(), model.getNl(), model.getTrailingBlank()); }
+      catch (e){ toastError('无法安全保存：' + e.message); return; }
       const res = await fsx.saveFileDialog(saveSuggestedName());
       if (!res){ setHeaderSaveState('准备就绪', 'ready'); return; } // 用户取消,静默
-      await fsx.writeFileSource(res.path, content, res.name);
-      model.setFileInfo({ ...model.getFilePath() ? { path: res.path } : {}, name: res.name });
-      clearDirty();
-      setHeaderSaveState('已保存', 'saved');
-      showToast('✅ 已保存到：' + res.path);
+      try {
+        const wres = await fsx.writeFileSource(res.path, content, res.name, { encoding: currentWriteEncoding() });
+        model.setFileInfo({ ...model.getFilePath() ? { path: res.path } : {}, name: res.name });
+        await rememberFingerprint();
+        clearDirty();
+        setHeaderSaveState('已保存', 'saved');
+        const d = fileguard.describeWriteResult(wres, res.path);
+        showToast(d.text, d.warning);
+      } catch (e){
+        // 编码拒绝等失败同样走补救流程（含"改用 UTF-8"选项）
+        const ok = await handleWriteFailure(e && e.message ? e.message : String(e), res.path, content, currentWriteEncoding());
+        if (ok){
+          model.setFileInfo({ ...model.getFilePath() ? { path: res.path } : {}, name: res.name });
+          await rememberFingerprint();
+          clearDirty();
+          setHeaderSaveState('已保存', 'saved');
+        }
+      }
       return;
     }
     // 浏览器: 写回原文件句柄 / 另存为 / 下载
+    const content = buildExport(model.getParas(), model.getNl(), model.getTrailingBlank());
     const r = await fsx.writeBrowserFile(content, saveSuggestedName());
     if (r.saved){
       clearDirty();
@@ -1539,11 +2083,11 @@ function updateGlossProjectLabel(){
   const el = document.getElementById('glossProjectLabel');
   const commandStatus = document.getElementById('glossaryCommandStatus');
   if (dir){
-    el.textContent = '📖 术语表：' + dir + '/glossary.json';
+    el.textContent = '术语表：' + dir + '/glossary.json';
     el.title = '术语表保存位置：' + dir + '/glossary.json';
     if (commandStatus) commandStatus.textContent = '项目术语库 · glossary.json';
   } else {
-    el.textContent = '📖 全局术语表（未打开文件）';
+    el.textContent = '全局术语表（未打开文件）';
     el.title = '未打开文件,术语表保存在全局位置';
     if (commandStatus) commandStatus.textContent = '全局术语库 · 未打开项目';
   }
@@ -1711,6 +2255,7 @@ function glossRow(src, dst, onUpdate){
 
 let glossSaveTimer = null;
 function persistGloss(){
+  if (recordContext) markDirty();
   if (glossSaveTimer) clearTimeout(glossSaveTimer);
   glossSaveTimer = setTimeout(async () => {
     await gloss.saveGlossaryForProject(glossData);
@@ -1745,7 +2290,7 @@ async function importGlossMarkdownText(text, label){
   const nn = Object.keys(r.names).length;
   const tn = Object.keys(r.terms).length;
   if (!nn && !tn && !r.pending.length){
-    alert('这篇笔记里没有找到可导入的术语。\n\n支持三种写法：\n'
+    toastError('这篇笔记里没有找到可导入的术语。\n\n支持三种写法：\n'
       + '· frontmatter 里的 terms / names 两级映射\n'
       + '· 表格两列「原文 | 译文」\n'
       + '· 列表配对「先輩 :: 前辈」\n'
@@ -1756,8 +2301,12 @@ async function importGlossMarkdownText(text, label){
     ? '\n\n另有 ' + r.pending.length + ' 个 [[双链]] 条目没有译名（' + r.pending.slice(0, 5).map(x => x.src).join('、')
       + (r.pending.length > 5 ? '…' : '') + '），它们不会进术语表 —— 补上译名后重新导入即可。'
     : '';
-  if (!confirm((label ? '「' + label + '」' : '笔记') + ' 解析结果：人名 ' + nn + ' 条 / 词条 ' + tn + ' 条。'
-    + pendingNote + '\n\n合并进当前术语表？（同名条目以现有为准，不会被覆盖）')) return false;
+  if (!await showConfirm({
+    title: '合并进当前术语表？',
+    message: (label ? '「' + label + '」' : '笔记') + ' 解析结果：人名 ' + nn + ' 条 / 词条 ' + tn + ' 条。'
+      + pendingNote + '\n\n同名条目以现有为准，不会被覆盖。',
+    confirmText: '合并', danger: false,
+  })) return false;
 
   // 与 CSV 导入的覆盖语义刻意不同：笔记多为参考资料，静默覆盖现有译名更危险。
   // 已有的键一律保留，新键才写入（冲突在下面汇报条数）。
@@ -1784,10 +2333,14 @@ async function importGlossCsvText(text){
   const nn = Object.keys(g.names).length;
   const tn = Object.keys(g.terms).length;
   if (!nn && !tn){
-    alert('CSV 中没有可导入的条目。\n支持: 2 列 = 原文,译文(进词条);3 列 = 类型,原文,译文(名词/人名进人名表,其余进词条);首行表头自动跳过。');
+    toastError('CSV 中没有可导入的条目。\n支持: 2 列 = 原文,译文(进词条);3 列 = 类型,原文,译文(名词/人名进人名表,其余进词条);首行表头自动跳过。');
     return false;
   }
-  if (!confirm('CSV 解析结果: 人名 ' + nn + ' 条 / 词条 ' + tn + ' 条。\n合并进当前术语表?(同名条目覆盖)')) return false;
+  if (!await showConfirm({
+    title: '合并进当前术语表？',
+    message: 'CSV 解析结果：人名 ' + nn + ' 条 / 词条 ' + tn + ' 条。\n同名条目会被覆盖。',
+    confirmText: '合并', danger: false,
+  })) return false;
   Object.assign(glossData.names, g.names);
   Object.assign(glossData.terms, g.terms);
   await gloss.saveGlossaryForProject(glossData);
@@ -1873,7 +2426,11 @@ async function glossApply(){
   const names = Object.keys(glossData.names).length;
   const terms = Object.keys(glossData.terms).length;
   if (!names && !terms){ toastError('术语表为空。'); return; }
-  if (!confirm('把术语表应用到当前文件？\n（人名自动填充 ' + names + ' 项 · 词条批量替换译文 ' + terms + ' 项）\n替换前会确认,且不影响原文。')) return;
+  if (!await showConfirm({
+    title: '把术语表应用到当前文件？',
+    message: '人名自动填充 ' + names + ' 项 · 词条批量替换译文 ' + terms + ' 项。\n可以撤销，且不影响原文。',
+    confirmText: '应用', danger: false,
+  })) return;
 
   pushUndoAll();
   const snap = proof.isEnabled() ? proof.snapshot() : null;
@@ -1904,32 +2461,46 @@ async function glossApply(){
 
 async function normalizeApply(){
   if (!model.getParas().length){ toastError('请先导入文本文件'); return; }
-  const ids = textnorm.normalizeRuleIds(await loadNormRules());
-  const hits = textnorm.collectNormalizable(model.getParas(), ids);
+  const paras = model.getParas();
+  let config, hits;
+  try {
+    config = await loadNormConfig();
+    if (paras !== model.getParas()) return;
+    hits = textnorm.collectNormalizable(paras, config.ids, config.customRules);
+  } catch(e){ toastError('无法规范化：' + e.message); return; }
   if (!hits.length){ toast('译文标点已经是规范形式，无需改动。'); return; }
 
-  const preview = hits.slice(0, 8)
-    .map(h => '  第 ' + (h.i + 1) + ' 行：「' + h.from.slice(0, 24) + '」→「' + h.to.slice(0, 24) + '」')
+  const preview = hits
+    .map(h => '第 ' + (h.i + 1) + ' 行\n修改前：' + h.from + '\n修改后：' + h.to)
     .join('\n');
-  const more = hits.length > 8 ? '\n  …另有 ' + (hits.length - 8) + ' 行' : '';
   const ok = await showConfirm({
     title: '规范化译文标点',
-    message: '将修改 ' + hits.length + ' 行译文（只动译文，不影响原文）：\n\n' + preview + more
-      + '\n\n规范化内容：连续半角点 → …… ／ 破折号 → —— ／ 波浪号 → ～',
+    message: '将修改 ' + hits.length + ' 行译文（只动译文，不影响原文）：\n\n' + preview,
     confirmText: '应用',
   });
   if (!ok) return;
+  if (paras !== model.getParas() || hits.some(h => paras[h.i]?.translation !== h.from)){
+    toastError('预览期间文档已变化，请重新预览后应用'); return;
+  }
 
-  pushUndoAll();
+  model.pushUndo(hits.map(h => h.i));
+  const editor = rdr.captureEditorPosition();
   const snap = proof.isEnabled() ? proof.snapshot() : null;
-  const paras = model.getParas();
   for (const h of hits){
     const p = paras[h.i];
-    if (p) p.translation = p.brackets ? ('「' + h.to + '」') : h.to;
+    if (p){
+      p.translation = h.to; // collectNormalizable 返回完整译文，不能再包一层「」。
+      p.src = 'human';
+      model.recalcDone(p);
+      proof.demoteApproved(h.i);
+      mtTaskEdit.bump(h.i);
+      noteRowChanged(h.i);
+    }
   }
   if (snap) proof.recordDiff(snap, 'batch');
   model.scheduleAutosave();
   rdr.fullRender();
+  rdr.restoreEditorPosition(editor);
   recomputeMatchesUI(true);
   updateProgress();
   refreshProofUI();
@@ -1937,10 +2508,30 @@ async function normalizeApply(){
   toast('已规范化 ' + hits.length + ' 行译文的标点');
 }
 
-/** 当前启用的规范化规则（设置项 settings.ui.normRules；未配置 = 全部启用） */
-async function loadNormRules(){
+let normRulesCache = null;
+async function loadNormConfig(){
+  if (recordContext) return recordContext.normRules;
   const s = await loadSettings();
-  return (s.ui && s.ui.normRules) || null;
+  normRulesCache = {ids:textnorm.normalizeRuleIds(s.ui?.normRules),customRules:textnorm.validateCustomRules(s.ui?.customNormRules)};
+  return normRulesCache;
+}
+
+async function editNormRules(){
+  try {
+    const context = recordContext;
+    const result = await showPunctuationRules(await loadNormConfig());
+    if (!result) return;
+    if (context !== recordContext){ toastError('文档已切换，请重新打开标点规则'); return; }
+    if (context){ context.normRules = result; markDirty(); }
+    else {
+      const settings = await loadSettings();
+      settings.ui = {...settings.ui,normRules:result.ids,customNormRules:result.customRules};
+      const saved = await saveSettings(settings);
+      normRulesCache = result;
+      if (!saved.ok){ toastError('规则本次可用，但未能保存到本机：' + (saved.error || '写入失败')); return; }
+    }
+    showToast('标点规则已保存。点击「规范化标点」预览后应用。');
+  } catch(e){ toastError('标点规则保存失败：' + e.message); }
 }
 
 /* ================= 词典 / 快捷片段 ================= */
@@ -2121,7 +2712,7 @@ async function addJsonDictSource(){
 
 async function installJsonDictSource(raw, path, fallbackName){
   const parsed = dictx.parseDictJson(raw);
-  if (!parsed){ alert('词典文件格式不合法:需要 galtrans-dict-v1 JSON(含 entries 字段),详见 docs/dictionary-plugins.md。'); return; }
+  if (!parsed){ toastError('词典文件格式不合法:需要 galtrans-dict-v1 JSON(含 entries 字段),详见 docs/dictionary-plugins.md。'); return; }
   const count = Object.keys(parsed.entries).length;
   if (!count){ toastError('词典文件没有有效词条。'); return; }
   const src = { id: dictSrcId(), type: 'json', name: parsed.name || fallbackName || 'JSON 词典', enabled: true };
@@ -2321,6 +2912,7 @@ async function testDictHttp(){
 /* ---- 查询 ---- */
 
 async function doDictLookup(word, isFuzzy, source){
+  return withBusyState(document.getElementById('btnDictLookup'), async () => {
   word = String(word || '').trim();
   if (!word) return;
   const box = document.getElementById('dictResults');
@@ -2346,9 +2938,12 @@ async function doDictLookup(word, isFuzzy, source){
   const fallback = await lookupByDeinflection(word, fuzzy);
   if (!fallback) { renderDictResults(res, fuzzy); return; }
 
-  // 把候选结果并到主结果之前：用户要的是"这个词的意思"，不是前缀补全列表
-  renderDictResults({ ...res, results: [...fallback.results, ...res.results] }, fuzzy);
+  // 把候选结果并到主结果之前：用户要的是"这个词的意思"，不是前缀补全列表。
+  // ⚠️ 合并去重：主查询(MDX)未命中时返回的前缀补全里可能已含原形词头，
+  //    直接拼接会让同一个词条显示两次（见 tests/dict-fuzzy-dedup.test.mjs）。
+  renderDictResults({ ...res, results: dictx.dedupeResults([...fallback.results, ...res.results]) }, fuzzy);
   prependDeinflectNotice(word, fallback);
+  });
 }
 
 /**
@@ -2611,7 +3206,7 @@ function renderDictFavorites(){
     el.className = 'proof-item';
     el.style.cursor = 'pointer';
     const head = document.createElement('div');
-    head.style.color = 'var(--text-muted)';
+    head.style.color = 'var(--ink-mid)';
     head.textContent = f.word + (f.reading ? '（' + f.reading + '）' : '') + ' · ' + (f.source || '');
     const del = document.createElement('button');
     del.className = 'pr-btn';
@@ -2814,6 +3409,7 @@ function switchDictView(v){
 /* ---- 快捷片段 ---- */
 
 async function initSnippets(){
+  if (recordContext){ renderSnipTable(); updateSnipLocation(); return; }
   snippetData = await snips.loadSnippetsForProject(gloss.getProjectDir());
   renderSnipTable();
   updateSnipLocation();
@@ -2822,12 +3418,18 @@ async function initSnippets(){
 function updateSnipLocation(){
   const el = document.getElementById('snipLocation');
   if (!el) return;
+  if (recordContext){ el.textContent = '片段随当前记录包携带；跨设备前请导出记录包。'; return; }
   const d = snips.getSnippetsProjectDir();
   el.textContent = d ? ('📁 片段保存位置: ' + d + '/snippets.json') : '📁 片段保存位置: 全局 snippets.json(未打开文件)';
 }
 
 let snipPersistTimer = null;
 function scheduleSnipPersist(){
+  if (recordContext){
+    markDirty();
+    void fsx.kvPut('record-snippets:' + recordContext.key, snippetData.merged);
+    return;
+  }
   if (snipPersistTimer) clearTimeout(snipPersistTimer);
   snipPersistTimer = setTimeout(async () => {
     snipPersistTimer = null;
@@ -3195,7 +3797,9 @@ function loadCanonicalIntoEditor(){
   rdr.focusIdx(0);
   updateUndoButtons();
   updateProgress();
-  document.getElementById('fname').textContent = '当前文件：' + origName + '（已规范化：格式为 ☆/★，原格式可下载档案后用 --restore 还原）';
+  const canonEl = document.getElementById('fname');
+  canonEl.textContent = origName + '（已规范化：格式为 ☆/★，原格式可下载档案后用 --restore 还原）';
+  delete canonEl.dataset.base;   // 换文档 → 以这里为新基准
   showToast('✅ 已规范化并载入编辑器（' + parsed.paras.length + ' 段，文件名不变）');
 }
 
@@ -3238,6 +3842,7 @@ function refreshProofUI(){
   set('pfIssue', st.issue);
   set('pfApproved', st.approved);
   const miss = missingIssues();
+  updateReviewQueueCount(miss);
   set('pfMissing', miss.total);
   const pvm = document.getElementById('pvMissingCount');
   if (pvm) pvm.textContent = miss.total;
@@ -3251,6 +3856,132 @@ function emptyProofItem(text){
   el.className = 'pr-empty';
   el.textContent = text;
   return el;
+}
+
+/**
+ * 相似建议卡上的「原句对照」：当前原句 vs 记忆原文，变动区间高亮。
+ *
+ * 默认折叠（列表保持可扫读），展开后显示两行完整原句，变动段落加底色。
+ * 用 DOM 文本节点生成内容：原文里可能含 < > & 或 emoji，不能用 innerHTML 拼。
+ * 差异只是辅助呈现 —— 不改相似度算法、不自动套用。
+ */
+function appendSourceCompare(item, current, src){
+  const detail = document.createElement('details');
+  detail.className = 'inspector-src-compare';
+  const summary = document.createElement('summary');
+  summary.textContent = '原句对照';
+  summary.title = '展开查看当前原句与这条记忆原文的差异';
+  detail.appendChild(summary);
+
+  const pair = srcdiff.diffSourcePair(current, src);
+  const part = (label, full, mid) => {
+    const row = document.createElement('div');
+    row.className = 'inspector-src-row';
+    const tag = document.createElement('span');
+    tag.className = 'inspector-src-label';
+    tag.textContent = label;
+    row.appendChild(tag);
+    // 逐片用 textContent 落地，变动区间套 <mark class="src-changed">。
+    // 本侧没有变动段落时（纯新增/删除）整句原样显示，另一侧的变动自会标出。
+    if (mid){
+      const mark = document.createElement('mark');
+      mark.className = 'src-changed';
+      mark.textContent = mid;
+      row.append(pair.prefix ? document.createTextNode(pair.prefix) : '', mark, pair.suffix ? document.createTextNode(pair.suffix) : '');
+    } else {
+      row.appendChild(document.createTextNode(full));
+    }
+    return row;
+  };
+  detail.append(part('当前原句', String(current), pair.aMid), part('记忆原文', String(src), pair.bMid));
+  item.appendChild(detail);
+}
+
+/**
+ * 侧栏「建议」面板：把当前行的翻译记忆命中与机翻基线汇总到一处，可一键采用。
+ * 只做“展示 + 转发”——写入统一走 writeRowTranslation / applyTmToRow，不在这里重写译文。
+ *
+ * 每条建议都标出**来源与审核状态**（机翻草稿 / 已确认 · 角色名）：
+ * 同一个句子在不同角色嘴里该有不同译法，用户需要看清这条记忆是谁的、可不可信
+ * 才决定要不要采用。同一句的多条不同角色变体会一起列出，而不是只给第一条。
+ * 相似命中另给「原句对照」，把被匹配的记忆原文与其差异一并展示。
+ */
+function renderInspectorSuggestions(i = rdr.getActiveIdx()){
+  const host = document.getElementById('inspectorSuggestions');
+  if (!host) return;
+  host.innerHTML = '';
+  const p = Number.isInteger(i) ? model.getPara(i) : null;
+  if (!p){
+    host.appendChild(emptyProofItem('聚焦一行后显示翻译记忆与机翻建议。'));
+    return;
+  }
+  const head = document.createElement('div');
+  head.className = 'inspector-section-title';
+  head.textContent = '第 ' + (i + 1) + ' 行建议';
+  host.appendChild(head);
+  if (p.isName){
+    host.appendChild(emptyProofItem('NAME 行请直接编辑中文译名。'));
+    return;
+  }
+  // 本句的全部记忆变体：精确命中优先展示，其余相似命中按分数排在后面
+  const variants = tm.variantsOf(tmData, p.content);
+  const exact = tm.findExact(tmData, p.content, p.name);
+  const similar = variants.length ? [] : (tm.findSimilar(tmData, p.content, { limit: 3, name: p.name }) || []);
+  const mtRow = Array.isArray(mtBaseline.rows) ? mtBaseline.rows[i] : null;
+  const mtText = Array.isArray(mtRow) ? String(mtRow[1] || '') : '';
+  const addSuggestion = (label, title, text, action, cls, srcInfo) => {
+    if (!text) return;
+    const item = document.createElement('div');
+    item.className = 'inspector-suggestion' + (cls ? ' ' + cls : '');
+    const meta = document.createElement('span');
+    meta.className = 'inspector-suggestion-kind';
+    meta.textContent = label;
+    const body = document.createElement('span');
+    body.className = 'inspector-suggestion-text';
+    body.textContent = text;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'pr-btn';
+    btn.textContent = '采用';
+    btn.title = title;
+    btn.addEventListener('click', () => {
+      if (action()) renderInspectorSuggestions(i);
+    });
+    item.append(meta, body, btn);
+    if (srcInfo && srcInfo.src) appendSourceCompare(item, srcInfo.current, srcInfo.src);
+    host.appendChild(item);
+  };
+  // 精确命中：可能有多条（同一句不同说话人），逐条列出并标明来源
+  if (exact) variants.filter(v => tm.entryId(v.key, v.name) === tm.entryId(exact.key, exact.name)).forEach(hit => {
+    addSuggestion(
+      tm.entrySourceLabel(hit),
+      tm.isConfirmed(hit) ? '采用这条已确认的记忆' : '采用这条机翻草稿（未经复核，建议自己看一眼）',
+      hit.dst,
+      () => writeRowTranslation(i, hit.dst, 'tm'),
+      tm.isConfirmed(hit) ? 'is-confirmed' : 'is-draft',
+    );
+  });
+  // 同句的其它角色变体：不同角色本该有不同译法，一并给出选择
+  variants.filter(v => !exact || tm.entryId(v.key, v.name) !== tm.entryId(exact.key, exact.name))
+    .forEach(v => addSuggestion(
+      tm.entrySourceLabel(v),
+      '采用该角色的译法',
+      v.dst,
+      () => writeRowTranslation(i, v.dst, 'tm'),
+      'is-variant',
+    ));
+  // 相似命中：译文相似不等于语义相同，必须能看见被匹配的原句差在哪
+  // （entry.src 是 TM 存的原文；不能用归一化 key 或来源字段 origin 冒充）
+  similar.forEach(x => addSuggestion(
+    '相似 ' + Math.round(x.score * 100) + '% · ' + tm.entrySourceLabel(x.entry),
+    '采用该条翻译记忆',
+    x.entry.dst,
+    () => writeRowTranslation(i, x.entry.dst, 'tm'),
+    'is-similar',
+    { current: p.content, src: x.entry.src },
+  ));
+  addSuggestion('机翻基线', '采用机翻基线', mtText, () => revertRowToMt(i));
+  if (!host.querySelector('.inspector-suggestion')) host.appendChild(emptyProofItem('当前行暂无可用建议。'));
 }
 
 // 侧栏校对面板: 批注总览 / 漏翻异常 / 修改记录(面板可见即渲染;漏翻视图校对模式外也可用)
@@ -3316,7 +4047,7 @@ function renderMissingList(){
     kind.className = 'pr-tag ' + (ISSUE_KIND_TONE[x.kind] === 'suggestion' ? 'pr-tag-suggestion' : 'pr-tag-issue');
     kind.textContent = ISSUE_KIND_LABEL[x.kind] || x.kind;
     head.textContent = '第' + (x.i + 1) + '行 ';
-    head.style.color = 'var(--text-muted)';
+    head.style.color = 'var(--ink-mid)';
     head.appendChild(kind);
     el.append(head);
 
@@ -3385,7 +4116,7 @@ function annoOverviewItem(x, isOpen){
   el.style.cursor = 'pointer';
   const head = document.createElement('div');
   head.textContent = '第' + x.line + '行';
-  head.style.color = 'var(--text-muted)';
+  head.style.color = 'var(--ink-mid)';
   const tag = document.createElement('span');
   tag.className = 'pr-tag pr-tag-' + x.a.type;
   tag.textContent = proof.ANNO_TYPES[x.a.type] || x.a.type;
@@ -3445,7 +4176,7 @@ function renderProofLog(){
     src.textContent = proof.CHANGE_SOURCES[c.source] || c.source;
     const head = document.createElement('div');
     head.textContent = '第' + c.line + '行 · ' + (c.field === 'nameTr' ? '译名' : '译文');
-    head.style.color = 'var(--text-muted)';
+    head.style.color = 'var(--ink-mid)';
     const diff = document.createElement('div');
     diff.className = 'proof-diff';
     const del = document.createElement('span');
@@ -3508,7 +4239,7 @@ function toggleProofMode(){
     rdr.setNotesAutoOpen(true); // 有批注的行默认展开批注框
     rdr.refreshAllRows();
     refreshProofUI();
-    showToast('✅ 校对模式已开启（Q 通过并跳下一行 / W 有问题 / A 批注）');
+    showToast('✅ 校对模式已开启，可用「通过并继续」连续处理；快捷键见校对工具栏。');
   } else {
     rdr.setNotesAutoOpen(false); // 退出校对模式: 恢复默认收起
     proof.setFilter('all');
@@ -3526,41 +4257,91 @@ function setProofFilter(v){
   refreshProofUI();
 }
 
-function jumpNextIssue(){
-  const paras = model.getParas();
-  if (!paras.length){ showToast('没有可校对的批注'); return; }
-  const start = Math.max(0, rdr.getActiveIdx() + 1);
-  let n = -1;
-  for (let i = start; i < paras.length; i++){
-    if (proof.unresolvedCount(i) > 0 || proof.statusOf(i) === 'issue'){ n = i; break; }
+const REVIEW_CATEGORY_LABEL = {
+  all: '全部问题', ...ISSUE_KIND_LABEL, manual: '人工标记', annotation: '未解决批注',
+};
+
+function reviewCategorySelect(){
+  const sel = document.getElementById('reviewQueueCategory');
+  if (sel && !sel.options.length){
+    for (const c of ISSUE_CATEGORIES) sel.add(new Option(REVIEW_CATEGORY_LABEL[c] || c, c));
   }
+  return sel;
+}
+
+function currentReviewCategory(){
+  if (document.getElementById('reviewQueueKind').value !== 'issues') return 'all';
+  return reviewCategorySelect().value || 'all';
+}
+
+function syncReviewCategoryVisibility(){
+  const sel = reviewCategorySelect();
+  if (sel) sel.hidden = document.getElementById('reviewQueueKind').value !== 'issues';
+}
+
+function setReviewCategory(category){
+  const sel = reviewCategorySelect();
+  if (!sel) return;
+  sel.value = ISSUE_CATEGORIES.includes(category) ? category : 'all';
+  syncReviewCategoryVisibility();
+}
+
+// 诊断条目拍平为 { i, kind }：行号用于去重，kind 用于类别筛选。
+function reviewDiagnostics(miss){
+  return [...Object.values(miss.a), ...Object.values(miss.q)].filter(Array.isArray).flat();
+}
+
+function currentReviewQueue(miss){
+  const kind = document.getElementById('reviewQueueKind').value;
+  const issues = kind === 'issues' ? (miss || missingIssues()) : null;
+  return reviewQueue(model.getParas(), kind, issues ? reviewDiagnostics(issues) : [], currentReviewCategory());
+}
+
+function updateReviewQueueCount(miss){
+  const el = document.getElementById('reviewQueueCount');
+  const issues = document.getElementById('reviewQueueKind').value === 'issues' ? (miss || missingIssues()) : null;
+  if (issues){
+    // 各类别的行数显示在下拉里；复用本次已算好的诊断，不重复分析
+    const counts = issueCategoryCounts(model.getParas(), reviewDiagnostics(issues));
+    const sel = reviewCategorySelect();
+    for (const opt of sel.options) opt.textContent = (REVIEW_CATEGORY_LABEL[opt.value] || opt.value) + '（' + counts[opt.value] + '）';
+    if (el) el.textContent = '剩余 ' + counts[currentReviewCategory()] + ' 行';
+    return;
+  }
+  if (el) el.textContent = '剩余 ' + currentReviewQueue(miss).length + ' 行';
+}
+
+function navigateReview(direction = 1){
+  const queue = currentReviewQueue();
+  updateReviewQueueCount();
+  const n = nextInQueue(queue, rdr.getActiveIdx(), direction);
   if (n === -1){
-    for (let i = 0; i < start; i++){
-      if (proof.unresolvedCount(i) > 0 || proof.statusOf(i) === 'issue'){ n = i; break; }
-    }
+    const cat = currentReviewCategory();
+    showToast(cat !== 'all' ? '「' + REVIEW_CATEGORY_LABEL[cat] + '」类别下没有问题' : '当前校对队列已完成');
+    return;
   }
-  if (n === -1){ showToast('🎉 没有待处理的问题'); return; }
   if (!proof.rowPassesFilter(n)){
     proof.setFilter('all');
     document.querySelectorAll('.proof-filter').forEach(b => b.classList.toggle('active', b.dataset.pf === 'all'));
     rdr.refreshAllRows();
   }
-  rdr.scrollRowIntoView(n);
-  rdr.focusIdx(n);
+  rdr.focusIdx(n, { preserve: true });
+}
+
+function jumpNextIssue(){
+  document.getElementById('reviewQueueKind').value = 'issues';
+  setReviewCategory('all');
+  navigateReview();
 }
 
 // 快捷键动作
 function proofApproveAndNext(){
   const i = rdr.getActiveIdx();
   if (i < 0) return;
+  proof.settleInput(i);
   if (proof.statusOf(i) !== 'approved') proof.toggleApprove(i);
-  const paras = model.getParas();
-  for (let k = i + 1; k < paras.length; k++){
-    if (proof.rowPassesFilter(k)){ rdr.focusIdx(k); return; }
-  }
-  for (let k = 0; k <= i; k++){
-    if (proof.rowPassesFilter(k)){ rdr.focusIdx(k); return; }
-  }
+  updateProgress();
+  navigateReview();
 }
 function proofMarkIssue(){
   const i = rdr.getActiveIdx();
@@ -3579,7 +4360,7 @@ function proofOpenNotes(){
 // 校对快捷键匹配: 'q' / 'Ctrl+Shift+K'
 function keyComboMatch(e, combo){
   if (!combo) return false;
-  const parts = combo.split('+');
+  const parts = combo.toLowerCase().split('+');
   const key = (parts.pop() || '').toLowerCase();
   const wantCtrl = parts.includes('ctrl'), wantShift = parts.includes('shift'), wantAlt = parts.includes('alt');
   if ((e.key || '').toLowerCase() !== key) return false;
@@ -3782,7 +4563,7 @@ function updateBgPreview(dataUrl, fit){
     pv.textContent = '';
   } else {
     pv.style.backgroundImage = '';
-    pv.innerHTML = '<span>NO BACKDROP</span><small>尚未设置背景</small>';
+    pv.innerHTML = '<small>尚未设置背景</small>';
   }
 }
 
@@ -3887,13 +4668,16 @@ function hideMTUI(){
     if (el) el.style.display = 'none';
   }
   document.querySelectorAll('.mt-group, [aria-label="翻译执行"]').forEach(el => { el.style.display = 'none'; });
+  const tab = document.querySelector('.workspace-nav-item[data-workspace="translate"]');
+  if (tab){ tab.hidden = true; tab.style.display = 'none'; }
+  if (document.getElementById('commandStrip')?.dataset.panel === 'translate') setWorkspaceMode('project');
 }
 
 /** 刷新下拉里各 provider 的「（未配置）」标记(配置加载/保存/切换后调用) */
 function refreshMTProviderOptions(){
   for (const opt of $mtProvider.options){
     const p = mt.getProvider(opt.value);
-    if (p) opt.textContent = '🤖 ' + p.name + (p.isConfigured() ? '' : '（未配置）');
+    if (p) opt.textContent = p.name + (p.isConfigured() ? '' : '（未配置）');
   }
 }
 
@@ -3906,7 +4690,7 @@ async function initMT(){
   for (const p of provs){
     const opt = document.createElement('option');
     opt.value = p.id;
-    opt.textContent = '🤖 ' + p.name + (p.isConfigured() ? '' : '（未配置）');
+    opt.textContent = p.name + (p.isConfigured() ? '' : '（未配置）');
     $mtProvider.appendChild(opt);
   }
   const st = await mt.getMTSettings().catch(() => ({}));
@@ -3983,21 +4767,30 @@ function mtSelChanged(){
 
 // 检测常见端口,列出可用的填入地址栏
 async function detectSakuraPorts(){
-  const out = document.getElementById('mtTestOut');
-  out.textContent = '正在扫描常见端口…';
-  const ports = await mt.probeSakuraPorts();
-  if (!ports.length){
-    out.textContent = '未发现正在运行的 Sakura / llama.cpp 服务。\n请先启动服务并加载模型,再点「检测端口」。';
-    return;
-  }
-  const host = 'http://127.0.0.1:' + ports[0];
-  document.getElementById('mtHost').value = host;
-  out.textContent = '发现可用服务: ' + ports.map(p => '127.0.0.1:' + p).join('、') + '\n已填入第一个,可切换后点「测试翻译」验证。';
+  return withBusyState(document.getElementById('btnMtDetect'), async () => {
+    const out = document.getElementById('mtTestOut');
+    out.textContent = '正在扫描常见端口…';
+    const ports = await mt.probeSakuraPorts();
+    if (!ports.length){
+      out.textContent = '未发现正在运行的 Sakura / llama.cpp 服务。\n请先启动服务并加载模型,再点「检测端口」。';
+      return;
+    }
+    const host = 'http://127.0.0.1:' + ports[0];
+    document.getElementById('mtHost').value = host;
+    out.textContent = '发现可用服务: ' + ports.map(p => '127.0.0.1:' + p).join('、') + '\n已填入第一个,可切换后点「测试翻译」验证。';
+  });
 }
 
 // 从表单读当前引擎配置(不落盘),供测试/保存
 function readMTFormConfig(){
   const sel = document.getElementById('mtProviderSel').value;
+  // 超时字段两端共用：统一从秒换成毫秒，非法输入交给 mt.normalizeTimeoutMs 兜底
+  const timeoutMs = (() => {
+    const el = document.getElementById('mtTimeoutSec');
+    if (!el) return undefined;
+    const v = Number(el.value);
+    return Number.isFinite(v) && v > 0 ? Math.round(v * 1000) : undefined;
+  })();
   if (sel === 'sakura'){
     return {
       host: document.getElementById('mtHost').value.trim(),
@@ -4010,6 +4803,7 @@ function readMTFormConfig(){
       maxTokens: Number(document.getElementById('mtMaxTokens').value),
       batchMode: document.getElementById('mtBatchMode').value,
       batchSize: Number(document.getElementById('mtBatchSize').value),
+      timeoutMs,
     };
   }
   return {
@@ -4026,38 +4820,41 @@ function readMTFormConfig(){
     maxTokens: Number(document.getElementById('mtMaxTokens').value),
     batchMode: document.getElementById('mtBatchMode').value,
     batchSize: Number(document.getElementById('mtBatchSize').value),
+    timeoutMs,
   };
 }
 
 // 测试翻译一句
 async function testMT(){
-  const text = document.getElementById('mtTestIn').value.trim();
-  if (!text){ toastError('请先输入要测试的日文。'); return; }
-  const sel = document.getElementById('mtProviderSel').value;
-  const cfg = readMTFormConfig();
-  if (sel === 'sakura' && !cfg.host){
-    toastError('请填写 Sakura / llama.cpp 服务地址（或点「检测端口」）。');
-    return;
-  }
-  if (sel === 'llm' && (!cfg.baseUrl || !cfg.model)){
-    toastError('请填写接口地址与模型名。');
-    return;
-  }
-  const out = document.getElementById('mtTestOut');
-  out.textContent = '翻译中…（本地模型可能需要几秒）';
-  try {
-    // 临时套用 UI 配置做测试(不落盘),失败时还原
-    const prev = await mt.getProviderConfig(sel);
-    await mt.setProviderConfig(sel, cfg);
-    try {
-      const result = await mt.translateTextProtected(sel, text, glossData);
-      out.textContent = '日文: ' + text + '\n译文: ' + result;
-    } finally {
-      await mt.setProviderConfig(sel, prev);
+  return withBusyState(document.getElementById('btnMtTest'), async () => {
+    const text = document.getElementById('mtTestIn').value.trim();
+    if (!text){ toastError('请先输入要测试的日文。'); return; }
+    const sel = document.getElementById('mtProviderSel').value;
+    const cfg = readMTFormConfig();
+    if (sel === 'sakura' && !cfg.host){
+      toastError('请填写 Sakura / llama.cpp 服务地址（或点「检测端口」）。');
+      return;
     }
-  } catch (e){
-    out.textContent = '翻译失败: ' + e.message;
-  }
+    if (sel === 'llm' && (!cfg.baseUrl || !cfg.model)){
+      toastError('请填写接口地址与模型名。');
+      return;
+    }
+    const out = document.getElementById('mtTestOut');
+    out.textContent = '翻译中…（本地模型可能需要几秒）';
+    try {
+      // 临时套用 UI 配置做测试(不落盘),失败时还原
+      const prev = await mt.getProviderConfig(sel);
+      await mt.setProviderConfig(sel, cfg);
+      try {
+        const result = await mt.translateTextProtected(sel, text, glossData);
+        out.textContent = '日文: ' + text + '\n译文: ' + result;
+      } finally {
+        await mt.setProviderConfig(sel, prev);
+      }
+    } catch (e){
+      out.textContent = '翻译失败: ' + e.message;
+    }
+  });
 }
 
 async function saveMTSettingsUI(){
@@ -4094,38 +4891,205 @@ function currentActiveIdx(){
 }
 
 async function mtTranslateCurrent(){
-  const i = currentActiveIdx();
-  const p = model.getPara(i);
-  if (!p){ toastError('请先导入文件'); return; }
-  if (p.isName) return; // NAME 条目不机翻
-  clearPushTimers();
-  try {
-    // 取完整结果（非流式），交给比对面板由译者裁定是否采用
-    const result = await mt.translateTextProtected($mtProvider.value, p.content, glossData, mtContextBlock(i));
-    const cleaned = stripBrackets(String(result).trim());
-    const finalText = p.brackets ? ('「' + cleaned + '」') : cleaned;
-    const ok = await showMtCompare({ orig: p.content, result: finalText });
-    if (!ok){
+  return withBusyState(document.getElementById('btnMT'), async () => {
+    const i = currentActiveIdx();
+    const p = model.getPara(i);
+    if (!p){ toastError('请先导入文件'); return; }
+    if (p.isName) return; // NAME 条目不机翻
+    clearPushTimers();
+    try {
+      // 取完整结果（非流式），交给比对面板由译者裁定是否采用
+      const result = await mt.translateTextProtected($mtProvider.value, p.content, glossData, mtContextBlock(i));
+      const cleaned = stripBrackets(String(result).trim());
+      const finalText = p.brackets ? ('「' + cleaned + '」') : cleaned;
+      const ok = await showMtCompare({ orig: p.content, result: finalText });
+      if (!ok){
+        rdr.refreshRow(i);
+        toast('已放弃机翻结果');
+        return;
+      }
+      model.pushUndo([i]);
+      p.translation = finalText;
+      p.src = 'mt';      // 归因标记：采纳了机翻结果
+      model.recalcDone(p);
+      model.scheduleAutosave();
       rdr.refreshRow(i);
-      toast('已放弃机翻结果');
-      return;
+      updateProgress();
+      markDirty();
+      await recordMtBaseline([{ i, text: cleaned }]); // 留下机翻基线（机翻对比视图的参照）
+    } catch (e){
+      rdr.refreshRow(i);
+      toastError(e.message || '翻译失败');
     }
-    model.pushUndo([i]);
-    p.translation = finalText;
-    p.src = 'mt';      // 归因标记：采纳了机翻结果
+  });
+}
+
+/* ---------------- 批量机翻：任务面板 / 停止 / 重试失败行 ----------------
+ *
+ * 状态判定全部在 mt-task.js（纯逻辑、有单测），这里只负责驱动与渲染。
+ * 三条需求验收点在这里落地：
+ *   ① 途中停止 → 已完成译文保留（任务对象保留 done 状态，停止只标记未处理行）；
+ *   ② 重试只请求失败行（retryTask 摘出 FAILED，不含 DONE/STOPPED/EDITED）；
+ *   ③ 等待期间人工修改的译文不被迟到结果覆盖（settleStale 比对行编辑版本号）。
+ */
+
+/** 行编辑版本号台账：任何人工写入 +1，用于识别"请求期间这行被人改过" */
+const mtTaskEdit = mtTask.createEditTracker();
+
+/** 当前批量机翻任务的运行控制（一次只有一个） */
+let mtRun = null;   // { task, ctrl, panel, applyOne, mtRecords, fellBack, memApplied, toTranslate }
+
+/** 用户点「停止」：中断在途请求，未处理的行标 STOPPED */
+function stopBatchMt(){
+  if (!mtRun) return;
+  mtRun.task.stopped = true;
+  try { mtRun.ctrl.abort(); } catch (e) { /* 已结束 */ }
+  mtTask.requestStop(mtRun.task);
+  if (mtRun.panel) mtRun.panel.refresh();
+  showToast('正在停止…已完成的译文会保留。');
+}
+
+/**
+ * 跑一轮翻译（供"首次批量"和"重试失败行"共用）。
+ * @param {object} task mt-task 任务对象（已建好目标行）
+ * @param {object} ctx { memApplied, tmSimilarCount, snapshot } 首次批量的额外信息
+ */
+async function runBatchTask(task, ctx){
+  const paras = model.getParas();
+  const ctrl = new AbortController();
+  const conf = await mt.getProviderConfig($mtProvider.value);
+  const batchMode = mt.normalizeBatchMode(conf.batchMode);
+  const batchSize = mt.normalizeBatchSize(conf.batchSize);
+  const fnameEl = document.getElementById('fname');
+  const origFname = fnameEl.textContent;
+  const mtRecords = [];
+  const list = task.all.slice();
+  let fellBack = 0;
+
+  const panel = showMtTaskPanel({
+    title: task.label || '批量机翻',
+    getState: () => ({
+      summary: mtTask.summarize(task),
+      progressLabel: mtTask.progressLabel(task),
+      failures: mtTask.failureList(task),
+      stopped: task.stopped,
+      finished: mtTask.pendingIndexes(task).length === 0,
+      onJump: (i) => { rdr.focusIdx(i); },
+    }),
+    onStop: () => stopBatchMt(),
+    onRetry: () => {
+      const retry = mtTask.retryTask(task);
+      if (!retry.all.length) return;
+      panel.close();
+      runBatchTask(retry, { memApplied: 0 }).catch(e => toastError('重试失败：' + (e && e.message ? e.message : e)));
+    },
+  });
+
+  mtRun = { task, ctrl, panel };
+
+  /** 写入一行的机翻结果；返回 false 表示被"人工已改过"挡下 */
+  const applyOne = (i, raw) => {
+    // ③ 迟到的结果不覆盖人工修改：这行在等待期间被改过就丢弃结果
+    if (!mtTask.settleStale(task, i, mtTaskEdit.get(i))){
+      mtTask.markEdited(task, i);
+      return false;
+    }
+    const p = paras[i];
+    const cleaned = stripBrackets(String(raw == null ? '' : raw).trim());
+    p.translation = p.brackets ? ('「' + cleaned + '」') : cleaned;
+    p.src = 'mt';
     model.recalcDone(p);
+    mtRecords.push({ i, text: cleaned });
+    mtTask.markDone(task, i);
+    rdr.refreshRow(i);
+    return true;
+  };
+
+  // 逐行路径：批次模式失败时也回退到这里
+  const runPerLine = async (rows, done0, total) => {
+    for (let k = 0; k < rows.length; k++){
+      const i = rows[k];
+      if (task.stopped || ctrl.signal.aborted) break;
+      fnameEl.textContent = '🔄 批量机翻中 ' + (done0 + k + 1) + ' / ' + total + ' …';
+      mtTask.beginRow(task, i, mtTaskEdit.get(i));   // 记版本号，回来时比对
+      try {
+        // 逐行路径带该行**自己的**说话人语境：一行是爱丽丝、下一行是桐吾时，
+        // 各自的人设不会串（这也是 Q6 定为逐行为主后的主要收益）。
+        const out = await mt.translateTextProtected(
+          $mtProvider.value, paras[i].content, glossData, mtContextBlock(i), { signal: ctrl.signal });
+        applyOne(i, out);
+      } catch (e){
+        if (mt.isMtAbort(e)) break;               // 用户停止：剩余行交给 requestStop 标 STOPPED
+        mtTask.markFailed(task, i, e);
+      }
+      if (panel) panel.refresh();
+    }
+  };
+
+  try {
+    if (batchMode === 'batched' && list.length > 1){
+      for (let g = 0; g < list.length; g += batchSize){
+        if (task.stopped || ctrl.signal.aborted) break;
+        const group = list.slice(g, g + batchSize);
+        fnameEl.textContent = '🔄 批量机翻中 ' + Math.min(g + group.length, list.length) + ' / ' + list.length + ' …';
+        // 発请求前记下这一组每行的版本号，用于识别迟到的结果
+        group.forEach(i => mtTask.beginRow(task, i, mtTaskEdit.get(i)));
+        let outs = null;
+        try {
+          // ⚠️ 批次模式是**一次请求发多行**，只能带一份语境。取组内首行的说话人，
+          //    多角色混排的批次会因此丢失其余角色的人设 —— 有意为之：
+          //    拆成多请求会成倍增加往返，代价大于收益。需要严格人设时改用逐行模式。
+          outs = group.length === 1
+            ? [await mt.translateTextProtected($mtProvider.value, paras[group[0]].content, glossData, mtContextBlock(group[0]), { signal: ctrl.signal })]
+            : await mt.translateLinesBatched($mtProvider.value, group.map(i => paras[i].content), glossData, mtContextBlock(group[0]), { signal: ctrl.signal });
+        } catch (e){
+          if (mt.isMtAbort(e)) break;   // 停止：整组留给 STOPPED
+          outs = null;                  // 其它错误也走回退，让失败粒度落到单行
+        }
+        if (!outs){
+          if (task.stopped || ctrl.signal.aborted) break;
+          fellBack += group.length;
+          await runPerLine(group, g, list.length);
+          continue;
+        }
+        // 整批成功：逐行写入前各自比对版本号（人工改过的那一行会被跳过）
+        group.forEach((i, k) => applyOne(i, outs[k]));
+        if (panel) panel.refresh();
+      }
+    } else {
+      await runPerLine(list, 0, list.length);
+    }
+  } finally {
+    fnameEl.textContent = origFname;
+    if (task.stopped) mtTask.requestStop(task);   // 把"还没轮到"的行标成未处理
+    if (panel) panel.refresh();
+    const doneCount = mtTask.summarize(task).done;
     model.scheduleAutosave();
-    rdr.refreshRow(i);
+    recomputeMatchesUI(true);
     updateProgress();
-    markDirty();
-    await recordMtBaseline([{ i, text: cleaned }]); // 留下机翻基线（机翻对比视图的参照）
-  } catch (e){
-    rdr.refreshRow(i);
-    toastError(e.message || '翻译失败');
+    if (doneCount > 0) markDirty(); // 批量机翻结果未写回原文件
+    if (doneCount > 0) await harvestTm(); // 新译文进翻译记忆，下次同句式不再重复扣费
+    if (doneCount > 0) await recordMtBaseline(mtRecords); // 留机翻基线：之后的人工改动可在「机翻对比」里看到
+    touchStats();                  // 批量结果计入当天进度（含来源归因）
+    // 有失败行 → 面板留在屏幕上，用户可以就地只重试那些行；否则自动收掉
+    const s = mtTask.summarize(task);
+    const text = mtTask.summaryText(task, (ctx && ctx.memApplied) || 0)
+      + (fellBack ? '\n批次退回逐行 ' + fellBack + ' 行（对齐失败时整批放弃，逐行重试）。' : '');
+    if (s.failed) toastError(text);
+    else toast(text);
+    if (!s.failed && panel) panel.close();
+    mtRun = null;
   }
 }
 
+/**
+ * 批量翻译入口。
+ * 翻译记忆的**自动套用只认已确认条目**；机翻草稿只作为建议（侧栏/右键），
+ * 避免未复核的机翻结果被当成标准答案扩散到全篇。
+ */
 async function mtTranslateBatch(){
+  return withBusyState(document.getElementById('btnMTBatch'), async () => {
+  if (mtRun){ toastError('已有一个批量机翻任务在进行中。'); return; }
   const paras = model.getParas();
   const pending = [];
   paras.forEach((p, i) => {
@@ -4133,13 +5097,16 @@ async function mtTranslateBatch(){
   });
   if (!pending.length){ toastError('没有未翻译的行。'); return; }
 
-  // ① 翻译记忆：精确命中直接套用（零成本）；相似命中只提示，由人决定
-  const tmExact = [], tmSimilar = [];
+  // ① 翻译记忆：**已确认**精确命中直接套用（零成本）；其余只提示，由人决定
+  const tmExact = [], tmSimilar = [], tmDraft = [];
   for (const i of pending){
     const p = paras[i];
-    const hit = tm.findExact(tmData, p.content);
-    if (hit){ tmExact.push({ i, hit }); continue; }
-    const sim = tm.findSimilar(tmData, p.content, { limit: 1 })[0];
+    const confirmed = tm.findConfirmed(tmData, p.content, p.name);
+    if (confirmed){ tmExact.push({ i, hit: confirmed }); continue; }
+    // 未确认的精确命中（机翻草稿）：不进自动套用，但明确告诉用户"有一份草稿可用"
+    const draft = tm.findExact(tmData, p.content, p.name);
+    if (draft) tmDraft.push({ i, hit: draft });
+    const sim = tm.findSimilar(tmData, p.content, { limit: 1, name: p.name })[0];
     if (sim) tmSimilar.push({ i, sim });
   }
   const tmIndexes = new Set(tmExact.map(x => x.i));
@@ -4163,101 +5130,25 @@ async function mtTranslateBatch(){
   }
 
   if (!toTranslate.length){
-    showToast('✅ 全部 ' + memApplied + ' 行命中翻译记忆，未调用机翻。'
+    showToast('✅ 全部 ' + memApplied + ' 行命中已确认的翻译记忆，未调用机翻。'
+      + (tmDraft.length ? '\n另有 ' + tmDraft.length + ' 行只有机翻草稿（未经确认，不自动填）→ 侧栏「建议」可逐条采用。' : '')
       + (tmSimilar.length ? '\n另有 ' + tmSimilar.length + ' 行有相似记忆，可右键逐行「套用记忆」。' : ''));
     return;
   }
 
   const ask = '将批量翻译 ' + toTranslate.length + ' 个未翻译的行（串行调用本地模型，可能需要几分钟）。'
-    + (memApplied ? '\n已有 ' + memApplied + ' 行由翻译记忆直接套用，不再调用机翻。' : '')
-    + (tmSimilar.length ? '\n另有 ' + tmSimilar.length + ' 行存在相似记忆（需右键手动套用）。' : '')
-    + '\n开始吗？';
-  if (!confirm(ask)) return;
+    + '\n翻译过程中可以随时「停止」，已完成的译文会保留，失败的行可以只重试那些行。'
+    + (memApplied ? '\n已有 ' + memApplied + ' 行由已确认的翻译记忆直接套用，不再调用机翻。' : '')
+    + (tmDraft.length ? '\n另有 ' + tmDraft.length + ' 行只有机翻草稿（不自动填，需人工确认）。' : '')
+    + (tmSimilar.length ? '\n另有 ' + tmSimilar.length + ' 行存在相似记忆（需右键手动套用）。' : '');
+  if (!await showConfirm({ title: '开始批量机翻？', message: ask, confirmText: '开始', danger: false })) return;
 
   await snapshotHistory('batch');   // 批量改写前留档：这是最需要后悔药的一步
   model.pushUndo(toTranslate);
   clearPushTimers();
-  const conf = await mt.getProviderConfig($mtProvider.value);
-  const batchMode = mt.normalizeBatchMode(conf.batchMode);
-  const batchSize = mt.normalizeBatchSize(conf.batchSize);
-  const fnameEl = document.getElementById('fname');
-  const origFname = fnameEl.textContent;
-  let ok = 0;
-  let fellBack = 0;
-  const failed = [];
-  const mtRecords = [];   // 机翻基线（机翻 → 定稿对比视图的参照）
-
-  // 写入一行（与逐行模式完全同一套清理/包括号规则，避免两种模式产出口径分叉）
-  const applyOne = (i, raw) => {
-    const p = paras[i];
-    const cleaned = stripBrackets(String(raw == null ? '' : raw).trim());
-    p.translation = p.brackets ? ('「' + cleaned + '」') : cleaned;
-    p.src = 'mt';     // 归因标记：机翻写入
-    model.recalcDone(p);
-    mtRecords.push({ i, text: cleaned });
-    ok++;
-    rdr.refreshRow(i);
-  };
-
-  // 逐行路径：批次模式失败时也回退到这里
-  const runPerLine = async (list, done0) => {
-    for (let k = 0; k < list.length; k++){
-      const i = list[k];
-      fnameEl.textContent = '🔄 批量机翻中 ' + (done0 + k + 1) + ' / ' + toTranslate.length + ' …';
-      try {
-        // 逐行路径带该行**自己的**说话人语境：一行是爱丽丝、下一行是桐吾时，
-        // 各自的人设不会串（这也是 Q6 定为逐行为主后的主要收益）。
-        applyOne(i, await mt.translateTextProtected($mtProvider.value, paras[i].content, glossData, mtContextBlock(i)));
-      } catch (e){
-        failed.push({ i, err: e.message });
-      }
-    }
-  };
-
-  if (batchMode === 'batched' && toTranslate.length > 1){
-    for (let g = 0; g < toTranslate.length; g += batchSize){
-      const group = toTranslate.slice(g, g + batchSize);
-      fnameEl.textContent = '🔄 批量机翻中 ' + (g + group.length) + ' / ' + toTranslate.length + ' …';
-      let outs = null;
-      try {
-        // ⚠️ 批次模式是**一次请求发多行**，只能带一份语境。取组内首行的说话人，
-        //    多角色混排的批次会因此丢失其余角色的人设 —— 有意为之：
-        //    拆成多请求会成倍增加往返，代价大于收益。需要严格人设时改用逐行模式。
-        outs = group.length === 1
-          ? [await mt.translateTextProtected($mtProvider.value, paras[group[0]].content, glossData, mtContextBlock(group[0]))]
-          : await mt.translateLinesBatched($mtProvider.value, group.map(i => paras[i].content), glossData, mtContextBlock(group[0]));
-      } catch (e){
-        outs = null;   // 网络/接口错误也走回退，让失败粒度落到单行
-      }
-      if (!outs){
-        fellBack += group.length;
-        await runPerLine(group, g);
-        continue;
-      }
-      group.forEach((i, k) => applyOne(i, outs[k]));
-    }
-  } else {
-    await runPerLine(toTranslate, 0);
-  }
-
-  fnameEl.textContent = origFname;
-  model.scheduleAutosave();
-  recomputeMatchesUI(true);
-  updateProgress();
-  if (ok > 0) markDirty(); // 批量机翻结果未写回原文件
-  if (ok > 0) await harvestTm(); // 新译文进翻译记忆，下次同句式不再重复扣费
-  if (ok > 0) await recordMtBaseline(mtRecords); // 留机翻基线：之后的人工改动可在「机翻对比」里看到
-  touchStats();                  // 批量结果计入当天进度（含来源归因）
-  const msgs = [];
-  if (memApplied) msgs.push('翻译记忆 ' + memApplied + ' 行');
-  if (ok) msgs.push('机翻 ' + ok + ' 行');
-  if (failed.length) msgs.push('失败 ' + failed.length + ' 行');
-  if (fellBack) msgs.push('批次退回逐行 ' + fellBack + ' 行');
-  if (failed.length){
-    toastError('批量翻译完成：' + msgs.join(' · ') + '。\n失败原因示例：' + failed[0].err);
-  } else {
-    toast('批量翻译完成：' + msgs.join(' · ') + '。\n想知道自己改了机翻的哪些地方 → 侧栏「校对 → 🤖 机翻对比」。');
-  }
+  const task = mtTask.createTask(toTranslate, { label: '批量机翻（' + toTranslate.length + ' 行）' });
+  await runBatchTask(task, { memApplied, tmSimilarCount: tmSimilar.length, tmDraftCount: tmDraft.length });
+  });
 }
 
 /* ---------------- 侧边栏 / 文件夹浏览器 ---------------- */
@@ -4271,6 +5162,16 @@ function syncSidebarTop(){
   const fh = footer ? footer.offsetHeight : 0;
   // Stage 内部由 CSS Grid 分配 scene header / review strip / virtual list 的高度。
   main.style.height = 'calc(100vh - ' + h + 'px - ' + fh + 'px)';
+}
+
+function initWorkspaceHeightSync(){
+  syncSidebarTop();
+  if (typeof ResizeObserver !== 'function') return;
+  // 工具页换行、字体加载和底栏变化都可能改变可用高度，而不触发 window resize。
+  const observer = new ResizeObserver(syncSidebarTop);
+  for (const el of [document.getElementById('topbar'), document.querySelector('footer')]){
+    if (el) observer.observe(el, { box: 'border-box' });
+  }
 }
 
 function setSidebar(open){
@@ -4325,7 +5226,7 @@ function syncEditorialMeta(){
   if (railProgress) railProgress.textContent = progress || (count ? count + ' 条对白' : '等待导入');
   renderRailProgress();
   if (sceneTitle) sceneTitle.textContent = file || '从一句对白开始。';
-  if (sceneReference) sceneReference.textContent = count ? ('SCRIPT · ' + count + ' LINES') : 'NO SCENE';
+  if (sceneReference) sceneReference.textContent = count ? count + ' 条对白' : '';
   if (sceneProgress) sceneProgress.textContent = stats || progress || '准备就绪';
   touchSession();   // 会话标记跟随当前文档（异常退出后才知道该重开哪个文件）
 }
@@ -4340,8 +5241,8 @@ function setHeaderSaveState(label, tone = 'ready'){
 function updateContextFromRow(i){
   const p = model.getPara(i);
   if (!p) return;
-  const ref = p.id ? String(p.id) : ('LINE ' + String(i + 1).padStart(4, '0'));
-  const speaker = p.nameTr || p.name || 'NARRATION';
+  const ref = p.id ? String(p.id) : ('第 ' + (i + 1) + ' 行');
+  const speaker = p.nameTr || p.name || '旁白';
   const original = (p.content || '').replace(/\s+/g, ' ').trim();
   const ctxRef = document.getElementById('contextReference');
   const ctxSpeaker = document.getElementById('contextSpeaker');
@@ -4350,7 +5251,8 @@ function updateContextFromRow(i){
   if (ctxRef) ctxRef.textContent = ref;
   if (ctxSpeaker) ctxSpeaker.textContent = speaker;
   if (ctxOrig) ctxOrig.textContent = original || '人物名或系统文本';
-  if (sceneReference) sceneReference.textContent = 'LINE ' + String(i + 1).padStart(4, '0') + ' · ' + ref;
+  if (sceneReference) sceneReference.textContent = '第 ' + (i + 1) + ' 行' + (p.id ? ' · ' + ref : '');
+  renderInspectorSuggestions(i);
 }
 
 /* ---- 侧边栏拖拽调宽: 左缘手柄,宽度记忆在 localStorage,双击复位 ---- */
@@ -4469,14 +5371,7 @@ function revertRowToMt(i){
   const row = Array.isArray(mtBaseline.rows) ? mtBaseline.rows[i] : null;
   const text = Array.isArray(row) ? String(row[1] || '') : '';
   if (!text.trim()){ toastError('这一行没有机翻基线。'); return false; }
-  model.pushUndo([i]);
-  p.translation = p.brackets ? ('「' + text + '」') : text;
-  p.src = 'mt';    // 回滚即重新采纳机翻
-  model.recalcDone(p);
-  rdr.refreshRow(i);
-  model.scheduleAutosave();
-  updateProgress();
-  markDirty();
+  if (!writeRowTranslation(i, text, 'mt')) return false;
   renderMtDiff();  // 改完重算，让清单立即反映
   return true;
 }
@@ -4516,7 +5411,7 @@ function renderMtDiff(){
       const el = document.createElement('div');
       el.className = 'pr-item';
       const head = document.createElement('div');
-      head.style.color = 'var(--text-muted)';
+      head.style.color = 'var(--ink-mid)';
       head.textContent = c.label + ' ';
       const count = document.createElement('span');
       count.className = 'cat-count';
@@ -4551,7 +5446,7 @@ function renderMtDiff(){
     el.className = 'pr-item';
 
     const head = document.createElement('div');
-    head.style.color = 'var(--text-muted)';
+    head.style.color = 'var(--ink-mid)';
     head.textContent = '第' + (e.i + 1) + '行 ';
     const tag = document.createElement('span');
     tag.className = 'pr-tag pr-tag-suggestion';
@@ -4617,6 +5512,8 @@ async function loadTmForProject(sourcePath){
 /**
  * 把当前文档已完成行收割进记忆库并落盘。
  * 在"保存原文件"与"批量机翻"之后调用 —— 这两处是译文真正稳定下来的时点。
+ * 收割时会按行的来源归因区分**草稿（机翻）/ 已确认（人工或已通过校对）**，
+ * 自动套用只认已确认条目。
  */
 async function harvestTm(){
   const { tm: next, added } = tm.collectFromParas(model.getParas(), tmData, Date.now());
@@ -4625,37 +5522,71 @@ async function harvestTm(){
   return added;
 }
 
-/** 行菜单建议文案：精确命中优先，否则最高相似命中；都没有返回 ''（菜单项禁用） */
+/** 行菜单建议文案：已确认精确命中优先，否则最高相似命中；都没有返回 ''（菜单项禁用） */
 function tmHintFor(p){
   if (!p || p.isName) return '';
-  const hit = tm.findExact(tmData, p.content);
-  if (hit) return tm.suggestLabel(hit.dst);
-  const sim = tm.findSimilar(tmData, p.content, { limit: 1 })[0];
-  return sim ? tm.suggestLabel(sim.entry.dst) : '';
+  const hit = tm.findExact(tmData, p.content, p.name);
+  if (hit) return tm.suggestLabelWithSource(hit);
+  const sim = tm.findSimilar(tmData, p.content, { limit: 1, name: p.name })[0];
+  return sim ? tm.suggestLabelWithSource(sim.entry) : '';
 }
 
-/** 取某行可用的记忆条目（精确优先，否则最高相似） */
+/** 取某行可用的记忆条目（精确优先 —— 含草稿；否则最高相似） */
 function tmHitFor(p){
   if (!p || p.isName) return null;
-  return tm.findExact(tmData, p.content)
-    || (tm.findSimilar(tmData, p.content, { limit: 1 })[0] || {}).entry
+  return tm.findExact(tmData, p.content, p.name)
+    || (tm.findSimilar(tmData, p.content, { limit: 1, name: p.name })[0] || {}).entry
     || null;
 }
 
-/** 套用记忆到某行。相似命中也会套用 —— 是用户从菜单里主动选的，不是自动填。 */
-function applyTmToRow(i){
+/**
+ * 把一条外部建议写进某行译文。建议面板与 TM 快捷入口共用这一条写入路径 ——
+ * 撤销、归因、完成状态、自动存档与刷新只在这里实现一次，避免两套写法分叉。
+ */
+function writeRowTranslation(i, text, source){
   const p = model.getPara(i);
-  const hit = tmHitFor(p);
-  if (!hit){ toastError('翻译记忆里没有可用条目。'); return false; }
+  if (!p || p.isName) return false;
+  const value = String(text == null ? '' : text);
+  if (!value.trim()) return false;
   model.pushUndo([i]);
-  p.translation = p.brackets ? ('「' + hit.dst + '」') : hit.dst;
-  p.src = 'tm';    // 归因标记：翻译记忆复用（不计入机翻占比）
+  p.translation = p.brackets ? ('「' + value + '」') : value;
+  p.src = source;  // 归因标记：tm=记忆复用；mt=机翻基线
   model.recalcDone(p);
   rdr.refreshRow(i);
   model.scheduleAutosave();
   updateProgress();
   markDirty();
-  showToast('✅ 已套用翻译记忆：' + tm.suggestLabel(hit.dst, 30));
+  return true;
+}
+
+/** 套用记忆到某行。相似命中也会套用 —— 是用户从菜单里主动选的，不是自动填。
+ *  套用即代表用户认可这条译法 → 顺手把它标为已确认，此后同句可自动套用。 */
+function applyTmToRow(i){
+  const p = model.getPara(i);
+  const hit = tmHitFor(p);
+  if (!hit){ toastError('翻译记忆里没有可用条目。'); return false; }
+  if (!writeRowTranslation(i, hit.dst, 'tm')) return false;
+  if (!tm.isConfirmed(hit)){
+    tmData = tm.confirmEntry(tmData, hit.src, Date.now(), hit.name);
+    void tm.saveTm(tmProjectPath, tmData);
+    showToast('✅ 已套用翻译记忆并标为已确认：' + tm.suggestLabel(hit.dst, 30));
+  } else {
+    showToast('✅ 已套用翻译记忆：' + tm.suggestLabel(hit.dst, 30));
+  }
+  renderInspectorSuggestions(i);
+  return true;
+}
+
+/** 把当前行的记忆条目标为已确认（不修改译文）——"这条译法我认了，以后可自动用" */
+function confirmTmForRow(i){
+  const p = model.getPara(i);
+  const hit = p ? tm.findExact(tmData, p.content, p.name) : null;
+  if (!hit){ toastError('这一行在翻译记忆里还没有条目。\n（先翻译或套用一次，才会入库）'); return false; }
+  if (tm.isConfirmed(hit)){ toast('这条记忆已经是已确认状态。'); return true; }
+  tmData = tm.confirmEntry(tmData, hit.src, Date.now(), hit.name);
+  void tm.saveTm(tmProjectPath, tmData);
+  showToast('✅ 已确认：' + tm.suggestLabel(hit.dst, 30) + '\n此后同一句可被自动套用。');
+  renderInspectorSuggestions(i);
   return true;
 }
 
@@ -4872,13 +5803,14 @@ function resetChangeCounter(){
  * 浏览器版拿不到可落盘目录，直接跳过（不假装做了）。
  */
 async function snapshotHistory(reason){
-  const path = model.getFilePath();
+  const path = model.getFilePath() || model.getStateKey();
   if (!path || !model.getParas().length) return false;
   if (!history.shouldSnapshot(lastSnapshotAt, Date.now(), reason)) return false;
   const snap = history.buildSnapshot(model.getParas(), Date.now(), reason);
   const { saved } = await history.writeSnapshot(path, model.getFilename(), snap);
   if (saved){
     lastSnapshotAt = snap.at;
+    if (recordContext) markDirty();
     resetChangeCounter();
   }
   return saved;
@@ -4915,7 +5847,7 @@ const HISTORY_REASON_LABEL = {
 
 /** 行菜单「历史版本…」：列快照 → 选一条 → 二次确认后果 → 覆盖式恢复 */
 async function openHistoryPicker(){
-  const path = model.getFilePath();
+  const path = model.getFilePath() || model.getStateKey();
   if (!path){ toastError('浏览器版无法保存历史版本（需要能落盘的目录）。'); return; }
   const found = await history.listSnapshots(path, model.getFilename());
   if (!found.length){
@@ -5003,6 +5935,11 @@ function initRowMenu(){
         canUndo: model.canUndo(),
         mtReady: !!(prov && prov.isConfigured()),
         tmHit: tmHintFor(p),
+        // 只有"库里有这条、但还没确认"时才需要这个菜单项（已确认的点了没意义）
+        canConfirmTm: !!(p && !p.isName && (() => {
+          const hit = tm.findExact(tmData, p.content, p.name);
+          return hit && !tm.isConfirmed(hit);
+        })()),
       };
     },
     handlers: {
@@ -5025,6 +5962,7 @@ function initRowMenu(){
         mtTranslateCurrent();
       },
       applyTm: (i) => { applyTmToRow(i); },
+      confirmTm: (i) => { confirmTmForRow(i); },
       history: () => { openHistoryPicker(); },
       historySave: () => { snapshotManual(); },
       ankiAdd: (i) => { ankiAddForRow(i); },
@@ -5085,17 +6023,21 @@ function switchSidebarTab(name){
     const active = b.dataset.tab === name;
     b.classList.toggle('active', active);
     b.setAttribute('aria-selected', String(active));
+    b.tabIndex = active ? 0 : -1;
   });
   document.getElementById('panel-files').classList.toggle('hidden', name !== 'files');
   document.getElementById('panel-glossary').classList.toggle('hidden', name !== 'glossary');
   const pd = document.getElementById('panel-dict');
   if (pd) pd.classList.toggle('hidden', name !== 'dict');
+  const psg = document.getElementById('panel-suggestions');
+  if (psg) psg.classList.toggle('hidden', name !== 'suggestions');
   const pp = document.getElementById('panel-proof');
   if (pp) pp.classList.toggle('hidden', name !== 'proof');
+  if (name === 'suggestions') renderInspectorSuggestions();
   if (name === 'proof') renderProofPanel();
 }
 
-function closeUtilityPanel(){
+function closeUtilityPanel(returnFocus = false){
   const panel = document.getElementById('utilityPanel');
   const scrim = document.getElementById('utilityScrim');
   const more = document.getElementById('btnCommandPanel');
@@ -5105,9 +6047,12 @@ function closeUtilityPanel(){
     scrim.setAttribute('aria-hidden', 'true');
   }
   if (more) more.setAttribute('aria-expanded', 'false');
+  if (returnFocus && more) more.focus();
 }
 
 function setWorkspaceMode(name){
+  // 无机翻运行形态的 tab 不可重新激活（包括初始化后或程序化切换）。
+  if (name === 'translate' && document.querySelector('.workspace-nav-item[data-workspace="translate"]')?.hidden) name = 'project';
   const strip = document.getElementById('commandStrip');
   if (strip) strip.dataset.panel = name;
   document.querySelectorAll('.workspace-nav-item').forEach(b => {
@@ -5116,6 +6061,7 @@ function setWorkspaceMode(name){
     if (active) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   });
+  syncSidebarTop();
   if (name === 'search') requestAnimationFrame(() => $q.focus());
 }
 
@@ -5125,89 +6071,15 @@ function openUtilityPanel(name){
   setWorkspaceMode(name);
 }
 
-/* ---------------- 剧场视图（只读） ----------------
-   实现方式：只切一个 body class，几何形态全部交给 CSS。
-   为什么不另建一套 DOM：虚拟滚动、行高模型、搜索高亮、术语高亮、行状态
-   都已经长在 .para 这棵树上；复制一份会立刻产生两套需要同步的渲染逻辑。
-   只读是刻意的 —— 可编辑版要与输入/防抖/撤销/IME 全链路耦合，成本翻倍。
-
-   进入时**自动关闭校对模式**：批注框、漏翻条纹这些是校对的语境，
-   在阅读视图里是噪音，且它们会把气泡撑变形。 */
-
-let theaterOn = false;
-
-function toggleTheaterMode(){
-  setTheaterMode(!theaterOn);
-}
-
-function setTheaterMode(on){
-  theaterOn = !!on;
-  // 与校对模式互斥：进剧场先退出校对，避免两套装饰叠加
-  if (on && proof.isEnabled()){
-    proof.setEnabled(false);
-    const pb = document.getElementById('btnProof');
-    pb.classList.remove('active');
-    pb.setAttribute('aria-pressed', 'false');
-    pb.textContent = '校对';
-    document.getElementById('proofbar').classList.add('hidden');
-    rdr.setNotesAutoOpen(false);
-    proof.setFilter('all');
-    document.querySelectorAll('.proof-filter').forEach(b => b.classList.toggle('active', b.dataset.pf === 'all'));
-    refreshProofUI();
-  }
-  document.body.classList.toggle('theater', theaterOn);
-  const btn = document.getElementById('btnTheater');
-  if (btn){
-    btn.classList.toggle('active', theaterOn);
-    btn.setAttribute('aria-pressed', String(theaterOn));
-    btn.textContent = theaterOn ? '剧场中' : '剧场';
-  }
-  rdr.refreshAllRows();   // 行高会变（字号/内距），需要重测
-  // ⚠️ refreshAllRows 里的 autoResize 读的是**当前** scrollHeight，而此刻刚加的
-  // body.theater 样式还没应用完（同一个任务内），量到的是旧字号下的高度。
-  // 下一帧再测一次：此时剧场字号已生效，气泡才能被内容正确撑开。
-  requestAnimationFrame(() => rdr.refreshAllRows());
-  showToast(theaterOn
-    ? '🎬 剧场视图（只读）。点击任意气泡可切回表格编辑。'
-    : '已退出剧场视图');
-}
-
-/** 当前是否在剧场视图（渲染器据此跳过那些只在编辑时有意义的同步） */
-function isTheater(){ return theaterOn; }
-
-/**
- * 说话人 → 配色槽位（0 = 旁白/无色，1..3 对应 .sp-1/.sp-2/.sp-3）。
- *
- * 按**文档中首次出现的顺序**分配，保证同一角色全篇同色、且颜色不随滚动或
- * 渲染顺序漂移（逐行临时算做不到这点）。缓存随文档切换失效。
- * 只给前 3 个角色上色：再多的话配色区分度会低于可辨识阈值，不如统一色。
- */
-let _speakerSlots = null;
-function speakerSlot(name){
-  if (!name) return 0;
-  if (!_speakerSlots){
-    _speakerSlots = new Map();
-    for (const p of model.getParas()){
-      if (p && p.name && !_speakerSlots.has(p.name)){
-        // 最多 3 个槽位；第 4 个及以后返回 0（无色，用默认样式）
-        if (_speakerSlots.size < 3) _speakerSlots.set(p.name, _speakerSlots.size + 1);
-        else _speakerSlots.set(p.name, 0);
-      }
-    }
-  }
-  return _speakerSlots.get(name) || 0;
-}
-
-/** 文档切换后失效说话人配色缓存 */
-function invalidateSpeakerSlots(){ _speakerSlots = null; }
-
 function toggleMorePanel(){
   const panel = document.getElementById('utilityPanel');
   const more = document.getElementById('btnCommandPanel');
   if (!panel || !more) return;
   const open = panel.classList.contains('hidden');
-  panel.classList.toggle('hidden', !open);
+  if (!open){ closeUtilityPanel(); return; }
+  panel.classList.remove('hidden');
   more.setAttribute('aria-expanded', String(open));
+  panel.querySelector('[role="menuitem"]:not(:disabled)')?.focus();
 }
 
 function toggleStoryRail(){
@@ -5220,6 +6092,19 @@ function initWorkspaceNavigation(){
   document.getElementById('btnCommandPanel').addEventListener('click', (e) => {
     e.stopPropagation();
     toggleMorePanel();
+  });
+  document.getElementById('utilityPanel').addEventListener('click', (e) => {
+    if (e.target.closest('[role="menuitem"]')) closeUtilityPanel(true);
+  }, true);
+  document.getElementById('utilityPanel').addEventListener('keydown', (e) => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+    const items = [...document.querySelectorAll('#utilityPanel [role="menuitem"]:not(:disabled)')];
+    if (!items.length) return;
+    const at = items.indexOf(document.activeElement);
+    e.preventDefault();
+    if (e.key === 'Home') items[0].focus();
+    else if (e.key === 'End') items[items.length - 1].focus();
+    else items[(at + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length].focus();
   });
   document.addEventListener('click', (e) => {
     const panel = document.getElementById('utilityPanel');
@@ -5384,6 +6269,7 @@ function initEvents(){
   initModalA11y();
   initWorkspaceNavigation();
   document.getElementById('btnImport').addEventListener('click', importWithPicker);
+  document.getElementById('btnEmptyImport').addEventListener('click', importWithPicker);
   document.getElementById('fileInput').addEventListener('change', async (e) => {
     const f = e.target.files[0];
     if (f) await openDoc(f, f.name);
@@ -5391,6 +6277,15 @@ function initEvents(){
   });
   document.getElementById('btnSaveFile').addEventListener('click', saveDirect);
   document.getElementById('btnSave').addEventListener('click', exportFile);
+  document.getElementById('btnExportRecordPack').addEventListener('click', exportRecordPack);
+  document.getElementById('btnImportRecordPack').addEventListener('click', () => document.getElementById('recordPackFile').click());
+  document.getElementById('recordPackFile').addEventListener('change', e => {
+    const file = e.target.files[0]; e.target.value = ''; void importRecordPack(file);
+  });
+  // 点顶栏编码处 = 手动纠正读入/写出编码（自动检测是猜的，猜错要能改）
+  document.getElementById('fname').addEventListener('click', () => { void pickEncoding(); });
+  document.getElementById('fname').style.cursor = 'pointer';
+  document.getElementById('fname').title = '点击可查看/纠正文本编码';
   document.getElementById('btnRestore').addEventListener('click', restoreProgress);
   document.getElementById('btnClear').addEventListener('click', clearAll);
   document.getElementById('btnClearProgress').addEventListener('click', clearProgress);
@@ -5573,27 +6468,42 @@ function initEvents(){
     setSidebar(sb.classList.contains('hidden'));
   });
   document.getElementById('btnSidebarClose').addEventListener('click', () => setSidebar(false));
-  document.querySelectorAll('.side-tab[data-tab]').forEach(b => {
+  const sideTabs = Array.from(document.querySelectorAll('.side-tab[data-tab]'));
+  sideTabs.forEach(b => {
+    b.tabIndex = b.classList.contains('active') ? 0 : -1;
     b.addEventListener('click', () => {
       switchSidebarTab(b.dataset.tab);
       if (b.dataset.tab === 'glossary') setWorkspaceMode('glossary');
+    });
+  });
+  // Tab 列表方向键漫游(roving tabindex)：只有当前 tab 可 Tab 进入，←/→/Home/End 在组内移动。
+  sideTabs.forEach((b, index) => {
+    b.addEventListener('keydown', (e) => {
+      let next = null;
+      if (e.key === 'ArrowRight') next = sideTabs[(index + 1) % sideTabs.length];
+      else if (e.key === 'ArrowLeft') next = sideTabs[(index - 1 + sideTabs.length) % sideTabs.length];
+      else if (e.key === 'Home') next = sideTabs[0];
+      else if (e.key === 'End') next = sideTabs[sideTabs.length - 1];
+      if (!next) return;
+      e.preventDefault();
+      next.focus();
+      next.click();
     });
   });
   document.getElementById('btnPickFolder').addEventListener('click', pickFolder);
 
   // 校对模式
   document.getElementById('btnProof').addEventListener('click', toggleProofMode);
-  document.getElementById('btnTheater').addEventListener('click', toggleTheaterMode);
-  // 剧场视图是只读的：点任意气泡即切回表格编辑，不用先去找按钮。
-  // 事件委托挂在 #list（行是虚拟挂载的，逐行绑定会随滚动反复丢失）。
-  document.getElementById('list').addEventListener('click', (e) => {
-    if (!theaterOn) return;
-    if (e.target.closest('.para')) setTheaterMode(false);
-  });
   document.querySelectorAll('.proof-filter').forEach(b => {
     b.addEventListener('click', () => setProofFilter(b.dataset.pf));
   });
   document.getElementById('btnNextIssue').addEventListener('click', jumpNextIssue);
+  document.getElementById('reviewQueueKind').addEventListener('change', () => { syncReviewCategoryVisibility(); navigateReview(); });
+  reviewCategorySelect().addEventListener('change', () => navigateReview());
+  document.getElementById('btnReviewPrev').addEventListener('click', () => navigateReview(-1));
+  document.getElementById('btnReviewNext').addEventListener('click', () => navigateReview());
+  document.getElementById('btnReviewApprove').addEventListener('click', proofApproveAndNext);
+  document.getElementById('btnReturnToEditor').addEventListener('click', () => rdr.returnToEditor());
   document.getElementById('btnMissing').addEventListener('click', openMissingList);
   document.getElementById('btnProofKeys').addEventListener('click', openProofKeys);
   document.getElementById('btnKeysSave').addEventListener('click', saveProofKeys);
@@ -5646,6 +6556,7 @@ function initEvents(){
   document.getElementById('btnGlossExportCsv').addEventListener('click', glossExportCsv);
   document.getElementById('btnGlossApply').addEventListener('click', glossApply);
   document.getElementById('btnNormalize').addEventListener('click', normalizeApply);
+  document.getElementById('btnNormRules').addEventListener('click', editNormRules);
   document.getElementById('btnPersonaAdd').addEventListener('click', addPersonaEntry);
   document.getElementById('btnAnkiSet').addEventListener('click', openAnkiSettings);
   document.getElementById('personaAddName').addEventListener('keydown', (e) => {
@@ -5713,8 +6624,19 @@ function initEvents(){
 
   // 全局快捷键
   document.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
     // 校对快捷键录制(弹窗打开时优先拦截)
     if (recordingAction){ recordKeyEvent(e); return; }
+    // 模态浮层显示期间：文档级命令不得作用于背景，也不能把焦点抢出对话框。
+    // 模态内部的可编辑控件保留浏览器原生行为（含控件自己的 Ctrl+Z 文本撤销），
+    // 所以只在"非模态可编辑控件"上拦截。关闭浮层后本分支自然失效，全局命令恢复。
+    const modalOpen = document.querySelector('.modal-mask.show');
+    if (modalOpen){
+      const target = e.target;
+      const inModalEditor = !!(target && target.closest && target.closest('.modal-mask.show') && isEditableElement(target));
+      if (!inModalEditor && isGlobalCommandKey(e)) e.preventDefault();
+      return;
+    }
     const key = (e.key || '').toLowerCase();
     if ((e.ctrlKey || e.metaKey) && key === 's'){ e.preventDefault(); saveDirect(); return; }
     if ((e.ctrlKey || e.metaKey) && key === 'f'){ e.preventDefault(); openUtilityPanel('search'); $q.select(); return; }
@@ -5723,14 +6645,18 @@ function initEvents(){
     if ((e.ctrlKey || e.metaKey) && key === 'y'){ e.preventDefault(); doRedo(); return; }
     if (e.key === 'F3'){ e.preventDefault(); gotoMatch(e.shiftKey ? -1 : 1); return; }
     if (e.key === 'F2'){ e.preventDefault(); jumpToNextUntranslated(); return; }
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter'){ e.preventDefault(); replaceCurrent(); return; }
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === 'Enter'){
+      if (e.target === $q || e.target === $r){ e.preventDefault(); replaceCurrent(); }
+      else if (e.target?.classList?.contains('trans') && !NO_MT_BUILD){ e.preventDefault(); mtTranslateCurrent(); }
+      return;
+    }
     if (e.key === 'Escape' && !document.querySelector('.modal-mask.show')){
       const panel = document.getElementById('utilityPanel');
-      if (!panel.classList.contains('hidden')){ closeUtilityPanel(); return; }
+      if (!panel.classList.contains('hidden')){ e.preventDefault(); closeUtilityPanel(true); return; }
       const rail = document.getElementById('storyRail');
       if (rail.classList.contains('is-open')){ rail.classList.remove('is-open'); return; }
     }
-    // 校对快捷键: 单键(q/w/a)需校对模式开启且焦点在译文/译名框;组合键任意位置可用
+    // 校对组合键可在编辑时使用；旧单键配置不能抢占可编辑输入框。
     if (proof.isEnabled() || Object.values(proof.proofKeys).some(k => k && /^(Ctrl|Shift|Alt)\+/.test(k))){
       for (const act of PROOF_KEY_ACTIONS){
         const combo = proof.proofKeys[act.id];
@@ -5740,8 +6666,8 @@ function initEvents(){
         const inInput = target && target.classList && (target.classList.contains('trans') || target.classList.contains('pname-input'));
         if (act.id === 'toggleMode'){
           if (isPlain && inInput) continue; // 单键在输入框里不触发开关
-        } else if (!proof.isEnabled() || (isPlain && !inInput)){
-          continue; // 其余动作需校对模式 + (单键需在输入框内)
+        } else if (!proof.isEnabled() || (isPlain && (!inInput || !e.target.readOnly))){
+          continue; // 普通字母不抢占可编辑输入框；组合快捷键仍可用。
         }
         e.preventDefault();
         act.fn();
@@ -5754,6 +6680,11 @@ function initEvents(){
     syncSidebarTop();
     rdr.remeasureAll();
   });
+
+  // Web Font 加载完成后字宽会变，已测行高随之失效；重测一次，避免虚拟列表累计偏移。
+  if (document.fonts && document.fonts.ready){
+    document.fonts.ready.then(() => rdr.remeasureAll()).catch(() => {});
+  }
 }
 
 function afterUndoRedo(){
@@ -5920,9 +6851,10 @@ async function init(){
   initSidebarResize(); // 侧边栏拖拽调宽(恢复上次宽度)
   initPalette();       // 命令面板 Ctrl+Shift+P(触发现有按钮,不重写业务)
   initRowMenu();       // 段落行右键菜单(译文框保留原生菜单)
-  syncSidebarTop();
+  initWorkspaceHeightSync();
   updateUndoButtons();
-  setSidebar(true);
+  updateSaveCommandLabel();
+  setSidebar(window.innerWidth > 900);
   syncEditorialMeta();
   await checkRecovery();  // 上次未正常关闭 → 提示恢复进度
   // 开发调试: ?autoload=<文件名> 在 Vite dev 下直接 fetch 加载本地文本(生产 file:// 下无参数不触发)
@@ -5968,14 +6900,17 @@ async function init(){
       .then(async t => {
         const parsed = parseFile(t);
         model.setParas(parsed.paras);
-        model.setFileInfo({ name: autoload, path: null, nl: parsed.nl, trailingBlank: parsed.trailingBlank });
+        model.setFileInfo({ name: autoload, path: null, nl: parsed.nl, trailingBlank: parsed.trailingBlank, encoding: '' });
         const applied = gloss.applyNames(model.getParas(), glossData.names);
         if (applied) model.scheduleAutosave();
-        document.getElementById('fname').textContent = '当前文件：' + autoload;
+        const autoEl = document.getElementById('fname');
+        autoEl.textContent = autoload;
+        delete autoEl.dataset.base;
         rdr.fullRender();
         recomputeMatchesUI(true);
         rdr.focusIdx(0);
         updateUndoButtons();
+        updateSaveCommandLabel();
         updateProgress(); // autoload 加载后刷新字数统计
       })
       .catch(err => console.error('[autoload] 加载失败:', err));

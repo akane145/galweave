@@ -217,6 +217,9 @@ function onKeydown(e) {
 export function openPalette() {
   const mask = ensureDom();
   if (!mask) return false;
+  // 模态浮层显示期间不打开：命令面板能触达清空/撤销这类文档级动作，
+  // 盖在模态之上会绕过模态的键盘隔离（R2 同类漏洞），且焦点会离开对话框。
+  if (typeof document !== 'undefined' && document.querySelector('.modal-mask.show')) return false;
   mask.style.display = '';
   if (inputEl) { inputEl.value = ''; }
   sel = 0;

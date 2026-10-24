@@ -232,7 +232,7 @@ export async function loadBaseline(docPath, total){
   if (!docPath) return emptyBaseline();
   try {
     const fsx = await import('./fs.js');
-    if (fsx.isTauri()){
+    if (fsx.isTauri() && fsx.isAbsPath(docPath)){
       const raw = await fsx.readGalweaveFile(docPath, FILE);
       if (raw){ try { return normalizeBaseline(JSON.parse(raw), total); } catch (e) { return emptyBaseline(); } }
       return emptyBaseline();
@@ -247,7 +247,7 @@ export async function saveBaseline(docPath, baseline){
   const payload = { version: MT_BASELINE_VERSION, at: baseline.at, total: baseline.total, rows: baseline.rows };
   try {
     const fsx = await import('./fs.js');
-    if (fsx.isTauri()){
+    if (fsx.isTauri() && fsx.isAbsPath(docPath)){
       return await fsx.writeGalweaveFile(docPath, FILE, JSON.stringify(payload));
     }
     await fsx.kvPut(LS_PREFIX + docPath, payload);

@@ -12,6 +12,12 @@ const PROJECT_FILE = 'glossary.json'; // 项目目录术语表文件名
 
 let cache = null;       // 内存缓存
 let projectDir = null;  // 当前项目目录(为空 = 全局术语表)
+let portableKey = '';
+export function activateGlossary(value, dir, key = ''){
+  cache = cloneGloss(value);
+  projectDir = key ? null : (normalizeDirPath(dir) || null);
+  portableKey = key;
+}
 
 // 术语表结构版本。加 personas 时**不升版本号**：新字段是可选增量，
 // 旧文件缺 personas 时按空表处理即可，无需迁移动作（见 cloneGloss 的兜底）。
@@ -83,6 +89,7 @@ function writeLocalFallback(g){
  * 无项目目录 → 全局术语表。
  */
 export async function loadGlossaryForProject(dir){
+  portableKey = '';
   projectDir = normalizeDirPath(dir) || null; // 规范化(统一 /),同一目录不同斜杠视为同一项目
   if (projectDir){
     const raw = await readText(projectGlossaryPath(projectDir));
@@ -101,6 +108,11 @@ export async function loadGlossaryForProject(dir){
 /** 保存术语表到当前项目目录;项目不可写 → 全局 → localStorage */
 export async function saveGlossaryForProject(gloss){
   cache = cloneGloss(gloss);
+  if (portableKey){
+    const { kvPut } = await import('./fs.js');
+    await kvPut('record-gloss:' + portableKey, cache);
+    return;
+  }
   if (projectDir){
     try {
       const { writeTextFileSource } = await import('./fs.js');
@@ -122,7 +134,7 @@ export async function saveGlossaryForProject(gloss){
 export function getProjectDir(){ return projectDir; }
 
 /** 内存缓存隔离(测试用) */
-export function resetGlossaryState(){ cache = null; projectDir = null; }
+export function resetGlossaryState(){ cache = null; projectDir = null; portableKey = ''; }
 
 // 兼容旧导出名(无参加载=全局;保存到当前项目)
 export const loadGlossary = loadGlossaryForProject;

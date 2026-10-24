@@ -41,9 +41,9 @@ let activeForFile = false;  // 当前文件是否可写校对数据
 let saveTimer = null;
 let saveChain = Promise.resolve();
 let settleMap = new Map();  // 行编辑结算计时器
-export let proofKeys = { approve: 'q', issue: 'w', annotate: 'a', nextIssue: '', toggleMode: '' };
+export let proofKeys = defaultKeys();
 
-export function defaultKeys(){ return { approve: 'q', issue: 'w', annotate: 'a', nextIssue: '', toggleMode: '' }; }
+export function defaultKeys(){ return { approve: 'Alt+Enter', issue: 'Alt+W', annotate: 'Alt+A', nextIssue: '', toggleMode: '' }; }
 export function isEnabled(){ return enabled; }
 export function setEnabled(v){
   if (!v) settleAll();
@@ -184,6 +184,7 @@ export function settleInput(i){
   if (!p) return;
   recordChange(i, 'translation', s.beforeT, p.translation, 'edit');
   recordChange(i, 'nameTr', s.beforeN, p.nameTr, 'edit');
+  if (s.beforeT !== p.translation || s.beforeN !== p.nameTr) demoteApproved(i);
 }
 
 export function clearSettleTimers(){

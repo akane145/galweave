@@ -52,6 +52,25 @@ registerProvider(NotConfiguredProvider);
    共享 LLM 传输层(OpenAI 兼容 chat/completions + llama.cpp 兼容)
    ============================================================ */
 
+/**
+ * 请求超时（毫秒）。**覆盖从发起到正文读完的整个过程**，不只是响应头。
+ *
+ * 90 秒的由来：本地 Sakura 冷启动要加载模型，7B 模型首次推理常常 30–60 秒；
+ * 定太短会把正常的冷启动判成失败。云端接口正常远快于此，这个值相当于兜底。
+ * 慢机器/长文本可在机翻配置里调大（存 `mt.providers.*.timeoutMs`）。
+ */
+export const MT_TIMEOUT_DEFAULT = 90000;
+export const MT_TIMEOUT_MIN = 5000;
+export const MT_TIMEOUT_MAX = 600000;
+
+/** 归一化超时（毫秒）。非法值回退默认，其余钳到 5–600 秒 */
+export function normalizeTimeoutMs(n){
+  if (n === null || n === undefined || n === '') return MT_TIMEOUT_DEFAULT;
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return MT_TIMEOUT_DEFAULT;
+  return Math.min(MT_TIMEOUT_MAX, Math.max(MT_TIMEOUT_MIN, Math.round(v)));
+}
+
 /** 接口地址归一化 → {base}/v1/chat/completions(已含版本或 chat/completions 则原样) */
 export function normalizeApiUrl(base){
   let s = String(base || '').trim().replace(/\/+$/, '');
@@ -155,40 +174,157 @@ class HttpError extends Error {
   }
 }
 
-/** 非流式/流式 POST 到 chat/completions */
+/**
+ * 用户主动停止（不是失败）。单独一个类型，因为 UI 对两者的处理完全相反：
+ * 停止要静默保留已完成结果，失败要进失败清单等重试。
+ * 把它混进普通 Error 会让"我按了停止"被报成一片红色错误。
+ */
+export class MtAbortError extends Error {
+  constructor(msg){
+    super(msg || '已停止机翻');
+    this.name = 'MtAbortError';
+    this.aborted = true;
+  }
+}
+
+/** 该错误是不是"用户主动停止" */
+export function isMtAbort(e){
+  return !!(e && (e.aborted === true || e.name === 'MtAbortError'));
+}
+
+/** 把一个 AbortSignal 桥接到内部控制器（同时支持外部已中止的情况） */
+function linkAbort(internal, external){
+  if (!external) return () => {};
+  if (external.aborted){ internal.abort(); return () => {}; }
+  const onAbort = () => internal.abort();
+  external.addEventListener('abort', onAbort);
+  return () => external.removeEventListener('abort', onAbort);
+}
+
+/**
+ * 建一个"中止闸门"：把任意 promise 与截止时间赛跑。
+ *
+ * ⚠️ **只调 `ctrl.abort()` 是不够的**。`fetch` 自身会因 signal 中止，但**正文读取**
+ * （`res.json()` / 流式 reader）返回的 promise 未必响应 signal —— 服务返回了响应头
+ * 然后挂住、或某些 polyfill 不转发中止事件，`await` 就会永远挂着：请求不返回、
+ * 「停止」按了也没用，用户只能杀进程。所以截止时间必须由这里的 race 强制兑现。
+ *
+ * @param {AbortSignal} signal 内部控制器
+ * @param {{timeoutMs:number, timedOut:()=>boolean, userAborted:()=>boolean}} meta 中止原因
+ */
+function makeAbortGate(signal, meta){
+  let rejectGate = null;
+  const gate = new Promise((_, reject) => { rejectGate = reject; });
+  gate.catch(() => {});   // 无人订阅时也不产生 unhandled rejection 告警
+  const onAbort = () => {
+    const err = failureOf(meta);
+    if (err) rejectGate(err);
+  };
+  if (signal.aborted) onAbort();
+  else signal.addEventListener('abort', onAbort, { once: true });
+  return {
+    /**
+     * 让 p 受截止时间约束。
+     * ⚠️ **gate 必须排在数组第一位**。"两边都已 settle"时 Promise.race 由数组顺序决定胜负：
+     * 若把请求 promise 放前面，一个"已经中止"的请求仍会以正常结果胜出 —— 停止就失效了。
+     */
+    guard: (p) => Promise.race([gate, Promise.resolve(p)]),
+    /** 已经中止/超时就立刻抛，用于在发请求**之前**就拦住（别白白发一次） */
+    throwIfAborted(){
+      const err = failureOf(meta);
+      if (err) throw err;
+    },
+    cleanup: () => signal.removeEventListener('abort', onAbort),
+  };
+}
+
+/** 由中止原因元信息构造对用户有意义的错误；非中止状态返回 null */
+function failureOf(meta){
+  if (!meta) return null;
+  if (meta.userAborted()) return new MtAbortError();
+  if (meta.timedOut()) return new Error('翻译请求超时（超过 ' + Math.round(meta.timeoutMs / 1000) + ' 秒未完成）。'
+    + '本地模型首次加载或长文本可能较慢，可在机翻配置里调大超时，或先停止再重试。');
+  return null;
+}
+
+/** 统一的"带截止时间的 fetch"上下文，postChat 与 postLegacyCompletion 共用 */
+function openGuardedRequest(opt){
+  const timeoutMs = opt.timeoutMs || 90000;
+  const ctrl = new AbortController();
+  const unlink = linkAbort(ctrl, opt.signal);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, timeoutMs);
+  const meta = {
+    timeoutMs,
+    timedOut: () => timedOut,
+    userAborted: () => !!(opt.signal && opt.signal.aborted),
+  };
+  const gate = makeAbortGate(ctrl.signal, meta);
+  return {
+    ctrl,
+    gate,
+    meta,
+    /** 把内部原因（停止/超时）翻译成用户能懂的错误；没有特别原因则返回 null */
+    known: () => failureOf(meta),
+    close(){ clearTimeout(timer); gate.cleanup(); unlink(); },
+  };
+}
+
+/**
+ * 非流式/流式 POST 到 chat/completions。
+ * 超时与用户停止**覆盖整个请求生命周期，含正文读取**（见 makeAbortGate 说明）。
+ */
 async function postChat(url, body, headers, opt){
-  let res;
+  const req = openGuardedRequest(opt);
+  const { gate } = req;
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), opt.timeoutMs || 90000);
+    // 已经停止/超时 → 直接抛，不必白发一次请求（本地模型也会白算一轮）
+    gate.throwIfAborted();
+    let res;
     try {
-      res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: ctrl.signal });
-    } finally { clearTimeout(timer); }
+      res = await gate.guard(fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: req.ctrl.signal }));
+    } catch (e){
+      const known = req.known();
+      if (known) throw known;
+      throw new Error('无法连接翻译服务(' + (opt.base || '') + ')。请确认服务已启动并检查地址。');
+    }
+    if (!res.ok){
+      if (res.status === 404 && opt.legacyCompletion) throw new HttpError('端点不存在', 404);
+      let detail = '';
+      try { detail = (await gate.guard(res.text())).slice(0, 200); } catch (e) {
+        // 读正文时被停止/超时 → 那个原因比"读不到正文"更该报给用户
+        const known = req.known();
+        if (known) throw known;
+      }
+      throw new Error('翻译请求失败 (HTTP ' + res.status + ')' + (detail ? ': ' + detail : ''));
+    }
+    // 正文读取同样受截止时间约束 —— 这正是本次要修的漏洞
+    if (opt.streaming && opt.onChunk){
+      return await gate.guard(parseSseStream(res, opt.onChunk));
+    }
+    return parseGptResponse(await gate.guard(res.json()));
   } catch (e){
-    throw new Error('无法连接翻译服务(' + (opt.base || '') + ')。请确认服务已启动并检查地址。');
+    // 中止/超时的语义错误优先于底层异常（裸 AbortError 对用户没有意义）
+    const known = req.known();
+    if (known && !isMtAbort(e)) throw known;
+    throw e;
+  } finally {
+    req.close();
   }
-  if (!res.ok){
-    if (res.status === 404 && opt.legacyCompletion) throw new HttpError('端点不存在', 404);
-    let detail = '';
-    try { detail = (await res.text()).slice(0, 200); } catch (e) {}
-    throw new Error('翻译请求失败 (HTTP ' + res.status + ')' + (detail ? ': ' + detail : ''));
-  }
-  if (opt.streaming && opt.onChunk){
-    return await parseSseStream(res, opt.onChunk);
-  }
-  return parseGptResponse(await res.json());
 }
 
 /** 回退到 llama.cpp /completion 端点(旧式,不识别 chat/completions 的 server) */
 async function postLegacyCompletion(opt){
   const base = String(opt.base || '').replace(/\/+$/, '');
   const p = opt.params || {};
-  let res;
+  const req = openGuardedRequest(opt);
+  const { gate } = req;
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), opt.timeoutMs || 90000);
+    // 已经停止/超时 → 直接抛，不必白发一次请求
+    gate.throwIfAborted();
+    let res;
     try {
-      res = await fetch(base + '/completion', {
+      res = await gate.guard(fetch(base + '/completion', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -199,24 +335,33 @@ async function postLegacyCompletion(opt){
           repeat_penalty: 1.0,
           stop: ['<|im_end|>']
         }),
-        signal: ctrl.signal,
-      });
-    } finally { clearTimeout(timer); }
+        signal: req.ctrl.signal,
+      }));
+    } catch (e){
+      const known = req.known();
+      if (known) throw known;
+      throw new Error('无法连接翻译服务(' + base + ')。请确认服务已启动并检查地址。');
+    }
+    if (!res.ok){
+      let detail = '';
+      try { detail = (await gate.guard(res.text())).slice(0, 200); } catch (e) { /* 只报状态码 */ }
+      throw new Error('翻译请求失败 (HTTP ' + res.status + ')' + (detail ? ': ' + detail : ''));
+    }
+    // 同样：正文读取受截止时间保护
+    return parseGptResponse(await gate.guard(res.json()));
   } catch (e){
-    throw new Error('无法连接翻译服务(' + base + ')。请确认服务已启动并检查地址。');
+    const known = req.known();
+    if (known && !isMtAbort(e)) throw known;
+    throw e;
+  } finally {
+    req.close();
   }
-  if (!res.ok){
-    let detail = '';
-    try { detail = (await res.text()).slice(0, 200); } catch (e) {}
-    throw new Error('翻译请求失败 (HTTP ' + res.status + ')' + (detail ? ': ' + detail : ''));
-  }
-  return parseGptResponse(await res.json());
 }
 
 /**
  * OpenAI 兼容 chat/completions 调用(两引擎共用)。
  * opt: { base, apiKey?, model, messages, params:{temperature,topP,maxTokens,frequencyPenalty?},
- *        streaming?, onChunk?, timeoutMs?, legacyCompletion?, legacyPrompt? }
+ *        streaming?, onChunk?, timeoutMs?, legacyCompletion?, legacyPrompt?, signal? }
  */
 export async function chatCompletions(opt){
   const url = normalizeApiUrl(opt.base);
@@ -231,6 +376,7 @@ export async function chatCompletions(opt){
   try {
     return await postChat(url, body, headers, opt);
   } catch (e){
+    if (isMtAbort(e)) throw e;   // 用户停止不做 404 回退（那会再发一次请求）
     if (opt.legacyCompletion && e instanceof HttpError && e.httpStatus === 404){
       return postLegacyCompletion(opt);
     }
@@ -256,6 +402,7 @@ const LLM_DEFAULTS = {
   streaming: false,           // SSE 流式输出(翻译当前行时逐字显示)
   contextTurns: 3,            // 多轮上下文: 附最近 N 句原文/译文历史(0=关),批量/单句连贯
   useGlossary: true,
+  timeoutMs: MT_TIMEOUT_DEFAULT,
 };
 
 /** 系统提示词: 自定义原样使用;否则默认模板并替换语言占位符 */
@@ -368,6 +515,8 @@ const SAKURA_DEFAULTS = {
   temperature: 0.1,
   topP: 0.3,
   maxTokens: 512,
+  // 本地模型冷启动慢,默认给足时间;用户可在配置里调
+  timeoutMs: MT_TIMEOUT_DEFAULT,
 };
 
 /** 按模型名自动识别提示词版本;未知回退 v1.0 */
@@ -429,16 +578,12 @@ export function buildSakuraUserTextV(text, glossaryText, version){
   return buildSakuraUserText(text, glossaryText);
 }
 
-/** OpenAI 兼容消息数组(按版本)。contextBlock 非空时前置为语境段。 */
-export function buildSakuraMessagesV(text, glossaryText, version, contextBlock){
+/** OpenAI 兼容消息数组(按版本)。Sakura 专用模板不注入通用语境块。 */
+export function buildSakuraMessagesV(text, glossaryText, version){
   const v = version || 'v1.0';
-  const body = buildSakuraUserTextV(text, glossaryText, v);
-  // Sakura 各版本的 user 模板是官方固定形状，**不改结构**，只在前面对一段语境说明。
-  // 后接换行分隔，避免语境段与模板指令黏成一句被模型误读。
-  const content = contextBlock ? (contextBlock + '\n\n' + body) : body;
   return [
     { role: 'system', content: sakuraSystemForVersion(v) },
-    { role: 'user', content }
+    { role: 'user', content: buildSakuraUserTextV(text, glossaryText, v) }
   ];
 }
 
@@ -465,6 +610,33 @@ export function buildSakuraPrompt(text, glossaryText){
   return IM_START + 'system\n' + SAKURA_SYSTEM + IM_END + '\n' +
          IM_START + 'user\n' + user + IM_END + '\n' +
          IM_START + 'assistant\n';
+}
+
+/** 把版本化消息序列化为旧 llama.cpp /completion 使用的 ChatML。 */
+function messagesToChatMl(messages){
+  return messages.map(message => IM_START + message.role + '\n' + message.content + IM_END + '\n').join('')
+    + IM_START + 'assistant\n';
+}
+
+const SAKURA_INSTRUCTION_MARKERS = [
+  '根据以下术语表（可以为空）：',
+  '参考以下术语表（可为空，格式为src->dst #备注）',
+  '将下面的日文文本翻译成中文：',
+  '将下面的日文文本根据对应关系和备注翻译成中文：',
+  '将下面的日文文本根据上述术语表的对应关系和备注翻译成中文：',
+  '将下面的文本从日文翻译成简体中文：',
+  '以下是上下文的参考，**只用于理解语境**（人物关系、称谓、语气、前后呼应）。',
+  '请只输出【本次要翻译的是这一句】那一条的译文，不要翻译或复述其余内容：',
+  '【本次要翻译的是这一句】',
+];
+
+/** 检查结果是否把应用生成的指令模板复述成译文。 */
+function validateSakuraTranslation(result, source){
+  const repeated = SAKURA_INSTRUCTION_MARKERS.find(marker => result.includes(marker) && !source.includes(marker));
+  if (repeated){
+    throw new Error('Sakura 返回内容包含提示词指令，已拒绝作为译文写入。');
+  }
+  return result;
 }
 
 // 解析两种响应的 content(Sakura 版错误文案)
@@ -529,9 +701,10 @@ function normalizeProviderConfig(id, cfg){
     c.topP = Number.isFinite(Number(c.topP)) ? Number(c.topP) : d.topP;
     c.maxTokens = Number.isFinite(Number(c.maxTokens)) && c.maxTokens > 0 ? Number(c.maxTokens) : d.maxTokens;
   }
-  // 批量策略与 Provider 无关，两个引擎都要归一化（Q6）
+  // 批量策略与超时与 Provider 无关，两个引擎都要归一化（Q6）
   c.batchMode = normalizeBatchMode(c.batchMode);
   c.batchSize = normalizeBatchSize(c.batchSize);
+  c.timeoutMs = normalizeTimeoutMs(c.timeoutMs);
   return c;
 }
 
@@ -604,27 +777,38 @@ export function extractQuoteContent(text){
   return s;
 }
 
+/** 单次调用的超时：显式给出就用它（测试与临时放宽用），否则取配置值 */
+function resolveTimeout(opts, conf){
+  if (opts && opts.timeoutMs !== undefined && opts.timeoutMs !== null && opts.timeoutMs !== ''){
+    const v = Number(opts.timeoutMs);
+    if (Number.isFinite(v) && v > 0) return v;
+  }
+  return conf && conf.timeoutMs ? conf.timeoutMs : MT_TIMEOUT_DEFAULT;
+}
+
 /** Sakura 核心调用(按配置版本构造提示词;流式时 onChunk 逐块回调) */
-async function sakuraTranslateCore(text, glossary, onChunk, context){
+async function sakuraTranslateCore(text, glossary, onChunk, context, opts){
   const conf = currentSakuraConf();
   if (!conf.host) throw new Error('尚未配置 Sakura 本地服务。请先打开「⚙ 机翻配置」。');
   const version = resolveSakuraVersion(conf.promptVersion, conf.model);
   const gt = (conf.useGlossary && glossary && version !== 'v0.9')
     ? buildGlossaryText(glossary.names, glossary.terms, version) : '';
   const content = extractQuoteContent(text);
-  // 语境只发「」内正文对应的邻居原文即可；context 由调用方按文档顺序组织好
-  const ctx = context || '';
-  return chatCompletions({
+  const messages = buildSakuraMessagesV(content, gt, version);
+  const result = await chatCompletions({
     base: conf.host,
     apiKey: '',
     model: conf.model || 'sakura',
-    messages: buildSakuraMessagesV(content, gt, version, ctx),
+    messages,
     params: { temperature: conf.temperature, topP: conf.topP, maxTokens: conf.maxTokens },
     streaming: !!(conf.streaming && onChunk),
     onChunk,
     legacyCompletion: true,
-    legacyPrompt: buildSakuraPrompt(content, gt),
+    legacyPrompt: messagesToChatMl(messages),
+    timeoutMs: resolveTimeout(opts, conf),
+    signal: opts && opts.signal,
   });
+  return validateSakuraTranslation(result, content);
 }
 
 /** 翻译入口(供 UI 调用): 携带当前项目术语表;对话只发「」内原文 */
@@ -636,10 +820,14 @@ const SakuraProvider = {
   id: 'sakura',
   name: 'Sakura 本地',
   isConfigured(){ const c = configs.sakura; return !!(c && c.host); },
-  async translate(text, glossary, onChunk, context){ return sakuraTranslateCore(text, glossary, onChunk, context); },
-  async translateBatch(texts, glossary, context){
+  async translate(text, glossary, onChunk, context, opts){ return sakuraTranslateCore(text, glossary, onChunk, context, opts); },
+  async translateBatch(texts, glossary, context, opts){
     const out = [];
-    for (const t of texts) out.push(await sakuraTranslateCore(t, glossary, null, context)); // 串行
+    for (const t of texts){
+      // 已停止就别再对后面的行发请求（省下的是本地算力和等待）
+      if (opts && opts.signal && opts.signal.aborted) throw new MtAbortError();
+      out.push(await sakuraTranslateCore(t, glossary, null, context, opts)); // 串行
+    }
     return out;
   }
 };
@@ -671,7 +859,7 @@ const LlmProvider = {
     const c = configs.llm;
     return !!(c && c.baseUrl && c.model);
   },
-  async translate(text, glossary, onChunk, context){
+  async translate(text, glossary, onChunk, context, opts){
     const conf = configs.llm || LLM_DEFAULTS;
     if (!conf.baseUrl || !conf.model) throw new Error('尚未配置通用大模型接口。请在「⚙ 机翻配置」中填写接口地址与模型。');
     const system = buildLlmSystemPrompt(conf.systemPrompt);
@@ -693,6 +881,8 @@ const LlmProvider = {
       },
       streaming,
       onChunk,
+      timeoutMs: resolveTimeout(opts, conf),
+      signal: opts && opts.signal,
     });
     if (turns > 0){
       llmContext.push({ user: content, assistant: out });
@@ -700,20 +890,24 @@ const LlmProvider = {
     }
     return out;
   },
-  async translateBatch(texts, glossary, context){
+  async translateBatch(texts, glossary, context, opts){
     const out = [];
-    for (const t of texts) out.push(await this.translate(t, glossary, null, context)); // 串行,批量复用上下文
+    for (const t of texts){
+      if (opts && opts.signal && opts.signal.aborted) throw new MtAbortError();
+      out.push(await this.translate(t, glossary, null, context, opts)); // 串行,批量复用上下文
+    }
     return out;
   }
 };
 
 registerProvider(LlmProvider);
 
-/** 翻译一段文本。未配置时抛错,由调用方提示用户。onChunk 可选(流式逐块)。 */
-export async function translateText(providerId, text, glossary, onChunk, context){
+/** 翻译一段文本。未配置时抛错,由调用方提示用户。onChunk 可选(流式逐块)。
+ *  opts.signal 可选：用户停止时中断在途请求（AbortSignal）。 */
+export async function translateText(providerId, text, glossary, onChunk, context, opts){
   const p = getProvider(providerId) || NotConfiguredProvider;
   if (!p.isConfigured()) throw new Error('尚未配置机器翻译服务。请在「⚙ 机翻配置」中配置。');
-  return p.translate(text, glossary, onChunk, context);
+  return p.translate(text, glossary, onChunk, context, opts);
 }
 
 /** 受保护 token 出错时的中文说法（换行类丢失已在 restoreProtectedTokens 内回填，不在错误里）。 */
@@ -749,12 +943,12 @@ export function stripControlChars(text){
 }
 
 /** 翻译正文并严格保护 Galgame 行内控制标签；标签异常时拒绝返回可写入结果。 */
-export async function translateTextProtected(providerId, text, glossary, context){
+export async function translateTextProtected(providerId, text, glossary, context, opts){
   const mask = maskProtectedTokens(text);
   // 双向清洗：控制字符（含换行）不进模型，也不进译文。
   // 此时引擎标签已被遮蔽成占位符（占位符本身不含控制字符），清洗不伤保护体系；
   // 批量协议的换行在逐行清洗**之后**才拼装，所以也不会被误删。
-  const translated = await translateText(providerId, stripControlChars(mask.text), glossary, null, context);
+  const translated = await translateText(providerId, stripControlChars(mask.text), glossary, null, context, opts);
   const restored = restoreProtectedTokens(stripControlChars(String(translated)), mask);
   if (!restored.ok){
     const detail = [...new Set(restored.errors.map(describeTokenError))].join('、');
@@ -764,10 +958,10 @@ export async function translateTextProtected(providerId, text, glossary, context
 }
 
 /** 批量翻译。未配置时抛错。 */
-export async function translateBatch(providerId, texts, glossary, context){
+export async function translateBatch(providerId, texts, glossary, context, opts){
   const p = getProvider(providerId) || NotConfiguredProvider;
   if (!p.isConfigured()) throw new Error('尚未配置机器翻译服务。请在「⚙ 机翻配置」中配置。');
-  return p.translateBatch(texts, glossary, context);
+  return p.translateBatch(texts, glossary, context, opts);
 }
 
 /* ============================================================
@@ -836,16 +1030,18 @@ export function parseNumberedLines(text, n){
 /**
  * 批次翻译：把 N 行合成一次请求。
  * 行内受保护标签**逐行遮蔽后再拼接**，返回时逐行还原；任一行还原失败即整批放弃。
+ * @param {object} [opts] { signal } —— 用户停止时中断在途请求
  * @returns {Promise<string[]|null>} 成功返回与 texts 等长的译文数组；失败返回 null（调用方回退逐行）
  */
-export async function translateLinesBatched(providerId, texts, glossary, context){
+export async function translateLinesBatched(providerId, texts, glossary, context, opts){
   const lines = Array.isArray(texts) ? texts : [];
   if (!lines.length) return [];
+  if (opts && opts.signal && opts.signal.aborted) throw new MtAbortError();
   const masks = lines.map(t => maskProtectedTokens(String(t == null ? '' : t)));
   // 逐行清洗后再拼装：行内混入换行/控制符会直接破坏「序号. 译文」的对齐，
   // 是批次整批作废的常见原因，所以在拼包之前就掐掉。
   const payload = buildBatchUserText(masks.map(m => stripControlChars(m.text)));
-  const raw = await translateText(providerId, payload, glossary, null, context);
+  const raw = await translateText(providerId, payload, glossary, null, context, opts);
   const parsed = parseNumberedLines(raw, lines.length);
   if (!parsed) return null;                 // 行数/序号对不上 → 整批放弃
   const out = [];

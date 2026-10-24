@@ -1,20 +1,23 @@
 # Galweave
 
-视觉小说（galgame）日译中辅助翻译与校对工具。当前发布版本：**v5.3.1**（2026-09-17）。
+视觉小说（galgame）日译中辅助翻译与校对工具。当前发布版本：**v5.11.1**（2026-10-25）。
 
 ## 下载
 
-前往 [GitHub Releases](https://github.com/akane145/galweave/releases/tag/v5.3.1) 下载 Windows x64 程序：
+前往 [GitHub Releases](https://github.com/akane145/galweave/releases/tag/v5.11.1) 下载：
 
-- Galweave_5.3.1_x64-setup.exe：安装版。
-- Galweave_5.3.1_x64.exe：直接运行版，需要 WebView2 运行时。
+- Galweave_5.11.1_x64-setup.exe：Windows x64 安装版。
+- Galweave_5.11.1_x64_en-US.msi：Windows x64 MSI 安装包。
+- Galweave_5.11.1_x64.exe：直接运行版，需要 WebView2 运行时。
+- Galweave_5.11.1_browser.zip：浏览器版，解压后保留全部文件并打开 index.html。
+- SHA256SUMS.txt：下载文件的 SHA-256 校验值。
 
 ## 主要功能
 
 - 原文只读，译文与译名编辑；搜索替换、撤销重做、自动保存与本地版本快照。
 - 文本格式识别、规范化与还原，保护原文及引擎标记。
 - MDX/MDD、JSON、HTTP 词典，项目术语、快捷片段与翻译记忆。
-- 通用大模型与 Sakura 机翻，支持术语、上下文及批量翻译。
+- 通用大模型与 Sakura 机翻，支持术语及批量翻译；上下文参考与角色人设用于通用大模型，Sakura 使用专用提示词。
 - 校对状态、批注、漏翻检查与修改对比；每行每字段只保留首次修改前和最新文本，中途输入自动合并，不设 500 条上限，列表完整展示。
 - 校对意见导出 Markdown、选定改译收藏到 Obsidian。
 - 多标签编辑、主题、字体和背景设置。

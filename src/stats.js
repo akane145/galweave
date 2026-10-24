@@ -250,7 +250,7 @@ export async function loadStats(docPath){
   if (!docPath) return emptyStore();
   try {
     const fsx = await import('./fs.js');
-    if (fsx.isTauri()){
+    if (fsx.isTauri() && fsx.isAbsPath(docPath)){
       const raw = await fsx.readGalweaveFile(docPath, FILE);
       if (raw){ try { return normalizeStore(JSON.parse(raw)); } catch (e) { return emptyStore(); } }
       return emptyStore();
@@ -266,7 +266,7 @@ export async function saveStats(docPath, store){
   const payload = { version: STATS_VERSION, updatedAt: new Date().toISOString(), ...normalizeStore(store) };
   try {
     const fsx = await import('./fs.js');
-    if (fsx.isTauri()){
+    if (fsx.isTauri() && fsx.isAbsPath(docPath)){
       return await fsx.writeGalweaveFile(docPath, FILE, JSON.stringify(payload, null, 2));
     }
     await fsx.kvPut(LS_PREFIX + docPath, payload);

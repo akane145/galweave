@@ -261,7 +261,7 @@ export async function initOfflineFormats(options){
  hooks=options;const current=++generation;
  if(!mounted){
   const host=document.createElement('section');host.className='settings-section offline-format-section';
-  host.innerHTML=`<div class="settings-section-heading"><span class="settings-section-index">02</span><div><h4>样例格式档案</h4><p>给每种布局至少两组原文与译文样例，选中文字标明字段，程序生成可复用规则。</p></div><span class="settings-badge settings-badge--muted">自定义</span></div>
+  host.innerHTML=`<div class="settings-section-heading"><div><h4>样例格式档案</h4><p>给每种布局至少两组原文与译文样例，选中文字标明字段，程序生成可复用规则。</p></div><span class="settings-badge settings-badge--muted">自定义</span></div>
   <div class="of-profile-row">
    <div class="field of-profile-field"><label for="of-profiles">格式档案</label><select id="of-profiles"></select></div>
    <div class="of-profile-actions"><button type="button" class="toolbtn secondary" id="of-use">使用档案</button><button type="button" class="toolbtn secondary" id="of-import">导入档案</button><input id="of-file" type="file" accept=".json" hidden></div>

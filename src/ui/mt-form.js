@@ -11,7 +11,9 @@
 import * as mt from '../mt.js';
 
 function mtField(label, html, hint){
-  return '<div class="field"><label>' + label + '</label>' + html + (hint ? '<div class="hint">' + hint + '</div>' : '') + '</div>';
+  const controlId = (html.match(/id="([^"]+)"/) || [])[1];
+  const forAttr = controlId ? ' for="' + controlId + '"' : '';
+  return '<div class="field"><label' + forAttr + '>' + label + '</label>' + html + (hint ? '<div class="hint">' + hint + '</div>' : '') + '</div>';
 }
 
 function mtInput(id, value, ph){
@@ -29,7 +31,7 @@ function mtCheck(id, label, checked){
 /** 采样参数网格: [{label,id,value,min,max}] → 每参数一列 */
 function mtParams(list){
   return '<div class="mt-params">' + list.map(p =>
-    '<div class="p"><label>' + p.label + '</label>' + mtNum(p.id, p.value, p.min, p.max) + '</div>'
+    '<div class="p"><label for="' + p.id + '">' + p.label + '</label>' + mtNum(p.id, p.value, p.min, p.max) + '</div>'
   ).join('') + '</div>';
 }
 
@@ -40,7 +42,12 @@ function mtBatchFields(conf){
       '<option value="perLine"' + (conf.batchMode === 'batched' ? '' : ' selected') + '>逐行（默认 · 最稳，失败只影响该行）</option>' +
       '<option value="batched"' + (conf.batchMode === 'batched' ? ' selected' : '') + '>按批次合并请求（一次翻译多行，省往返与时间）</option>' +
     '</select>') +
-  mtField('每批行数（仅「按批次合并请求」生效）', mtNum('mtBatchSize', conf.batchSize, 2, 20));
+  mtField('每批行数（仅「按批次合并请求」生效）', mtNum('mtBatchSize', conf.batchSize, 2, 20)) +
+  // 超时覆盖"发请求 → 正文读完"整个过程。本地模型冷启动慢，默认 90 秒。
+  mtField('单次请求超时（秒）',
+    mtNum('mtTimeoutSec', Math.round((conf.timeoutMs || 90000) / 1000), 5, 600),
+    '从发请求到正文读完的总时限，默认 90 秒。本地大模型冷启动加载常需 30–60 秒，'
+      + '若经常超时（尤其首次翻译）可调大到 180–300 秒。');
 }
 
 /** 通用大模型表单（两页：连接与提示词 / 采样与选项） */
@@ -73,7 +80,8 @@ export function mtFormSakura(conf){
       '<button id="btnMtDetect" class="toolbtn secondary nowrap">检测端口</button></div>') +
     mtField('模型名（用于提示词版本自动识别，可留空）', mtInput('mtModel', conf.model, '如 sakura-qwen2.5-7b-v1.0')) +
     mtField('提示词版本（auto=按模型名自动识别）',
-      '<select id="mtPromptVersion">' + mt.SAKURA_PROMPT_VERSIONS.map(v => '<option value="' + v + '"' + (conf.promptVersion === v ? ' selected' : '') + '>' + v + '</option>').join('') + '</select>');
+      '<select id="mtPromptVersion">' + mt.SAKURA_PROMPT_VERSIONS.map(v => '<option value="' + v + '"' + (conf.promptVersion === v ? ' selected' : '') + '>' + v + '</option>').join('') + '</select>',
+      'Sakura 使用专用翻译提示词，可附带术语表；语境参考和角色人设用于通用大模型。');
   const page2 =
     mtField('采样参数', mtParams([
       { label: '温度 temperature', id: 'mtTemperature', value: conf.temperature, min: 0, max: 2 },
