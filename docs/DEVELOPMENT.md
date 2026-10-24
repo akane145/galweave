@@ -35,8 +35,9 @@ WorkBuddy 环境给 node 的 rmSync 套了 safe-delete shim，删除计数超阈
 
 源代码提交到 Git，二进制放在 GitHub Releases；不提交 node_modules、target、个人配置、真实词典、临时截图或新增真实游戏脚本。发布标签对应被测试的源码提交。
 
-发版前需同步四处版本号：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`
-（`Cargo.lock` 随构建自动更新）。三处不一致时产物版本会与预期不符。
+版本号只在对外发布时更新，不按内部任务或开发批次递增。修复更新补丁号，兼容的新功能更新次版本号；公开更新日志只列对外版本，任务细节在本地留档。
+
+发版前需同步 `package.json`、`package-lock.json` 的项目版本、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 及 `Cargo.lock` 的根项目版本，并核对安装包内部版本与发布标签一致。
 
 打包产物放入 `release-vX.Y.Z/`（该目录被 `.gitignore` 的 `release-v*/` 忽略，不入库）：
 `Galweave_X.Y.Z_x64-setup.exe`（NSIS 安装包）、`Galweave_X.Y.Z_x64.exe`（直接运行版，
@@ -139,7 +140,7 @@ UI 整改验收（2026-10-13）：不引入基于 CSS 行号或字面量总次�
 「剧场视图」已于 2026-09-19 整功能移除（见 `docs/ui-design-spec-v4.md`），本节只保留它留下的通用经验，不再有对应代码。
 
 - ⚠️ **凡是用 `getBoundingClientRect()` 量尺寸、再把结果写进 inline 样式的函数，量到 0 时不得写回**。元素被 `display:none`（或祖先被隐藏）时所有矩形都是 0，据此算出的位移是垃圾值；而 inline 样式写上去就**留在元素上**，显示态恢复后依旧生效。
-- 已踩过一次：原文行 `left` 被算成 566px，退出该显示态后原文行整体右推、超出显示边界 388px（v5.6.0 引入，v5.9.0 修复）。修法是入口跳过隐藏态，且量到 0 也不写回。
+- 已踩过一次：原文行 `left` 被算成 566px，退出该显示态后原文行整体右推、超出显示边界 388px（修复见提交 `77e78f5`）。修法是入口跳过隐藏态，且量到 0 也不写回。
 - 新增同类函数时照此办理；排查判据是"切到隐藏态 → 切回 → 看 `element.style` 有无残留"。
 - 另一条同源经验：给 body 加 class 改字号/布局后，同一任务内 `scrollHeight` 仍是旧值，需**下一帧再测一次**（`autoResize` 会量到旧字号的高度）。
 
@@ -361,7 +362,7 @@ UI 状态机的纯逻辑部分（布局/样例/标注的增删改、v2 回填、
 
 ### 追加核验（2026-09-18 提交后复查，2 条）
 
-提交 v5.8.0 后 Stop 钩子在 `dist-single/recognize.worker-DQ_yebvT.js`（**构建产物**，已在 `.gitignore:4` 忽略）第 13、19 行报"命令注入"。核验结论：**误报，与上一节同源**。
+提交 `6f7ed36` 后 Stop 钩子在 `dist-single/recognize.worker-DQ_yebvT.js`（**构建产物**，已在 `.gitignore:4` 忽略）第 13、19 行报"命令注入"。核验结论：**误报，与上一节同源**。
 
 - 第 19 行命中的是 `e.re.exec(t)`，即 `RegExp.prototype.exec`。判定依据：`grep -rn "\.exec(" src/*.js` 的 15 处调用**接收者全是正则对象**，源码中不存在 `child_process`、`execSync`、`spawnSync` 或 `shell: true`。扫描器把 `Regex.exec()` 与 `child_process.exec()` 混为一谈。
 - 该文件是 `npm run build:html` 的产物，代码即源码的压缩结果，不含额外逻辑。

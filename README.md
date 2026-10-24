@@ -1,15 +1,15 @@
 # Galweave
 
-视觉小说（galgame）日译中辅助翻译与校对工具。当前发布版本：**v5.11.1**（2026-10-25）。
+视觉小说（galgame）日译中辅助翻译与校对工具。当前发布版本：**v5.4.0**（2026-10-25）。
 
 ## 下载
 
-前往 [GitHub Releases](https://github.com/akane145/galweave/releases/tag/v5.11.1) 下载：
+前往 [GitHub Releases](https://github.com/akane145/galweave/releases/tag/v5.4.0) 下载：
 
-- Galweave_5.11.1_x64-setup.exe：Windows x64 安装版。
-- Galweave_5.11.1_x64_en-US.msi：Windows x64 MSI 安装包。
-- Galweave_5.11.1_x64.exe：直接运行版，需要 WebView2 运行时。
-- Galweave_5.11.1_browser.zip：浏览器版，解压后保留全部文件并打开 index.html。
+- Galweave_5.4.0_x64-setup.exe：Windows x64 安装版。
+- Galweave_5.4.0_x64_en-US.msi：Windows x64 MSI 安装包。
+- Galweave_5.4.0_x64.exe：直接运行版，需要 WebView2 运行时。
+- Galweave_5.4.0_browser.zip：浏览器版，解压后保留全部文件并打开 index.html。
 - SHA256SUMS.txt：下载文件的 SHA-256 校验值。
 
 ## 主要功能
