@@ -12,12 +12,12 @@
 
 | 目录 | 内容 |
 |---|---|
-| `src/` | 前端源码（56 个 .js + style.css）。纯逻辑模块不得依赖 DOM |
+| `src/` | 前端源码（61 个 .js + style.css）。纯逻辑模块不得依赖 DOM |
 | `src/workers/` | Web Worker（解析、搜索等重活，2 个 worker） |
 | `src/ui/` | 从 main.js 拆出的编排/表单模块（见 `docs/DEVELOPMENT.md` 的拆分约定） |
 | `docs/` | `DEVELOPMENT.md`（含**维护契约**：阈值/上限的约定值与改动纪律）、`USER_GUIDE.md`、`dictionary-plugins.md`（词典源格式）、`obsidian-integration.md`、`RELEASE_NOTES.md` |
-| `tests/` | node --test 单测（44 个 .test.mjs） |
-| `tasks/` | 单功能的设计与实施记录（`plan.md` + `todo.md`，完成后不删，取舍理由留档） |
+| `tests/` | node --test 单测（54 个 .test.mjs） |
+| `tasks/` | 本地设计与实施记录（`plan.md` + `todo.md`，完成后保留；不纳入 Git，长期结论整理到 `docs/`） |
 | `scripts/` | 构建 / 打包 PowerShell + mjs 脚本 |
 | `src-tauri/` | Rust 侧（target/ 为构建产物，勿提交） |
 
@@ -33,6 +33,13 @@
 
 ## 已定前提（master 答复）
 
+### Agent 模型分工（2026-10-25 用户更新）
+
+- 主模型以 GPT-6 Astra、轻度推理（`gpt-6-astra` / `low`）为默认选择，负责规划、任务拆分、关键决策、审查与最终验收。主任务的实际模型由用户在客户端选择；不得把本文约定表述为已切换运行中的模型。
+- 有明确边界的执行子任务默认交给 GPT-6.1 Sol、高度推理（`gpt-6.1-sol` / `high`），包括实现、简单命令或脚本编写、针对性测试与构建。创建子代理时显式指定模型与思考等级。此条依据用户 2026-10-25 的更新，取代此前 GPT-6 Luna 的分工，作为后续任务的持续授权。
+- 委派时明确文件范围、验收条件与必要上下文；多个执行代理不得同时修改同一文件。主模型检查实际 diff 与测试结果后再交付。
+- 不为单条琐碎命令机械创建子代理；将相关执行步骤合成有意义的子任务。子代理受阻或涉及高风险决策时由主模型接手。
+
 - **Q3 目标引擎：不做引擎预设。** 不硬编码任何具体引擎的规格常量；容量阈值一律走用户可配（对齐 `src/bytes.js` 的 `BYTE_LIMIT_DEFAULT`）。原建议书 §二.1 的引擎预设与 §二.2 的按引擎换算均作废。
 - **Q4 协作模式：单人使用。** XLIFF / PO 等多人流水线交换格式不做；`docs/obsidian-integration.md` 的"不反向覆盖脚本"单向边界保持不变。
 - **Q5 单文件行数规模：5000 行以内，多数 1000–3000。** 因此**小地图（原 E）与 Worker 扩展（原 H）整项取消** —— 该量级下收益不存在，共省 8.5 人日。若将来出现数万行单文件再按需启用。
@@ -44,7 +51,7 @@
 - **目标平台**：Windows x64（构建目标是 `nsis` + `msi`；macOS 与 Linux 未验证）
 - **代码规范工具**：**ESLint**（`eslint.config.mjs`，仅 `no-undef`(error) + `no-unused-vars`(warn)，不含格式化；`npm run lint`）。**不引入 Prettier** —— 引入会一次性重排大量既有文件、污染 `git blame`；现有约定够用
 - **测试命令**：`npm test`（= `node --test "tests/*.test.mjs"`；注意 `node --test tests/` 在 Windows 上会参数解析失败）
-- **文档分工**：`docs/` 放长期使用与维护文档；`tasks/` 放单个功能的设计与实施记录（完成后不删，取舍理由留档）
+- **文档分工**：`docs/` 放公开的长期使用与维护文档；`tasks/` 放本地设计与实施记录（完成后保留，不纳入 Git）。取消追踪只操作 Git 索引，不删除本地记录；源码、公开文档和测试不得依赖本地任务文件。
 
 ---
 

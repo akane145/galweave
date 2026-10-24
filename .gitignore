@@ -53,8 +53,11 @@ scripts/snappy_*.ps1
 .superdesign/
 .workbuddy/
 MEMORY.md
-# 注: tasks/ 已于 2026-09-18 纳入版本控制（设计/实施记录，有保留价值）。
-#     该目录只放 .md 文档；临时产物请放各自目录并被忽略，不要再整体忽略 tasks/。
+# 任务过程记录保留在本地；长期结论写入 docs/，不再上传执行日志。
+tasks/
+.codex/
+.commandcode/
+.zcodeignore
 obsidian-export.json
 test text/dc4ph/
 vscode-extension/.mimosa/
@@ -65,3 +68,19 @@ test text/
 
 # 浏览器自检产物(Playwright MCP 的快照/截图,不入库)
 .playwright-mcp/
+
+# 已归档的建议书与个人排障/临时界面验证工具（本地保留）
+Galweave_Improvement_Suggestions.md
+Galweave_改造规划.md
+scripts/check-lock.ps1
+scripts/gen-icon.mjs
+scripts/extract-ico256.mjs
+scripts/ui-shots.mjs
+scripts/ui-polish-check.mjs
+scripts/fixtures/
+
+# 当前只发布 Windows NSIS/MSI，不追踪移动端和 Store 生成图标。
+src-tauri/icons/android/
+src-tauri/icons/ios/
+src-tauri/icons/Square*Logo.png
+src-tauri/icons/StoreLogo.png

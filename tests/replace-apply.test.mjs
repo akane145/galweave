@@ -4,7 +4,7 @@
 //   src/replace-apply.js 的 buildReplacePlan / planReplaceCommit / commitReplaceEntries
 //   + src/model.js 的真实撤销栈（Node 下可直接 import）。
 // R1（只勾名字却把译文写回预览时的旧值）正是"测试自写一份提交逻辑"漏掉的缺陷，
-// 因此这里坚持走生产路径 —— 见 tasks/translation-ux-handoff/review.md。
+// 因此这里坚持走生产路径 —— 见 docs/DEVELOPMENT.md 的「全部替换」维护契约。
 //
 // 运行: node --test tests/replace-apply.test.mjs
 import { test } from 'node:test';

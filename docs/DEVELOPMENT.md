@@ -12,6 +12,8 @@
 - tests/：Node.js 纯逻辑测试。
 - scripts/：构建与验证工具。
 
+任务计划、执行清单和一次性复核记录放在本地 `tasks/`，由 `.gitignore` 排除；有长期价值的结论与使用方法整理进 `docs/`。个人 agent 配置、排障脚本、截图、真实样本与运行数据不进入源码仓库。取消追踪使用 `git rm --cached`，保留本地文件；验证构建和测试时应以 Git 中的文件为准，避免依赖被忽略的本地资料。
+
 ## 常用检查
 
 执行 npm test 运行 tests/*.test.mjs；执行 npm run lint 检查未声明变量及未使用变量。
@@ -59,7 +61,7 @@ WorkBuddy 环境给 node 的 rmSync 套了 safe-delete shim，删除计数超阈
 
 UI 视觉与交互规范（Design Tokens、三主题、字阶、热区、焦点环）的权威源是 `docs/ui-design-spec-v4.md` + `src/style.css` 头部 token 块；三主题色对比度由 `tests/contrast.test.mjs` 验证，改色必须过该测试。本表继续管阈值类契约，两处冲突时以本表为准（视觉 token 不属于阈值）。
 
-UI 整改验收（2026-10-13）：不引入基于 CSS 行号或字面量总次数的“卫生阈值”。颜色修改同时检查语义前景配对和浏览器实际计算样式；搜索/侧栏布局在 1280×800 与 960×600 验证。行号状态以 `data-state` 的四态为准，不能用 `.done` 代替已定稿。行间距保留 compact/cozy/loose = 6/12/20px，与 `renderer.js` 的 `ROW_GAP_BY_DENSITY` 同步；行内 padding/border 由现有实际测高处理，改布局后仍须检查滚动和换行。背景图变量与容量阈值不变。复核及脚本入口见 `tasks/ui-polish/review.md`、`todo.md`。
+UI 整改验收（2026-10-13）：不引入基于 CSS 行号或字面量总次数的“卫生阈值”。颜色修改同时检查语义前景配对和浏览器实际计算样式；搜索/侧栏布局在 1280×800 与 960×600 验证。行号状态以 `data-state` 的四态为准，不能用 `.done` 代替已定稿。行间距保留 compact/cozy/loose = 6/12/20px，与 `renderer.js` 的 `ROW_GAP_BY_DENSITY` 同步；行内 padding/border 由现有实际测高处理，改布局后仍须检查滚动和换行。背景图变量与容量阈值不变。长期视觉规范见 `docs/ui-design-spec-v4.md`，状态与可访问性回归见 `tests/contrast.test.mjs`、`tests/ui-a11y.test.mjs`。
 
 2026-10-14 补充：状态栏 token `--statusbar-h` 按 v4 为 32px，toast 使用它定位于底栏上方；token 必须有可解析的定义。`main.js` 在模式切换时重算主区高度，并用 ResizeObserver 观察顶栏、底栏的 border box，防止搜索换行或字体变化后主区越过窗口底部。
 

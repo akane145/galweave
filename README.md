@@ -32,6 +32,19 @@
 
 ## 开发与构建
 
+仓库保留源码、测试、长期文档和可复用工具：
+
+| 目录 | 用途 |
+|---|---|
+| `src/` | 前端源码与 Web Workers |
+| `src-tauri/` | Windows 桌面端与构建资源 |
+| `tests/` | 自动化测试 |
+| `docs/` | 使用指南、维护契约和发布说明 |
+| `scripts/` | 构建、格式工具与集成验证 |
+| `vscode-extension/` | 可单独使用的 VS Code 辅助插件 |
+
+安装包与浏览器版放在 Releases；任务过程记录、个人 agent 配置、临时截图和运行数据只保留在本地。
+
 安装支持 Vite 8 的 Node.js（建议 22.12+）、Rust stable、Windows C++ Build Tools 和 WebView2。
 
 ```sh
