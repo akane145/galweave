@@ -100,6 +100,13 @@ UI 整改验收（2026-10-13）：不引入基于 CSS 行号或字面量总次�
 - 避头尾**只检测不自动改**：折行由目标引擎决定，工作台不替引擎排版。只在**显式换行**处判断（自动折行位置看不到，报出来是噪音）。
 - 批量入口「规范化标点」走**预览→确认**：只列出真正会变的行。
 
+### 机翻控制符边界（src/universal-parser.js + src/mt.js）
+
+- 原文中的引擎控制符由 `maskProtectedTokens` 逐个编号保护，模型返回后统一还原；单行与批次均复用 `restoreProtectedTokens`，不另建一套校验。
+- 模型改写占位符的括号等外观时，只规范化能够明确对应的标记，再执行未知编号、重复和顺序检查；残损或无法对应的标记拒绝写入，不能当普通正文绕过校验。命名空间避让同时覆盖可识别的外观变体，保护原文中本来就有的占位符样式文字。
+- 保持原合同：缺失的换行类控制符可按原规则回填，命令类缺失必须失败。字面量 `\n` 是受保护的引擎标记，不能全局删除；也不能为消除可见的 GWCTRL 标记而直接丢掉其对应控制符。
+- 此轮对照 [LunaTranslator 的 Sakura 适配](https://github.com/HIllya51/LunaTranslator/blob/main/src/LunaTranslator/translator/sakura_base.py)：它将新版 Sakura 的原文与术语分开处理。本工具保留自己的脚本命令保护及严格校验，仅参考处理边界；相关回归见 `tests/universal-parser.test.mjs`、`tests/mt.test.mjs` 与 `tests/mt-sakura.test.mjs`。
+
 ### 控制符校验（src/qa.js `controlMisses`）
 
 - 机翻链路已有遮蔽/还原/严格性分级保护（`universal-parser.js` + `mt.js` 拒绝写入）；本项补的是**手动编辑**那个口子。

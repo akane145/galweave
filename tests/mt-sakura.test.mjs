@@ -71,6 +71,13 @@ test('Sakura 拒绝复述完整术语表及翻译指令模板', async () => {
   });
 });
 
+test('占位符别名：Sakura 实际调用链恢复模型改写的换行标记', async () => {
+  await withSakuraEnv(async () => jsonResponse(content('上半【GWCTRL:0】下半')), async () => {
+    const control = String.fromCharCode(92) + 'n';
+    assert.equal(await translateTextProtected('sakura', '前半' + control + '后半', null), '上半' + control + '下半');
+  });
+});
+
 test('Sakura 流式结果聚合后检查跨分片的指令标记', async () => {
   const encoder = new TextEncoder();
   const chunks = [

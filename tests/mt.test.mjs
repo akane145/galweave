@@ -118,6 +118,56 @@ test('translateTextProtected: 命令类标签丢失仍然拒绝，并指明是�
   );
 });
 
+test('占位符别名：单行换行在原位置恢复，不残留括号标记或额外尾部换行', async () => {
+  registerProvider({
+    id: 'test-control-alias-break', name: 'test', isConfigured: () => true,
+    async translate(){ return '上半【GWCTRL:0】下半'; },
+  });
+  const control = String.fromCharCode(92) + 'n';
+  assert.equal(await translateTextProtected('test-control-alias-break', '前半' + control + '后半'), '上半' + control + '下半');
+});
+
+test('占位符别名：模型改写命令占位符的括号和冒号后仍可精确恢复', async () => {
+  registerProvider({
+    id: 'test-control-alias-command', name: 'test', isConfigured: () => true,
+    async translate(){ return '甲［GWCTRL：0］乙'; },
+  });
+  assert.equal(await translateTextProtected('test-control-alias-command', 'A%p100;B'), '甲%p100;乙');
+});
+
+test('占位符别名：原文没有控制符时也拒绝模型编造的标记', async () => {
+  registerProvider({
+    id: 'test-control-alias-invented', name: 'test', isConfigured: () => true,
+    async translate(){ return '译文【GWCTRL:0】'; },
+  });
+  await assert.rejects(() => translateTextProtected('test-control-alias-invented', '原文'), /已拒绝写入/);
+});
+
+test('占位符别名：原样标记与括号变体重复时拒绝整行', async () => {
+  registerProvider({
+    id: 'test-control-alias-duplicate', name: 'test', isConfigured: () => true,
+    async translate(){ return '译文⟦GWCTRL:0⟧【GWCTRL:0】'; },
+  });
+  await assert.rejects(() => translateTextProtected('test-control-alias-duplicate', '原文[r]'), /重复/);
+});
+
+test('占位符别名：批次逐行恢复各自的控制符', async () => {
+  registerProvider({
+    id: 'test-control-alias-batch', name: 'test', isConfigured: () => true,
+    async translate(){ return '1. 甲【GWCTRL:0】乙\n2. 丙［GWCTRL：0］丁'; },
+  });
+  const control = String.fromCharCode(92) + 'n';
+  assert.deepEqual(await translateLinesBatched('test-control-alias-batch', ['A' + control + 'B', 'C[np]D']), ['甲' + control + '乙', '丙[np]丁']);
+});
+
+test('占位符别名：批次中出现未知编号时返回失败供调用方退回逐行', async () => {
+  registerProvider({
+    id: 'test-control-alias-batch-unknown', name: 'test', isConfigured: () => true,
+    async translate(){ return '1. 甲【GWCTRL:0】\n2. 乙【GWCTRL:99】'; },
+  });
+  assert.equal(await translateLinesBatched('test-control-alias-batch-unknown', ['A[r]', 'B[r]']), null);
+});
+
 /* ---------------- 控制字符清洗（传输边界，双向） ---------------- */
 
 test('stripControlChars: 删换行/制表/零宽/BOM/行分隔符/替换符，不碰引擎标签与占位符', () => {

@@ -238,6 +238,21 @@ function parseMirrorDocument(source, lines, mirrorShape, options){
 
 const TOKEN_RE = /(<r>|\[(?:n|r|np)\]|%(?:p(?:-?\d+)?|f[^;\r\n]*);|\\{1,2}n|\[[^\]\r\n,]+,\d+\])/giu;
 
+function escapePattern(value){
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function protectedNamespacePattern(namespace){
+  // 下划线属于命名空间，GWCTRL 与避让后的 GWCTRL_ 不可混淆。
+  return new RegExp(escapePattern(namespace) + '(?!_)', 'iu');
+}
+
+function protectedPlaceholderPattern(namespace){
+  const body = '\\s*' + escapePattern(namespace) + '\\s*[:：]\\s*([0-9]+)\\s*';
+  const pairs = [['⟦', '⟧'], ['【', '】'], ['[', ']'], ['［', '］']];
+  return new RegExp(pairs.map(([open, close]) => escapePattern(open) + body + escapePattern(close)).join('|'), 'giu');
+}
+
 function tokenRole(value){
   if (value === '<r>' || /^\[(?:n|r)\]$/iu.test(value) || /^\\{1,2}n$/u.test(value)) return 'line-break';
   if (/^\[np\]$/iu.test(value)) return 'wait';
@@ -272,7 +287,7 @@ export function maskProtectedTokens(text){
   const source = typeof text === 'string' ? text : '';
   const controls = tokenizeInline(source).filter(token => token.protected);
   let namespace = 'GWCTRL';
-  while (source.includes(`⟦${namespace}:`)) namespace += '_';
+  while (protectedNamespacePattern(namespace).test(source)) namespace += '_';
   const tokens = [];
   let cursor = 0;
   let masked = '';
@@ -325,13 +340,22 @@ function tokenError(code, token){
  *     理由：译文断行本来就要随中文长度重排，译者常需要挪动断点，不该因此整行作废。
  */
 export function restoreProtectedTokens(translatedText, mask){
-  const text = typeof translatedText === 'string' ? translatedText : '';
+  let text = typeof translatedText === 'string' ? translatedText : '';
   if (!mask || !Array.isArray(mask.tokens) || typeof mask.namespace !== 'string'){
     return { ok: false, text: null, errors: [{ code: 'invalid-mask', placeholder: '' }] };
   }
   const errors = [];
   const expected = new Set(mask.tokens.map(token => token.placeholder));
-  const placeholderRe = new RegExp(`⟦${mask.namespace}:\\d+⟧`, 'gu');
+  // 仅接受成对括号、冒号和标记内部空白/大小写变化；不改正文或猜测编号。
+  text = text.replace(protectedPlaceholderPattern(mask.namespace), (_, ...captures) => {
+    const id = captures.slice(0, 4).find(value => value !== undefined);
+    return '⟦' + mask.namespace + ':' + id + '⟧';
+  });
+  const placeholderRe = new RegExp('⟦' + escapePattern(mask.namespace) + ':\\d+⟧', 'gu');
+  // 完整标记之外仍出现当前命名空间，表示残损标记，不能当成“缺失换行”补回。
+  if (protectedNamespacePattern(mask.namespace).test(text.replace(placeholderRe, ''))){
+    errors.push({ code: 'unknown', placeholder: mask.namespace });
+  }
   for (const value of text.match(placeholderRe) || []){
     if (!expected.has(value) && !errors.some(error => error.code === 'unknown' && error.placeholder === value)){
       errors.push({ code: 'unknown', placeholder: value });

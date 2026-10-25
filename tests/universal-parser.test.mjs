@@ -199,6 +199,98 @@ test('换行类丢失：就近回填到下一个存活占位符之前 / 末尾',
   });
 });
 
+test('占位符别名：模型改写括号时原位恢复字面换行，不残留标记或追加断行', () => {
+  const lineBreak = String.fromCharCode(92) + 'n';
+  const masked = maskProtectedTokens('前半' + lineBreak + '后半');
+  for (const marker of ['【GWCTRL:0】', '[GWCTRL:0]', '［GWCTRL：0］', '⟦gwctrl：0⟧', '【 gWcTrL : 0 】']){
+    assert.deepEqual(restoreProtectedTokens('上半' + marker + '下半', masked), {
+      ok: true, text: '上半' + lineBreak + '下半', errors: [],
+    }, marker);
+  }
+});
+
+test('占位符别名：相邻重复控制符与命令保持各自编号和原值', () => {
+  const masked = maskProtectedTokens('前[r][r][np]%p100;后');
+  assert.deepEqual(restoreProtectedTokens('上【GWCTRL:0】[GWCTRL:1]［GWCTRL：2］【gwctrl:3】下', masked), {
+    ok: true, text: '上[r][r][np]%p100;下', errors: [],
+  });
+});
+
+test('占位符别名：规范化后仍拒绝重复、换序和未知编号，不猜测编号', () => {
+  const masked = maskProtectedTokens('A[r]B[np]C');
+  const cases = [
+    ['duplicate', masked.tokens[0].placeholder + '【GWCTRL:0】[GWCTRL:1]'],
+    ['duplicate', '[GWCTRL:0]【GWCTRL:0】［GWCTRL：1］'],
+    ['reordered', '【GWCTRL:1】[GWCTRL:0]'],
+    ['unknown', '【GWCTRL:0】[GWCTRL:1]［GWCTRL：77］'],
+    ['unknown', '【GWCTRL:00】[GWCTRL:1]'],
+  ];
+  for (const [code, text] of cases){
+    const restored = restoreProtectedTokens(text, masked);
+    assert.equal(restored.ok, false, text);
+    assert.equal(restored.text, null);
+    assert.ok(restored.errors.some(error => error.code === code), text);
+  }
+});
+
+test('占位符别名：残损、错配括号或不支持编号的当前命名空间标记拒绝写入', () => {
+  const masked = maskProtectedTokens('前[n]后');
+  for (const marker of [
+    '【GWCTRL:0', 'GWCTRL:0】', '【GWCTRL：】', '【GWCTRL:zero】',
+    '【GWCTRL:0]', '【GWCTRL:０】', '⟦GWCTRL：0', '[GWCTRL:0', '【GWCTRL0】', '【GWCTRL】',
+  ]){
+    const restored = restoreProtectedTokens('上' + marker + '下', masked);
+    assert.equal(restored.ok, false, marker);
+    assert.equal(restored.text, null);
+    assert.ok(restored.errors.some(error => error.code === 'unknown'), marker);
+  }
+});
+
+test('占位符别名：原文没有控制符也拒绝模型编造的标记', () => {
+  const masked = maskProtectedTokens('普通原文');
+  for (const marker of ['⟦GWCTRL:0⟧', '【GWCTRL:0】', '[gwctrl:0]', '［ GWCTRL ： 0 ］', '【GWCTRL:']){
+    const restored = restoreProtectedTokens('译文' + marker, masked);
+    assert.equal(restored.ok, false, marker);
+    assert.ok(restored.errors.some(error => error.code === 'unknown'), marker);
+  }
+});
+
+test('占位符别名：源文合法标记按大小写、空格和括号避让命名空间并原样保留', () => {
+  for (const literal of ['⟦GWCTRL:0⟧', '【GWCTRL:0】', '[gwctrl:0]', '［ GWCTRL ： 0 ］', '【 gWcTrL : 0 】']){
+    const masked = maskProtectedTokens(literal + '[n]');
+    assert.equal(masked.namespace, 'GWCTRL_', literal);
+    const translated = literal + '【 gwctrl_ ： 0 】';
+    assert.deepEqual(restoreProtectedTokens(translated, masked), {
+      ok: true, text: literal + '[n]', errors: [],
+    }, literal);
+    const plain = maskProtectedTokens(literal);
+    assert.deepEqual(restoreProtectedTokens(literal, plain), {
+      ok: true, text: literal, errors: [],
+    }, literal);
+  }
+  const literal = '【GWCTRL:0】［gwctrl_：0］';
+  const masked = maskProtectedTokens(literal + '[n]');
+  assert.equal(masked.namespace, 'GWCTRL__');
+  assert.equal(restoreProtectedTokens(literal + '[GWCTRL__:0]', masked).text, literal + '[n]');
+});
+
+test('占位符别名：避让后的当前命名空间同样拒绝未知与残损标记', () => {
+  const masked = maskProtectedTokens('【GWCTRL:0】[n]');
+  for (const marker of ['【GWCTRL_:77】', '［gwctrl_：］', 'GWCTRL_:0】']){
+    const restored = restoreProtectedTokens('【GWCTRL:0】' + marker, masked);
+    assert.equal(restored.ok, false, marker);
+    assert.ok(restored.errors.some(error => error.code === 'unknown'), marker);
+  }
+});
+
+test('占位符别名：只规范化标记，不改变全角正文和普通括号', () => {
+  const masked = maskProtectedTokens('原文[n]');
+  const restored = restoreProtectedTokens('ＡＢＣ：１２３【正文】［保留］【 gwctrl ： 0 】', masked);
+  assert.deepEqual(restored, {
+    ok: true, text: 'ＡＢＣ：１２３【正文】［保留］[n]', errors: [],
+  });
+});
+
 test('换行类丢失可回填，但重复/换序仍然失败（不放过真正的破坏）', () => {
   const masked = maskProtectedTokens('A[r]B');
   const ph = masked.tokens[0].placeholder;
